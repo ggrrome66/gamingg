@@ -18,14 +18,14 @@ use std::time::{Duration, Instant};
 
 use controller::{FlyController, WalkController};
 use hud::{HudState, MenuAction, Menus, Screen, SimStats, Target};
-use interaction::{hotbar_slot, Action, Hotbar};
+use interaction::{hotbar_slot, Action};
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
 use vx_platform::InputState;
 use vx_render::headless::{capture_frame, CAPTURE_FORMAT};
 use vx_render::{Camera, GpuContext, Renderer, WindowSurface};
 use vx_save::WorldStore;
-use vx_world::{Body, TickClock, World, TICKS_PER_SECOND};
+use vx_world::{Body, Inventory, TickClock, World, HOTBAR_SLOTS, TICKS_PER_SECOND};
 
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -63,6 +63,7 @@ impl UiMode {
             "none" => Ok(UiMode::None),
             "hud" => Ok(UiMode::Hud),
             "main" => Ok(UiMode::Menu(Screen::Main)),
+            "inventory" => Ok(UiMode::Menu(Screen::Inventory)),
             "controls" => Ok(UiMode::Menu(Screen::Controls)),
             "world" => Ok(UiMode::Menu(Screen::World)),
             other => Err(format!(
@@ -226,6 +227,35 @@ fn build_overlay(
     ui
 }
 
+/// The occupied-slot labels for the inventory screen.
+fn carried_lines(inventory: &Inventory, world: &World) -> Vec<String> {
+    inventory
+        .occupied()
+        .map(|(_, stack)| {
+            let name = world
+                .items()
+                .get(stack.item)
+                .map_or("?", |def| def.display_name.as_str())
+                .to_uppercase();
+            format!("{name} x{}", stack.count)
+        })
+        .collect()
+}
+
+/// Recipe labels paired with whether they can be made right now.
+fn recipe_lines(inventory: &Inventory, world: &World) -> Vec<(String, bool)> {
+    world
+        .recipes()
+        .iter()
+        .map(|recipe| {
+            (
+                vx_world::recipe_label(recipe, world.items()),
+                recipe.craftable_from(inventory),
+            )
+        })
+        .collect()
+}
+
 /// Describe what the camera is looking at, for the HUD.
 fn describe_target(world: &World, camera: &Camera) -> Option<Target> {
     let hit = interaction::target(world, camera)?;
@@ -251,7 +281,14 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     camera.aspect = width as f32 / height as f32;
     renderer.update_camera(&context.queue, &camera);
 
-    let hotbar = Hotbar::from_registry(world.registry());
+    // A staged inventory, so screenshots show the systems carrying data:
+    // stacks on the hotbar, and a lamp recipe that is actually craftable.
+    let mut inventory = Inventory::player();
+    let held = *world.game_items();
+    inventory.insert(held.stone, 32, world.items());
+    inventory.insert(held.dirt, 16, world.items());
+    inventory.insert(held.coal, 9, world.items());
+    inventory.insert(held.raw_iron, 3, world.items());
     let target = describe_target(&world, &camera);
     renderer.set_selection(&context.queue, target.as_ref().map(|t| t.position));
 
@@ -269,9 +306,11 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             chunks_meshed: renderer.loaded_chunk_count(),
             triangles: renderer.triangle_count(),
             seed: world.seed(),
-            hotbar: hotbar.names(world.registry()),
-            selected_slot: hotbar.selected_slot(),
+            hotbar: interaction::hotbar_labels(&inventory, world.items()),
+            selected_slot: 0,
             target,
+            inventory_lines: carried_lines(&inventory, &world),
+            recipes: recipe_lines(&inventory, &world),
             mode: "FLY",
             sim: SimStats::default(),
         };
@@ -333,11 +372,13 @@ struct Active {
     world: World,
     streamer: ChunkStreamer,
     camera: Camera,
-    hotbar: Hotbar,
     menus: Menus,
     /// The player's physical presence while walking.
     body: Body,
     mode: MoveMode,
+    inventory: Inventory,
+    /// Which hotbar slot is in hand.
+    selected_slot: usize,
     /// `None` when playing without a world on disk.
     store: Option<WorldStore>,
 }
@@ -440,7 +481,25 @@ impl App {
                 active.menus.move_selection(1);
                 None
             }
-            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => active.menus.activate(),
+            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
+                if active.menus.screen() == Screen::Inventory {
+                    // Enter crafts the highlighted recipe in place; the
+                    // screen stays open so batches are one keypress each.
+                    let recipes = active.world.recipes();
+                    if let Some(recipe) = recipes.get(active.menus.selected()) {
+                        let items = active.world.items().clone();
+                        recipe.craft(&mut active.inventory, &items);
+                    }
+                    None
+                } else {
+                    active.menus.activate()
+                }
+            }
+            // E closes the inventory it opened.
+            KeyCode::KeyE if active.menus.screen() == Screen::Inventory => {
+                active.menus.back();
+                None
+            }
             _ => None,
         };
 
@@ -508,9 +567,14 @@ impl App {
     /// the next frame; nothing here touches the renderer directly.
     fn edit(&mut self, action: Action) {
         let Some(active) = &mut self.active else { return };
-        let Some(holding) = active.hotbar.selected() else { return };
 
-        match interaction::apply(&mut active.world, &active.camera, action, holding) {
+        match interaction::apply(
+            &mut active.world,
+            &active.camera,
+            action,
+            &mut active.inventory,
+            active.selected_slot,
+        ) {
             Ok(pos) => log::debug!("{action:?} at {pos:?}"),
             // Refusals are ordinary play: clicking at the sky, or at bedrock.
             Err(error) => log::debug!("{action:?} refused: {error}"),
@@ -589,9 +653,11 @@ impl App {
             chunks_meshed: active.streamer.meshed_count(),
             triangles: active.renderer.triangle_count(),
             seed: active.world.seed(),
-            hotbar: active.hotbar.names(active.world.registry()),
-            selected_slot: active.hotbar.selected_slot(),
+            hotbar: interaction::hotbar_labels(&active.inventory, active.world.items()),
+            selected_slot: active.selected_slot,
             target,
+            inventory_lines: carried_lines(&active.inventory, &active.world),
+            recipes: recipe_lines(&active.inventory, &active.world),
             mode: match active.mode {
                 MoveMode::Walk => "WALK",
                 MoveMode::Fly => "FLY",
@@ -677,10 +743,12 @@ impl App {
             // The readout moved on-screen; the title just names the window and
             // what is held, for anyone reading a taskbar.
             active.window.set_title(&format!(
-                "gamingg - {} ({} of {})",
-                active.hotbar.selected_name(active.world.registry()),
-                active.hotbar.selected_slot() + 1,
-                active.hotbar.len(),
+                "gamingg - holding {}",
+                interaction::hotbar_label(
+                    &active.inventory,
+                    active.world.items(),
+                    active.selected_slot,
+                ),
             ));
         }
         self.frames = 0;
@@ -746,7 +814,6 @@ impl ApplicationHandler for App {
 
         let seed = store.as_ref().map_or(self.seed, |store| store.seed());
         let world = World::new(seed);
-        let hotbar = Hotbar::from_registry(world.registry());
         let streamer = ChunkStreamer::new(StreamingConfig::default());
         let camera = Camera {
             position: glam::Vec3::new(0.0, 90.0, 0.0),
@@ -763,7 +830,9 @@ impl ApplicationHandler for App {
             world,
             streamer,
             camera,
-            hotbar,
+            // Empty on purpose: mining is how it fills.
+            inventory: Inventory::player(),
+            selected_slot: 0,
             menus: Menus::default(),
             // Feet on the ground under the camera; corrected against the
             // real surface a few lines down once the spawn chunk is loaded.
@@ -855,9 +924,16 @@ impl ApplicationHandler for App {
                                 };
                             }
                         }
+                        if code == KeyCode::KeyE {
+                            self.set_capture(false);
+                            if let Some(active) = &mut self.active {
+                                active.menus.open_inventory(active.world.recipes().len());
+                            }
+                            return;
+                        }
                         if let Some(slot) = hotbar_slot(code) {
                             if let Some(active) = &mut self.active {
-                                active.hotbar.select(slot);
+                                active.selected_slot = slot;
                             }
                         }
                         self.input.press(code);
@@ -903,7 +979,10 @@ impl ApplicationHandler for App {
                 if scrolled != 0.0 {
                     if let Some(active) = &mut self.active {
                         // Scrolling up should advance through the hotbar.
-                        active.hotbar.cycle(if scrolled > 0.0 { 1 } else { -1 });
+                        let step: i32 = if scrolled > 0.0 { 1 } else { -1 };
+                        active.selected_slot = (active.selected_slot as i32 + step)
+                            .rem_euclid(HOTBAR_SLOTS as i32)
+                            as usize;
                     }
                 }
             }

@@ -11,6 +11,8 @@ use vx_core::{BlockId, BlockPos, BlockRegistry, ChunkPos, Face, CHUNK_HEIGHT, CH
 
 use crate::chunk::{BlockView, Chunk};
 use crate::gen::{TerrainBlocks, TerrainGenerator};
+use crate::inventory::{ItemStack, Recipe};
+use crate::items::GameItems;
 use crate::light::{Channel, LightQueue, MAX_LIGHT, RELIGHT_BUDGET};
 use crate::raycast::{cast_ray, RayHit};
 use crate::tick::{TickLimits, TickScheduler};
@@ -56,11 +58,16 @@ pub enum EditError {
     /// Something solid is already there.
     #[error("that space is occupied")]
     Occupied,
+    /// The selected slot is empty, or holds something with no block form.
+    #[error("nothing to place")]
+    NothingHeld,
 }
 
 /// Loaded chunks plus the generator that fills in missing ones.
 pub struct World {
     registry: BlockRegistry,
+    items: vx_core::ItemRegistry,
+    game_items: GameItems,
     generator: TerrainGenerator,
     chunks: HashMap<ChunkPos, Chunk>,
     scheduler: TickScheduler,
@@ -79,8 +86,12 @@ impl World {
     pub fn new(seed: u64) -> Self {
         let mut registry = BlockRegistry::new();
         let blocks = TerrainBlocks::register_builtins(&mut registry);
+        let mut items = vx_core::ItemRegistry::new();
+        let game_items = GameItems::register_builtins(&mut items, &blocks);
         World {
             registry,
+            items,
+            game_items,
             generator: TerrainGenerator::new(seed, blocks),
             chunks: HashMap::new(),
             scheduler: TickScheduler::new(),
@@ -105,6 +116,24 @@ impl World {
 
     pub fn registry(&self) -> &BlockRegistry {
         &self.registry
+    }
+
+    pub fn items(&self) -> &vx_core::ItemRegistry {
+        &self.items
+    }
+
+    pub fn game_items(&self) -> &GameItems {
+        &self.game_items
+    }
+
+    /// What breaking `block` yields.
+    pub fn drop_for(&self, block: vx_core::BlockId) -> Option<ItemStack> {
+        self.game_items.drop_for(block, &self.generator.blocks())
+    }
+
+    /// The recipes this world offers.
+    pub fn recipes(&self) -> Vec<Recipe> {
+        self.game_items.recipes()
     }
 
     pub fn generator(&self) -> &TerrainGenerator {

@@ -7,6 +7,8 @@
 pub mod body;
 pub mod chunk;
 pub mod gen;
+pub mod inventory;
+pub mod items;
 pub mod light;
 pub mod noise;
 pub mod raycast;
@@ -17,6 +19,8 @@ pub mod world;
 pub use body::{Body, StepResult};
 pub use chunk::{BlockView, Chunk, SoloChunkView};
 pub use gen::{TerrainBlocks, TerrainGenerator, SEA_LEVEL};
+pub use inventory::{Inventory, ItemStack, Recipe, HOTBAR_SLOTS, PLAYER_SLOTS};
+pub use items::{recipe_label, GameItems};
 pub use light::{Channel, LightGrid, LightQueue, MAX_LIGHT, RELIGHT_BUDGET};
 pub use noise::Fbm;
 pub use raycast::{cast_ray, RayHit};

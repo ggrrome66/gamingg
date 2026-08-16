@@ -121,7 +121,7 @@ impl BlockDef {
 }
 
 /// Derive `engine:oak_log` -> `Oak Log` so mods get something reasonable for free.
-fn default_display_name(name: &str) -> String {
+pub(crate) fn default_display_name(name: &str) -> String {
     let bare = name.split_once(':').map_or(name, |(_, rest)| rest);
     let mut out = String::with_capacity(bare.len());
     for (i, word) in bare.split('_').filter(|w| !w.is_empty()).enumerate() {

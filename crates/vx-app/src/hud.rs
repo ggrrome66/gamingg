@@ -45,6 +45,10 @@ pub struct HudState {
     pub hotbar: Vec<String>,
     pub selected_slot: usize,
     pub target: Option<Target>,
+    /// Occupied inventory slots as display labels.
+    pub inventory_lines: Vec<String>,
+    /// Recipe labels, paired with whether they are currently craftable.
+    pub recipes: Vec<(String, bool)>,
     /// "WALK" or "FLY", for the status block.
     pub mode: &'static str,
     /// Simulation counters. These exist to make the engine's resource
@@ -84,6 +88,8 @@ pub enum Screen {
     Main,
     Controls,
     World,
+    /// Carried items and the crafting list.
+    Inventory,
 }
 
 /// What activating a menu entry asked for.
@@ -100,6 +106,9 @@ const MAIN_ITEMS: [&str; 4] = ["RESUME", "CONTROLS", "WORLD DATA", "DISCONNECT"]
 pub struct Menus {
     screen: Screen,
     selected: usize,
+    /// Entries on the current screen when they are not the static list —
+    /// the recipe count, for the inventory screen.
+    dynamic_count: usize,
 }
 
 impl Default for Menus {
@@ -107,6 +116,7 @@ impl Default for Menus {
         Menus {
             screen: Screen::Playing,
             selected: 0,
+            dynamic_count: 0,
         }
     }
 }
@@ -142,6 +152,13 @@ impl Menus {
         self.selected = 0;
     }
 
+    /// Open the inventory screen, with `recipe_count` selectable entries.
+    pub fn open_inventory(&mut self, recipe_count: usize) {
+        self.screen = Screen::Inventory;
+        self.selected = 0;
+        self.dynamic_count = recipe_count;
+    }
+
     /// Entries on the current screen. Sub-screens are read-only, so they have
     /// none.
     pub fn items(&self) -> &'static [&'static str] {
@@ -153,7 +170,10 @@ impl Menus {
 
     /// Move the highlight, wrapping at both ends.
     pub fn move_selection(&mut self, delta: i32) {
-        let count = self.items().len();
+        let count = match self.screen {
+            Screen::Inventory => self.dynamic_count,
+            _ => self.items().len(),
+        };
         if count == 0 {
             return;
         }
@@ -180,6 +200,8 @@ impl Menus {
                 Some("DISCONNECT") => Some(MenuAction::Quit),
                 _ => None,
             },
+            // Crafting is handled by the app, which owns the inventory.
+            Screen::Inventory => None,
             // A sub-screen has nothing to activate; treat it as "go back".
             Screen::Controls | Screen::World => {
                 self.back();
@@ -190,8 +212,10 @@ impl Menus {
     }
 
     /// Step back one level: sub-screen to main menu, main menu to the world.
+    /// The inventory is not part of the pause menu, so it closes outright.
     pub fn back(&mut self) {
         match self.screen {
+            Screen::Inventory => self.close(),
             Screen::Controls | Screen::World => {
                 self.screen = Screen::Main;
                 self.selected = 0;
@@ -395,12 +419,16 @@ pub fn draw_menu(ui: &mut OverlayBuilder, menus: &Menus, state: &HudState) {
         Screen::Main => draw_main_items(ui, menus, inner_x, y, panel_w - 12.0 * scale),
         Screen::Controls => draw_controls(ui, inner_x, y),
         Screen::World => draw_world(ui, inner_x, y, state),
+        Screen::Inventory => {
+            draw_inventory(ui, menus, state, inner_x, y, panel_w - 12.0 * scale)
+        }
         Screen::Playing => {}
     }
 
     // Footer hint, pinned to the bottom of the panel.
     let footer = match menus.screen() {
         Screen::Main => "[W/S] MOVE   [ENTER] EXEC   [ESC] RESUME",
+        Screen::Inventory => "[W/S] PICK   [ENTER] MAKE   [E] CLOSE",
         _ => "[ESC] BACK",
     };
     // Clear of the double border, not tucked under it.
@@ -410,6 +438,56 @@ pub fn draw_menu(ui: &mut OverlayBuilder, menus: &Menus, state: &HudState) {
         footer,
         DIM,
     );
+}
+
+/// Carried stacks, then the crafting list with its selection bar.
+fn draw_inventory(
+    ui: &mut OverlayBuilder,
+    menus: &Menus,
+    state: &HudState,
+    x: f32,
+    mut y: f32,
+    w: f32,
+) {
+    let scale = ui.scale();
+    let line = ui.line_height();
+
+    ui.text(x, y, "CARRYING", DIM);
+    y += line * 1.3;
+
+    if state.inventory_lines.is_empty() {
+        ui.text(x + 3.0 * scale, y, "NOTHING. GO DIG.", DIM);
+        y += line;
+    }
+    // Two columns, so a fuller inventory stays inside the panel.
+    let column_rows = 6;
+    for (index, label) in state.inventory_lines.iter().take(column_rows * 2).enumerate() {
+        let column = (index / column_rows) as f32;
+        let row = (index % column_rows) as f32;
+        ui.text(x + 3.0 * scale + column * (w / 2.0), y + row * line, label, GREEN);
+    }
+    if !state.inventory_lines.is_empty() {
+        y += line * column_rows.min(state.inventory_lines.len()) as f32;
+    }
+
+    y += line * 0.6;
+    ui.rect(x, y, w, scale, DIM);
+    y += line;
+
+    ui.text(x, y, "FABRICATE", DIM);
+    y += line * 1.3;
+
+    for (index, (label, craftable)) in state.recipes.iter().enumerate() {
+        let held = index == menus.selected();
+        if held {
+            ui.rect(x, y - scale, w, line, if *craftable { GREEN } else { DIM });
+            ui.text(x + 3.0 * scale, y, &format!("> {label}"), INVERSE);
+        } else {
+            let colour = if *craftable { GREEN } else { DIM };
+            ui.text(x + 3.0 * scale, y, &format!("  {label}"), colour);
+        }
+        y += line * 1.4;
+    }
 }
 
 fn draw_main_items(ui: &mut OverlayBuilder, menus: &Menus, x: f32, mut y: f32, w: f32) {
@@ -490,6 +568,8 @@ mod tests {
             hotbar: vec!["STONE".into(), "DIRT".into(), "GRASS".into()],
             selected_slot: 0,
             target: None,
+            inventory_lines: vec!["STONE x12".into()],
+            recipes: vec![("3 STONE + 1 COAL = 1 LAMP".into(), true)],
             mode: "WALK",
             sim: SimStats::default(),
         }
@@ -641,7 +721,7 @@ mod tests {
 
     #[test]
     fn every_menu_screen_draws_and_stays_on_screen() {
-        for screen in [Screen::Main, Screen::Controls, Screen::World] {
+        for screen in [Screen::Main, Screen::Controls, Screen::World, Screen::Inventory] {
             let mut menus = Menus::default();
             menus.open();
             menus.screen = screen;

@@ -7,10 +7,12 @@
 
 pub mod block;
 pub mod event;
+pub mod item;
 pub mod face;
 pub mod pos;
 
 pub use block::{BlockDef, BlockId, BlockRegistry, RegistryError};
 pub use event::{Cancellable, Event, EventBus, Priority, PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_NORMAL};
 pub use face::Face;
+pub use item::{ItemDef, ItemId, ItemRegistry, ItemRegistryError};
 pub use pos::{BlockPos, ChunkPos, LocalPos, CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_VOLUME};

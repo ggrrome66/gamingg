@@ -18,7 +18,8 @@ art exists.
 ## Status
 
 Milestone 1 is complete: the world generates, meshes, streams and renders, and
-there is a binary you can walk, jump and build in, with flight one key away.
+there is a binary you can walk, jump, mine, craft and build in, with flight
+one key away.
 
 | Crate | What it does | State |
 |---|---|---|
@@ -65,6 +66,13 @@ foundation is solid rather than being designed around up front.
   until its neighbour streams in.
 - There is no backup or rollback. The atomic rename means a crash cannot leave
   a half-written region, but nothing keeps the previous version of one.
+- A full inventory loses the drop when you mine. There are no dropped-item
+  entities yet for it to fall into, and refusing the break would trap the
+  player in a hole they cannot dig out of.
+- The inventory cannot be rearranged: stacks sit where insertion put them,
+  and there is no way to move an item into a specific hotbar slot.
+- Nothing persists the inventory yet: quit and rejoin starts you empty again.
+  It needs a player-data section in the save, which is a format bump.
 - Walking cannot step up a full block automatically; jumping is the mechanism.
   There are no stairs or slabs yet for a lower step to matter.
 - Fall damage does not exist, so the punishment for a long drop is the climb
@@ -198,6 +206,15 @@ depth-precision noise of the face they lie on, and they break into dashes at
 distance. Biasing the two passes differently would stop them being complements
 and put a double-drawn band along every edge.
 
+**Inventory arithmetic is conservation law first.** Fixed slots that never
+grow, stacks that cannot pass their ceiling, all-or-nothing removal so nothing
+can be half-paid, and inserts that return their overflow instead of vanishing
+it. Crafting checks that the output fits **before** consuming the inputs —
+checking after would need the ingredients handed back on failure, and any bug
+in that hand-back is an item dupe or an item shredder. The refusal is
+conservative: a craft that would only fit in the space its own inputs free is
+refused, costing a rare retry to make the half-done state unrepresentable.
+
 **Player collision is axis-separated AABB sweeps, substepped.** Each step
 resolves y before x and z, so landing happens before sliding can clip a block
 corner. No single substep moves further than a fraction of a block, which is
@@ -238,7 +255,12 @@ different seed would seam against whatever is already saved.
 
 Controls: `WASD` to move, `Space` to jump, `Left Ctrl` to sprint, click to
 capture the mouse for looking around. `F` switches between walking and flying;
-in flight, `Space`/`Left Shift` move up and down. `Escape` opens the menu.
+in flight, `Space`/`Left Shift` move up and down. `E` opens the inventory and
+crafting screen; `Escape` opens the menu.
+
+You start with nothing: mining fills the inventory, placing drains the held
+hotbar stack, and ores drop their mineral rather than themselves. Lamps exist
+only through crafting — three stone and a coal.
 
 Once the mouse is captured, **left click breaks** the block you are looking at
 and **right click places** the held one against the face you are pointing at.
