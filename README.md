@@ -18,7 +18,7 @@ art exists.
 ## Status
 
 Milestone 1 is complete: the world generates, meshes, streams and renders, and
-there is a binary you can fly around in.
+there is a binary you can fly around in and build in.
 
 | Crate | What it does | State |
 |---|---|---|
@@ -27,7 +27,7 @@ there is a binary you can fly around in.
 | `vx-mesh` | Greedy meshing | Done |
 | `vx-render` | wgpu renderer, camera, tile textures, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
-| `vx-app` | Window, fly controls, chunk streaming, `gamingg` binary | Done |
+| `vx-app` | Window, fly controls, chunk streaming, building, `gamingg` binary | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | M3 |
 | `vx-steam` | Steam Workshop mod source | M4 |
 
@@ -39,7 +39,14 @@ there is a binary you can fly around in.
   translucent block; looks wrong the moment two transparent surfaces overlap.
 - Chunks are edited and meshed on the main thread. Meshing is throttled per
   frame to hide it, but it belongs on a worker pool.
-- No block placement or breaking yet, and nothing persists to disk.
+- Nothing persists. Edits live in the loaded chunk and are lost as soon as it
+  unloads, so flying out past the render distance and back regenerates fresh
+  terrain over whatever you built.
+- There is no crosshair and no highlight on the targeted block, so aiming is
+  guesswork at anything but point-blank range. Both want a renderer pass that
+  does not exist yet.
+- Breaking is instant and reach is a flat 6 blocks. `BlockDef::hardness` is
+  respected only as breakable/unbreakable; nothing consumes the value itself.
 
 ## Design notes
 
@@ -60,6 +67,13 @@ namespaced string name (`engine:stone`), never the numeric id.
 **All `BlockView` coordinates are absolute world coordinates**, never
 chunk-local. Mixing the two makes geometry silently vanish.
 
+**Block picking walks the voxel grid, it does not sample along the ray.**
+Marching in fixed steps and testing each point either tunnels through blocks
+met at an angle or wastes most of its samples; `vx-world::raycast` uses a grid
+traversal that visits every voxel the ray touches, in order, and no others. It
+reports the face it entered through, which is what makes "place against the
+side you clicked" land outside the block rather than inside it.
+
 **Worldgen is a pure function of `(seed, position)`.** It uses an integer hash
 rather than a seeded RNG, so there is no sequence state to desynchronise:
 chunks can generate in parallel in any order, and a saved world regenerates
@@ -79,6 +93,12 @@ cargo run --release -p vx-app          # opens a window
 Controls: `WASD` to move, `Space`/`Left Shift` for up and down, `Left Ctrl` to
 sprint, click to capture the mouse for looking around, `Escape` to release it.
 
+Once the mouse is captured, **left click breaks** the block you are looking at
+and **right click places** the held one against the face you are pointing at.
+Number keys and the scroll wheel change what you are holding; the title bar
+shows it. The first click after `Escape` only re-captures the pointer — it does
+not also dig.
+
 Running windowed needs a Vulkan loader and drivers plus X11 and/or Wayland
 client libraries.
 
@@ -96,8 +116,28 @@ software Vulkan driver, so no GPU is required:
 
 ```sh
 sudo apt-get install mesa-vulkan-drivers
-VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json cargo test --workspace
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json cargo test --workspace
 ```
+
+Debian and Ubuntu install that ICD arch-suffixed, as above. Point the variable
+at whatever `ls /usr/share/vulkan/icd.d/` actually shows — if the path is
+wrong the loader reports no driver, and the render tests quietly skip
+themselves instead of failing.
+
+### Building in a container
+
+`docker/Dockerfile` is that environment ready made — the toolchain, the X11 and
+Wayland headers, and lavapipe already wired up. It is the easy path on a
+machine with no Rust installed, and on Windows or macOS, where the local
+graphics stack is not the one this targets.
+
+```sh
+docker build -t vx-build docker/
+docker run --rm -v "$PWD:/work" -v vx-target:/target vx-build cargo test --workspace
+```
+
+The named volume holds `target/`. Building onto the bind mount instead works
+but is substantially slower.
 
 Tests skip themselves rather than failing when no Vulkan adapter exists at all.
 

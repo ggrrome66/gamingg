@@ -7,11 +7,13 @@
 pub mod chunk;
 pub mod gen;
 pub mod noise;
+pub mod raycast;
 pub mod storage;
 pub mod world;
 
 pub use chunk::{BlockView, Chunk, SoloChunkView};
 pub use gen::{TerrainBlocks, TerrainGenerator, SEA_LEVEL};
 pub use noise::Fbm;
+pub use raycast::{cast_ray, RayHit};
 pub use storage::PalettedStorage;
-pub use world::World;
+pub use world::{EditError, World};

@@ -215,6 +215,13 @@ impl BlockRegistry {
     pub fn is_solid(&self, id: BlockId) -> bool {
         self.get(id).is_some_and(|def| def.solid)
     }
+
+    /// True when the block can be removed. A `hardness` of `None` means
+    /// indestructible — bedrock, and the world's fluids. Unknown ids are not
+    /// breakable, so a stale id cannot be dug out of the world.
+    pub fn is_breakable(&self, id: BlockId) -> bool {
+        self.get(id).is_some_and(|def| def.hardness.is_some())
+    }
 }
 
 impl Default for BlockRegistry {
@@ -281,6 +288,22 @@ mod tests {
         assert_eq!(BlockDef::uniform("engine:oak_log", 0).display_name, "Oak Log");
         assert_eq!(BlockDef::uniform("engine:stone", 0).display_name, "Stone");
         assert_eq!(BlockDef::uniform("bare_name", 0).display_name, "Bare Name");
+    }
+
+    #[test]
+    fn hardness_decides_what_can_be_broken() {
+        let mut registry = BlockRegistry::new();
+        let stone = registry.register(BlockDef::uniform("engine:stone", 0)).unwrap();
+        let bedrock = registry
+            .register(BlockDef::uniform("engine:bedrock", 1).with_hardness(None))
+            .unwrap();
+
+        assert!(registry.is_breakable(stone));
+        assert!(!registry.is_breakable(bedrock));
+        // Air has no hardness either, so "break the empty space" is not a move.
+        assert!(!registry.is_breakable(BlockId::AIR));
+        // A stale id must not be diggable.
+        assert!(!registry.is_breakable(BlockId(9999)));
     }
 
     #[test]

@@ -6,10 +6,36 @@
 
 use std::collections::HashMap;
 
+use glam::Vec3;
 use vx_core::{BlockId, BlockPos, BlockRegistry, ChunkPos, Face};
 
 use crate::chunk::{BlockView, Chunk};
 use crate::gen::{TerrainBlocks, TerrainGenerator};
+use crate::raycast::{cast_ray, RayHit};
+
+/// Why a block edit was refused.
+///
+/// Edits are the command interface a client drives the world through, so a
+/// refusal is a value to report rather than a panic: the same rejection has to
+/// survive a round trip over a socket once this is multiplayer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EditError {
+    /// Nothing was in range of the ray.
+    #[error("nothing within reach")]
+    OutOfReach,
+    /// Outside the world's height, or in a chunk that is not resident.
+    #[error("position is outside the world or not loaded")]
+    Unloaded,
+    /// Tried to break empty space.
+    #[error("there is no block there")]
+    Empty,
+    /// Bedrock, fluids, and anything else with no hardness.
+    #[error("that block cannot be broken")]
+    Unbreakable,
+    /// Something solid is already there.
+    #[error("that space is occupied")]
+    Occupied,
+}
 
 /// Loaded chunks plus the generator that fills in missing ones.
 pub struct World {
@@ -150,6 +176,51 @@ impl World {
     /// True when the block at `pos` blocks movement.
     pub fn is_solid(&self, pos: BlockPos) -> bool {
         self.registry.is_solid(self.block(pos))
+    }
+
+    /// True when a block can be built over. Air and fluids yield; anything
+    /// solid has to be broken first.
+    pub fn is_replaceable(&self, pos: BlockPos) -> bool {
+        !self.is_solid(pos)
+    }
+
+    /// The first solid block along a ray, within `reach` blocks.
+    ///
+    /// Fluids are passed through, matching [`World::is_replaceable`]: you
+    /// target what you could stand on, not the water in front of it.
+    pub fn raycast_solid(&self, origin: Vec3, direction: Vec3, reach: f32) -> Option<RayHit> {
+        cast_ray(origin, direction, reach, |pos| self.is_solid(pos))
+    }
+
+    /// Remove the block at `pos`, returning what was removed.
+    pub fn break_block(&mut self, pos: BlockPos) -> Result<BlockId, EditError> {
+        if !pos.in_vertical_bounds() || !self.is_loaded(pos.chunk()) {
+            return Err(EditError::Unloaded);
+        }
+        let existing = self.block(pos);
+        if existing.is_air() {
+            return Err(EditError::Empty);
+        }
+        if !self.registry.is_breakable(existing) {
+            return Err(EditError::Unbreakable);
+        }
+
+        self.set_block(pos, BlockId::AIR)
+            .ok_or(EditError::Unloaded)?;
+        Ok(existing)
+    }
+
+    /// Put `block` at `pos`, if the space is free.
+    pub fn place_block(&mut self, pos: BlockPos, block: BlockId) -> Result<(), EditError> {
+        if !pos.in_vertical_bounds() || !self.is_loaded(pos.chunk()) {
+            return Err(EditError::Unloaded);
+        }
+        if !self.is_replaceable(pos) {
+            return Err(EditError::Occupied);
+        }
+
+        self.set_block(pos, block).ok_or(EditError::Unloaded)?;
+        Ok(())
     }
 
     /// A safe standing height above `(x, z)`: one block above the surface.
@@ -316,6 +387,173 @@ mod tests {
         assert_eq!(world.block_at(0, 200, 0), BlockId::AIR);
         // Beyond loaded chunks reads as air rather than panicking.
         assert!(world.block_at(9999, 200, 9999).is_air());
+    }
+
+    #[test]
+    fn breaking_a_block_clears_it_and_reports_what_was_there() {
+        let mut world = World::new(7);
+        world.load_chunk(ChunkPos::new(0, 0));
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let pos = BlockPos::new(4, 200, 4);
+        world.set_block(pos, stone);
+
+        assert_eq!(world.break_block(pos), Ok(stone));
+        assert!(world.block(pos).is_air());
+    }
+
+    #[test]
+    fn breaking_empty_space_is_refused() {
+        let mut world = World::new(7);
+        world.load_chunk(ChunkPos::new(0, 0));
+        assert_eq!(
+            world.break_block(BlockPos::new(4, 200, 4)),
+            Err(EditError::Empty)
+        );
+    }
+
+    #[test]
+    fn bedrock_and_water_cannot_be_broken() {
+        // Both carry `hardness: None`. Without this check the player can dig
+        // through the world floor.
+        let mut world = World::new(7);
+        world.load_chunk(ChunkPos::new(0, 0));
+        let bedrock = world.registry().id_of("engine:bedrock").unwrap();
+        let water = world.registry().id_of("engine:water").unwrap();
+
+        for (block, pos) in [
+            (bedrock, BlockPos::new(4, 200, 4)),
+            (water, BlockPos::new(5, 200, 4)),
+        ] {
+            world.set_block(pos, block);
+            assert_eq!(world.break_block(pos), Err(EditError::Unbreakable));
+            assert_eq!(world.block(pos), block, "the block was removed anyway");
+        }
+    }
+
+    #[test]
+    fn editing_outside_loaded_space_is_refused() {
+        let mut world = World::new(7);
+        world.load_chunk(ChunkPos::new(0, 0));
+        let stone = world.registry().id_of("engine:stone").unwrap();
+
+        for pos in [
+            BlockPos::new(1000, 64, 1000),      // chunk not resident
+            BlockPos::new(0, CHUNK_HEIGHT, 0),  // above the world
+            BlockPos::new(0, -1, 0),            // below it
+        ] {
+            assert_eq!(world.break_block(pos), Err(EditError::Unloaded), "{pos:?}");
+            assert_eq!(
+                world.place_block(pos, stone),
+                Err(EditError::Unloaded),
+                "{pos:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn placing_fills_empty_space() {
+        let mut world = World::new(7);
+        world.load_chunk(ChunkPos::new(0, 0));
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let pos = BlockPos::new(4, 200, 4);
+
+        assert_eq!(world.place_block(pos, stone), Ok(()));
+        assert_eq!(world.block(pos), stone);
+    }
+
+    #[test]
+    fn placing_into_a_solid_block_is_refused() {
+        let mut world = World::new(7);
+        world.load_chunk(ChunkPos::new(0, 0));
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let dirt = world.registry().id_of("engine:dirt").unwrap();
+        let pos = BlockPos::new(4, 200, 4);
+        world.set_block(pos, stone);
+
+        assert_eq!(world.place_block(pos, dirt), Err(EditError::Occupied));
+        assert_eq!(world.block(pos), stone, "the existing block was overwritten");
+    }
+
+    #[test]
+    fn water_is_replaceable_but_stone_is_not() {
+        // Building into a lake should work; building into a hillside should
+        // not.
+        let mut world = World::new(7);
+        world.load_chunk(ChunkPos::new(0, 0));
+        let water = world.registry().id_of("engine:water").unwrap();
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let pos = BlockPos::new(4, 200, 4);
+
+        world.set_block(pos, water);
+        assert!(world.is_replaceable(pos));
+        assert_eq!(world.place_block(pos, stone), Ok(()));
+        assert_eq!(world.block(pos), stone);
+        assert!(!world.is_replaceable(pos));
+    }
+
+    #[test]
+    fn an_edit_dirties_the_chunk_so_the_mesh_is_rebuilt() {
+        // Without this the edit is invisible until something else forces a
+        // remesh of that chunk.
+        let mut world = World::new(7);
+        world.load_chunk(ChunkPos::new(0, 0));
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let pos = BlockPos::new(4, 200, 4);
+
+        world.clear_dirty(ChunkPos::new(0, 0));
+        world.place_block(pos, stone).unwrap();
+        assert!(world.dirty_chunks().any(|p| p == ChunkPos::new(0, 0)));
+
+        world.clear_dirty(ChunkPos::new(0, 0));
+        world.break_block(pos).unwrap();
+        assert!(world.dirty_chunks().any(|p| p == ChunkPos::new(0, 0)));
+    }
+
+    #[test]
+    fn a_raycast_finds_the_terrain_surface_below_the_camera() {
+        let mut world = World::new(2468);
+        world.load_around(ChunkPos::new(0, 0), 1);
+        let surface = world.surface_y(8, 8).unwrap();
+
+        let eye = Vec3::new(8.5, surface as f32 + 5.0, 8.5);
+        let hit = world
+            .raycast_solid(eye, Vec3::NEG_Y, 20.0)
+            .expect("looking straight down at terrain should hit something");
+
+        // The first solid block under the camera is the surface itself.
+        assert_eq!(hit.block, BlockPos::new(8, surface - 1, 8));
+        assert_eq!(hit.face, Some(Face::PosY), "hit the underside of the ground");
+        // And the place to build is the empty block on top of it.
+        assert_eq!(hit.placement(), Some(BlockPos::new(8, surface, 8)));
+    }
+
+    #[test]
+    fn a_raycast_into_the_sky_finds_nothing() {
+        let mut world = World::new(2468);
+        world.load_around(ChunkPos::new(0, 0), 1);
+        let surface = world.surface_y(8, 8).unwrap();
+
+        let eye = Vec3::new(8.5, surface as f32 + 5.0, 8.5);
+        assert!(world.raycast_solid(eye, Vec3::Y, 20.0).is_none());
+    }
+
+    #[test]
+    fn breaking_what_a_ray_found_always_succeeds() {
+        // The two halves of the interaction have to agree: whatever the ray
+        // targets must be a legal thing to edit, barring unbreakables.
+        let mut world = World::new(99);
+        world.load_around(ChunkPos::new(0, 0), 1);
+        let surface = world.surface_y(8, 8).unwrap();
+        let eye = Vec3::new(8.5, surface as f32 + 3.0, 8.5);
+
+        let hit = world.raycast_solid(eye, Vec3::NEG_Y, 10.0).unwrap();
+        let target = hit.block;
+        assert!(world.break_block(target).is_ok());
+        assert!(world.block(target).is_air());
+
+        // And the space it left is now placeable.
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        assert_eq!(world.place_block(target, stone), Ok(()));
     }
 
     #[test]

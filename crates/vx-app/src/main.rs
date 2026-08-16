@@ -9,12 +9,14 @@
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
 mod controller;
+mod interaction;
 mod streaming;
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use controller::FlyController;
+use interaction::{hotbar_slot, Action, Hotbar};
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
 use vx_platform::InputState;
@@ -23,7 +25,7 @@ use vx_render::{Camera, GpuContext, Renderer, WindowSurface};
 use vx_world::World;
 
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
@@ -185,6 +187,7 @@ struct Active {
     world: World,
     streamer: ChunkStreamer,
     camera: Camera,
+    hotbar: Hotbar,
 }
 
 struct App {
@@ -238,6 +241,21 @@ impl App {
         self.input.mouse_captured = captured;
         // Drop any motion accumulated across the transition.
         self.input.take_mouse_delta();
+    }
+
+    /// Break or place against whatever the player is looking at.
+    ///
+    /// The edit marks its chunk dirty, so the streamer rebuilds that mesh on
+    /// the next frame; nothing here touches the renderer directly.
+    fn edit(&mut self, action: Action) {
+        let Some(active) = &mut self.active else { return };
+        let Some(holding) = active.hotbar.selected() else { return };
+
+        match interaction::apply(&mut active.world, &active.camera, action, holding) {
+            Ok(pos) => log::debug!("{action:?} at {pos:?}"),
+            // Refusals are ordinary play: clicking at the sky, or at bedrock.
+            Err(error) => log::debug!("{action:?} refused: {error}"),
+        }
     }
 
     fn frame(&mut self) {
@@ -324,11 +342,16 @@ impl App {
 
         if let Some(active) = &self.active {
             let fps = self.frames as f32 / elapsed.as_secs_f32();
+            // The hotbar has no on-screen presence yet, so the title bar is
+            // the only way to see what is held and how many slots exist.
             active.window.set_title(&format!(
-                "gamingg - {fps:.0} fps - {}/{} chunks - {} tris",
+                "gamingg - {fps:.0} fps - {}/{} chunks - {} tris - holding {} ({} of {})",
                 active.renderer.loaded_chunk_count(),
                 active.streamer.meshed_count(),
-                active.renderer.triangle_count()
+                active.renderer.triangle_count(),
+                active.hotbar.selected_name(active.world.registry()),
+                active.hotbar.selected_slot() + 1,
+                active.hotbar.len(),
             ));
         }
         self.frames = 0;
@@ -369,6 +392,7 @@ impl ApplicationHandler for App {
         let renderer = Renderer::new(&context, surface.format(), size.width, size.height);
 
         let world = World::new(self.seed);
+        let hotbar = Hotbar::from_registry(world.registry());
         let streamer = ChunkStreamer::new(StreamingConfig::default());
         let camera = Camera {
             position: glam::Vec3::new(0.0, 90.0, 0.0),
@@ -385,6 +409,7 @@ impl ApplicationHandler for App {
             world,
             streamer,
             camera,
+            hotbar,
         });
 
         // Drop the player onto the terrain rather than leaving them at a fixed
@@ -440,6 +465,11 @@ impl ApplicationHandler for App {
                         if code == KeyCode::Escape {
                             self.set_capture(false);
                         }
+                        if let Some(slot) = hotbar_slot(code) {
+                            if let Some(active) = &mut self.active {
+                                active.hotbar.select(slot);
+                            }
+                        }
                         self.input.press(code);
                     }
                     ElementState::Released => self.input.release(code),
@@ -448,9 +478,37 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
-                button: MouseButton::Left,
+                button,
                 ..
-            } => self.set_capture(true),
+            } => {
+                // The click that grabs the pointer must not also swing a pick:
+                // the player is clicking to enter the window, not to dig.
+                if !self.input.mouse_captured {
+                    if button == MouseButton::Left {
+                        self.set_capture(true);
+                    }
+                    return;
+                }
+                match button {
+                    MouseButton::Left => self.edit(Action::Break),
+                    MouseButton::Right => self.edit(Action::Place),
+                    _ => {}
+                }
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scrolled = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    // Trackpads report pixels; only the sign matters here.
+                    MouseScrollDelta::PixelDelta(position) => position.y as f32,
+                };
+                if scrolled != 0.0 {
+                    if let Some(active) = &mut self.active {
+                        // Scrolling up should advance through the hotbar.
+                        active.hotbar.cycle(if scrolled > 0.0 { 1 } else { -1 });
+                    }
+                }
+            }
 
             WindowEvent::RedrawRequested => self.frame(),
 

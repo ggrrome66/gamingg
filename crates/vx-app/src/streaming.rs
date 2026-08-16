@@ -196,4 +196,111 @@ mod tests {
         let large = chunks_in_range(ChunkPos::new(0, 0), 6).len();
         assert!(large > small * 4, "{small} then {large}");
     }
+
+    /// Everything meshed up front, so a later update only reflects edits.
+    fn settled() -> ChunkStreamer {
+        ChunkStreamer::new(StreamingConfig {
+            render_distance: 1,
+            generate_budget: usize::MAX,
+            mesh_budget: usize::MAX,
+        })
+    }
+
+    #[test]
+    fn an_edit_reaches_the_uploaded_geometry() {
+        // The seam the unit tests either side of it cannot cover: an edit marks
+        // its chunk dirty, the streamer notices on the next update, and the
+        // renderer ends up holding different triangles. Break any link in that
+        // chain and the world silently stops responding to clicks.
+        let Ok(context) = vx_render::GpuContext::headless_blocking() else {
+            eprintln!("skipping: no Vulkan adapter available");
+            return;
+        };
+
+        let mut renderer = vx_render::Renderer::new(
+            &context,
+            vx_render::headless::CAPTURE_FORMAT,
+            64,
+            64,
+        );
+        let mut world = vx_world::World::new(2024);
+        let mut streamer = settled();
+        let centre = ChunkPos::new(0, 0);
+
+        world.load_around(centre, 1);
+        streamer.update(&mut world, &mut renderer, &context.device, centre);
+
+        // A second update with nothing dirty must upload nothing, or the
+        // "changed" assertions below prove nothing.
+        let idle = streamer.update(&mut world, &mut renderer, &context.device, centre);
+        assert_eq!(idle, 0, "the streamer re-meshed a clean world");
+        let before = renderer.triangle_count();
+
+        // A block floating clear of the terrain, so it touches nothing and
+        // hides none of its own faces: exactly six quads, twelve triangles.
+        let surface = world.surface_y(8, 8).expect("centre chunk is loaded");
+        let floating = BlockPos::new(8, surface + 5, 8);
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        world.place_block(floating, stone).unwrap();
+
+        let uploaded = streamer.update(&mut world, &mut renderer, &context.device, centre);
+
+        assert_eq!(uploaded, 1, "the edited chunk was not re-meshed");
+        assert_eq!(
+            renderer.triangle_count(),
+            before + 12,
+            "placing an isolated block should add six faces of geometry"
+        );
+
+        // And breaking it puts the world back exactly as it was.
+        world.break_block(floating).unwrap();
+        streamer.update(&mut world, &mut renderer, &context.device, centre);
+
+        assert_eq!(
+            renderer.triangle_count(),
+            before,
+            "breaking the block did not undo the geometry it added"
+        );
+    }
+
+    #[test]
+    fn an_edit_across_a_chunk_seam_re_meshes_both_sides() {
+        // A block on a chunk edge changes the neighbour's seam faces too.
+        // Missing that leaves a visible hole along the boundary.
+        let Ok(context) = vx_render::GpuContext::headless_blocking() else {
+            eprintln!("skipping: no Vulkan adapter available");
+            return;
+        };
+
+        let mut renderer = vx_render::Renderer::new(
+            &context,
+            vx_render::headless::CAPTURE_FORMAT,
+            64,
+            64,
+        );
+        let mut world = vx_world::World::new(2024);
+        let mut streamer = settled();
+        let centre = ChunkPos::new(0, 0);
+
+        world.load_around(centre, 1);
+        streamer.update(&mut world, &mut renderer, &context.device, centre);
+        assert_eq!(
+            streamer.update(&mut world, &mut renderer, &context.device, centre),
+            0
+        );
+
+        // x = 0 is the first column of chunk 0, so its NegX neighbour lives in
+        // chunk -1.
+        let surface = world.surface_y(0, 8).expect("centre chunk is loaded");
+        let seam = BlockPos::new(0, surface + 5, 8);
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        world.place_block(seam, stone).unwrap();
+
+        let uploaded = streamer.update(&mut world, &mut renderer, &context.device, centre);
+
+        assert_eq!(
+            uploaded, 2,
+            "an edit on a chunk edge must re-mesh the chunk across the seam too"
+        );
+    }
 }
