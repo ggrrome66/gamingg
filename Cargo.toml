@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vx-core",
+    "crates/vx-world",
+    "crates/vx-mesh",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+vx-core = { path = "crates/vx-core" }
+vx-world = { path = "crates/vx-world" }
+vx-mesh = { path = "crates/vx-mesh" }
+
+glam = "0.33"
+rayon = "1.12"
+thiserror = "2"
+bytemuck = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# Chunk meshing and worldgen are unusably slow in an unoptimised debug build.
+# Optimise dependencies and our own hot crates even in dev.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.vx-world]
+opt-level = 2
+
+[profile.dev.package.vx-mesh]
+opt-level = 2

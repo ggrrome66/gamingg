@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Steam SDK is not redistributable - fetched separately at M4.
+/vendor/steam/
+*.so
+*.dylib
+*.dll
+
+# Local worlds and user data
+/run/
+/saves/

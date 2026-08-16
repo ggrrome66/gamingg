@@ -1,0 +1,12 @@
+[package]
+name = "vx-world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Chunk storage, terrain generation and world state."
+
+[dependencies]
+vx-core.workspace = true
+glam.workspace = true
+thiserror.workspace = true
