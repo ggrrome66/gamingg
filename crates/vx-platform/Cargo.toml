@@ -1,0 +1,13 @@
+[package]
+name = "vx-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Windowing, input and platform paths."
+
+[dependencies]
+vx-core.workspace = true
+glam.workspace = true
+winit.workspace = true
+log.workspace = true

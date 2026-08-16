@@ -4,6 +4,9 @@ members = [
     "crates/vx-core",
     "crates/vx-world",
     "crates/vx-mesh",
+    "crates/vx-render",
+    "crates/vx-platform",
+    "crates/vx-app",
 ]
 
 [workspace.package]
@@ -16,11 +19,18 @@ license = "MIT OR Apache-2.0"
 vx-core = { path = "crates/vx-core" }
 vx-world = { path = "crates/vx-world" }
 vx-mesh = { path = "crates/vx-mesh" }
+vx-render = { path = "crates/vx-render" }
+vx-platform = { path = "crates/vx-platform" }
 
 glam = "0.33"
 rayon = "1.12"
 thiserror = "2"
 bytemuck = { version = "1", features = ["derive"] }
+wgpu = "29"
+winit = "0.30"
+pollster = "0.4"
+log = "0.4"
+env_logger = "0.11"
 
 [profile.release]
 opt-level = 3

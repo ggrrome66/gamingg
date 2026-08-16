@@ -17,19 +17,29 @@ art exists.
 
 ## Status
 
-Milestone 1 is in progress. The simulation layer is complete and tested; the
-rendering layer is not written yet.
+Milestone 1 is complete: the world generates, meshes, streams and renders, and
+there is a binary you can fly around in.
 
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
 | `vx-world` | Paletted chunk storage, terrain generation, world state | Done |
 | `vx-mesh` | Greedy meshing | Done |
-| `vx-render` | wgpu renderer | Not started |
-| `vx-platform` | winit window and input | Not started |
-| `vx-app` | Game loop binary | Not started |
+| `vx-render` | wgpu renderer, camera, tile textures, offscreen capture | Done |
+| `vx-platform` | Input state, XDG paths | Done |
+| `vx-app` | Window, fly controls, chunk streaming, `gamingg` binary | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | M3 |
 | `vx-steam` | Steam Workshop mod source | M4 |
+
+### Known rough edges
+
+- Terrain reads as broad flat terraces. The noise stack clusters near its mean,
+  so relief is only ~22 blocks spread over a wide area. Needs shaping work.
+- Water is alpha-blended without depth sorting. Fine while water is the only
+  translucent block; looks wrong the moment two transparent surfaces overlap.
+- Chunks are edited and meshed on the main thread. Meshing is throttled per
+  frame to hide it, but it belongs on a worker pool.
+- No block placement or breaking yet, and nothing persists to disk.
 
 ## Design notes
 
@@ -55,7 +65,7 @@ rather than a seeded RNG, so there is no sequence state to desynchronise:
 chunks can generate in parallel in any order, and a saved world regenerates
 identically.
 
-## Building
+## Building and running
 
 Requires Rust 1.94+.
 
@@ -63,10 +73,33 @@ Requires Rust 1.94+.
 cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+cargo run --release -p vx-app          # opens a window
 ```
 
-Once `vx-app` exists, running it will need a Vulkan loader and drivers plus X11
-and/or Wayland client libraries.
+Controls: `WASD` to move, `Space`/`Left Shift` for up and down, `Left Ctrl` to
+sprint, click to capture the mouse for looking around, `Escape` to release it.
+
+Running windowed needs a Vulkan loader and drivers plus X11 and/or Wayland
+client libraries.
+
+### Rendering without a display
+
+`--screenshot` renders one frame offscreen and exits, so it works over SSH and
+in CI:
+
+```sh
+cargo run --release -p vx-app -- --screenshot frame.ppm --width 640 --height 360
+```
+
+The render tests do the same thing and assert on the pixels. Both run against a
+software Vulkan driver, so no GPU is required:
+
+```sh
+sudo apt-get install mesa-vulkan-drivers
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json cargo test --workspace
+```
+
+Tests skip themselves rather than failing when no Vulkan adapter exists at all.
 
 ## Licence
 
