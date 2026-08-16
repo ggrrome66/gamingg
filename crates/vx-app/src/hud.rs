@@ -45,6 +45,8 @@ pub struct HudState {
     pub hotbar: Vec<String>,
     pub selected_slot: usize,
     pub target: Option<Target>,
+    /// "WALK" or "FLY", for the status block.
+    pub mode: &'static str,
     /// Simulation counters. These exist to make the engine's resource
     /// ceilings visible: a limit that is silently absorbed looks identical to
     /// one that is never reached.
@@ -245,7 +247,7 @@ pub fn draw_hud(ui: &mut OverlayBuilder, state: &HudState) {
 
     // Status block, upper left, styled as terminal output.
     let lines = [
-        format!("> GAMINGG // {} FPS", state.fps.round() as i32),
+        format!("> GAMINGG // {} FPS // {}", state.fps.round() as i32, state.mode),
         format!(
             "> POS {} {} {}",
             state.camera.x.floor() as i32,
@@ -432,6 +434,7 @@ fn draw_controls(ui: &mut OverlayBuilder, x: f32, mut y: f32) {
         ("WASD", "MOVE"),
         ("SPACE/LSHIFT", "UP / DOWN"),
         ("LCTRL", "SPRINT"),
+        ("F", "WALK / FLY"),
         ("MOUSE", "LOOK"),
         ("LMB", "BREAK BLOCK"),
         ("RMB", "PLACE BLOCK"),
@@ -487,6 +490,7 @@ mod tests {
             hotbar: vec!["STONE".into(), "DIRT".into(), "GRASS".into()],
             selected_slot: 0,
             target: None,
+            mode: "WALK",
             sim: SimStats::default(),
         }
     }

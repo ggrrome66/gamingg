@@ -4,6 +4,7 @@
 //! rendering or windowing, so it can be driven headlessly — by tests today, by
 //! a dedicated server later.
 
+pub mod body;
 pub mod chunk;
 pub mod gen;
 pub mod light;
@@ -13,6 +14,7 @@ pub mod storage;
 pub mod tick;
 pub mod world;
 
+pub use body::{Body, StepResult};
 pub use chunk::{BlockView, Chunk, SoloChunkView};
 pub use gen::{TerrainBlocks, TerrainGenerator, SEA_LEVEL};
 pub use light::{Channel, LightGrid, LightQueue, MAX_LIGHT, RELIGHT_BUDGET};

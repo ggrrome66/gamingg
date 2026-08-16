@@ -16,7 +16,7 @@ mod streaming;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use controller::FlyController;
+use controller::{FlyController, WalkController};
 use hud::{HudState, MenuAction, Menus, Screen, SimStats, Target};
 use interaction::{hotbar_slot, Action, Hotbar};
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
@@ -25,7 +25,7 @@ use vx_platform::InputState;
 use vx_render::headless::{capture_frame, CAPTURE_FORMAT};
 use vx_render::{Camera, GpuContext, Renderer, WindowSurface};
 use vx_save::WorldStore;
-use vx_world::{TickClock, World, TICKS_PER_SECOND};
+use vx_world::{Body, TickClock, World, TICKS_PER_SECOND};
 
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -272,6 +272,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             hotbar: hotbar.names(world.registry()),
             selected_slot: hotbar.selected_slot(),
             target,
+            mode: "FLY",
             sim: SimStats::default(),
         };
         let ui = build_overlay(&renderer, &menus, &state);
@@ -312,6 +313,17 @@ fn run_windowed(options: &Options) -> Result<(), String> {
         .map_err(|error| format!("event loop failed: {error}"))
 }
 
+/// How the player moves.
+///
+/// Fly is kept alongside walking rather than replaced by it: it is the
+/// building and debugging mode, and losing it would make every high structure
+/// a scaffolding exercise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveMode {
+    Walk,
+    Fly,
+}
+
 /// Everything that only exists once there is a window.
 struct Active {
     window: Arc<Window>,
@@ -323,6 +335,9 @@ struct Active {
     camera: Camera,
     hotbar: Hotbar,
     menus: Menus,
+    /// The player's physical presence while walking.
+    body: Body,
+    mode: MoveMode,
     /// `None` when playing without a world on disk.
     store: Option<WorldStore>,
 }
@@ -342,6 +357,7 @@ struct App {
     world: Option<String>,
     active: Option<Active>,
     controller: FlyController,
+    walker: WalkController,
     input: InputState,
     last_frame: Instant,
     // Frame timing for the HUD readout.
@@ -364,6 +380,7 @@ impl App {
             world,
             active: None,
             controller: FlyController::default(),
+            walker: WalkController::default(),
             input: InputState::new(),
             last_frame: Instant::now(),
             frames: 0,
@@ -515,7 +532,20 @@ impl App {
         // so the view behind the panel stays coherent, but nothing the player
         // does moves the camera.
         if !active.menus.is_open() {
-            self.controller.apply(&mut active.camera, &mut self.input, dt);
+            match active.mode {
+                MoveMode::Fly => {
+                    self.controller.apply(&mut active.camera, &mut self.input, dt);
+                }
+                MoveMode::Walk => {
+                    self.walker.apply(
+                        &mut active.camera,
+                        &mut active.body,
+                        &mut self.input,
+                        &active.world,
+                        dt,
+                    );
+                }
+            }
         } else {
             // Drain motion that arrived while the menu was up, or the view
             // lurches the moment it closes.
@@ -562,6 +592,10 @@ impl App {
             hotbar: active.hotbar.names(active.world.registry()),
             selected_slot: active.hotbar.selected_slot(),
             target,
+            mode: match active.mode {
+                MoveMode::Walk => "WALK",
+                MoveMode::Fly => "FLY",
+            },
             sim: SimStats {
                 pending_ticks: active.world.scheduler().pending(),
                 pending_updates: active.world.pending_updates(),
@@ -731,6 +765,10 @@ impl ApplicationHandler for App {
             camera,
             hotbar,
             menus: Menus::default(),
+            // Feet on the ground under the camera; corrected against the
+            // real surface a few lines down once the spawn chunk is loaded.
+            body: Body::player(glam::Vec3::new(0.5, 90.0, 0.5)),
+            mode: MoveMode::Walk,
             store,
         });
 
@@ -741,6 +779,7 @@ impl ApplicationHandler for App {
             active.world.load_chunk(centre);
             if let Some(surface_y) = active.world.surface_y(0, 0) {
                 active.camera.position.y = surface_y as f32 + 2.0;
+                active.body.position = glam::Vec3::new(0.5, surface_y as f32, 0.5);
             }
         }
 
@@ -799,6 +838,22 @@ impl ApplicationHandler for App {
                                 active.menus.open();
                             }
                             return;
+                        }
+                        if code == KeyCode::KeyF {
+                            if let Some(active) = &mut self.active {
+                                active.mode = match active.mode {
+                                    // Walking resumes wherever the camera
+                                    // flew to: feet under the eyes, motion
+                                    // reset so flight speed does not carry.
+                                    MoveMode::Fly => {
+                                        active.body.position = active.camera.position
+                                            - glam::Vec3::new(0.0, self.walker.eye_height, 0.0);
+                                        active.body.velocity = glam::Vec3::ZERO;
+                                        MoveMode::Walk
+                                    }
+                                    MoveMode::Walk => MoveMode::Fly,
+                                };
+                            }
                         }
                         if let Some(slot) = hotbar_slot(code) {
                             if let Some(active) = &mut self.active {

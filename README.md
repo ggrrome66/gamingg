@@ -18,7 +18,7 @@ art exists.
 ## Status
 
 Milestone 1 is complete: the world generates, meshes, streams and renders, and
-there is a binary you can fly around in and build in.
+there is a binary you can walk, jump and build in, with flight one key away.
 
 | Crate | What it does | State |
 |---|---|---|
@@ -65,6 +65,10 @@ foundation is solid rather than being designed around up front.
   until its neighbour streams in.
 - There is no backup or rollback. The atomic rename means a crash cannot leave
   a half-written region, but nothing keeps the previous version of one.
+- Walking cannot step up a full block automatically; jumping is the mechanism.
+  There are no stairs or slabs yet for a lower step to matter.
+- Fall damage does not exist, so the punishment for a long drop is the climb
+  back up.
 - Breaking is instant and reach is a flat 6 blocks. `BlockDef::hardness` is
   respected only as breakable/unbreakable; nothing consumes the value itself.
 - The menus are keyboard-only. The mouse is ignored while one is open rather
@@ -194,6 +198,14 @@ depth-precision noise of the face they lie on, and they break into dashes at
 distance. Biasing the two passes differently would stop them being complements
 and put a double-drawn band along every edge.
 
+**Player collision is axis-separated AABB sweeps, substepped.** Each step
+resolves y before x and z, so landing happens before sliding can clip a block
+corner. No single substep moves further than a fraction of a block, which is
+what stops one frame of terminal-velocity fall passing through a floor — and
+the substep count is capped, with excess motion discarded, so a hostile dt
+buys bounded work rather than either tunnelling or a stalled frame. Unloaded
+chunks collide as solid: the edge of the streamed world is ground, not a hole.
+
 **Block picking walks the voxel grid, it does not sample along the ray.**
 Marching in fixed steps and testing each point either tunnels through blocks
 met at an angle or wastes most of its samples; `vx-world::raycast` uses a grid
@@ -224,8 +236,9 @@ unload, every thirty seconds, and on exit. An existing world keeps its own
 seed, so `--seed` only applies when creating one — generating against a
 different seed would seam against whatever is already saved.
 
-Controls: `WASD` to move, `Space`/`Left Shift` for up and down, `Left Ctrl` to
-sprint, click to capture the mouse for looking around, `Escape` to release it.
+Controls: `WASD` to move, `Space` to jump, `Left Ctrl` to sprint, click to
+capture the mouse for looking around. `F` switches between walking and flying;
+in flight, `Space`/`Left Shift` move up and down. `Escape` opens the menu.
 
 Once the mouse is captured, **left click breaks** the block you are looking at
 and **right click places** the held one against the face you are pointing at.
