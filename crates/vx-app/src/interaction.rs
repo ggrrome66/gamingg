@@ -117,6 +117,19 @@ impl Hotbar {
         self.selected = next as usize;
     }
 
+    /// Display names of every slot, in order, for the on-screen selector.
+    pub fn names(&self, registry: &BlockRegistry) -> Vec<String> {
+        self.slots
+            .iter()
+            .map(|id| {
+                registry
+                    .get(*id)
+                    .map_or("?", |def| def.display_name.as_str())
+                    .to_string()
+            })
+            .collect()
+    }
+
     /// Display name of the held block, for the title bar.
     pub fn selected_name<'a>(&self, registry: &'a BlockRegistry) -> &'a str {
         self.selected()

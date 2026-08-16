@@ -9,6 +9,7 @@
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
 mod controller;
+mod hud;
 mod interaction;
 mod streaming;
 
@@ -16,6 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use controller::FlyController;
+use hud::{HudState, MenuAction, Menus, Screen, Target};
 use interaction::{hotbar_slot, Action, Hotbar};
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -38,6 +40,32 @@ struct Options {
     screenshot: Option<String>,
     width: u32,
     height: u32,
+    /// Which UI to draw in a screenshot. Lets the menus be captured headlessly
+    /// rather than only ever being seen by someone sitting at a window.
+    ui: UiMode,
+}
+
+/// UI selection for `--screenshot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiMode {
+    None,
+    Hud,
+    Menu(Screen),
+}
+
+impl UiMode {
+    fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "none" => Ok(UiMode::None),
+            "hud" => Ok(UiMode::Hud),
+            "main" => Ok(UiMode::Menu(Screen::Main)),
+            "controls" => Ok(UiMode::Menu(Screen::Controls)),
+            "world" => Ok(UiMode::Menu(Screen::World)),
+            other => Err(format!(
+                "unknown --ui value '{other}' (none, hud, main, controls, world)"
+            )),
+        }
+    }
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -46,6 +74,7 @@ fn parse_args() -> Result<Options, String> {
         screenshot: None,
         width: 1280,
         height: 720,
+        ui: UiMode::Hud,
     };
 
     let mut args = std::env::args().skip(1);
@@ -61,6 +90,7 @@ fn parse_args() -> Result<Options, String> {
                     .map_err(|_| "--seed must be a number".to_string())?
             }
             "--screenshot" => options.screenshot = Some(value()?),
+            "--ui" => options.ui = UiMode::parse(&value()?)?,
             "--width" => {
                 options.width = value()?
                     .parse()
@@ -77,6 +107,8 @@ fn parse_args() -> Result<Options, String> {
                      Options:\n  \
                      --seed <n>          world seed (default {DEFAULT_SEED})\n  \
                      --screenshot <path> render one frame to a PPM file and exit\n  \
+                     --ui <mode>         UI to draw in a screenshot: none, hud,\n                       \
+                                         main, controls, world (default hud)\n  \
                      --width <n>         window or image width\n  \
                      --height <n>        window or image height"
                 );
@@ -130,12 +162,55 @@ fn build_scene(
     streamer.update(&mut world, renderer, &context.device, centre);
 
     let surface = world.surface_y(0, 0).unwrap_or(80);
+    // Standing height rather than a bird's-eye view: close enough that the
+    // crosshair is actually on a block, so screenshots show the selection
+    // outline and target readout doing their job.
+    // `surface_y` is already one block clear of the ground, so this eye height
+    // sits 2.4 blocks above it. At this pitch the crosshair lands about 4.6
+    // blocks along the ray — inside the 6-block reach, so the outline and the
+    // target readout both appear.
     let camera = Camera {
-        position: glam::Vec3::new(0.0, surface as f32 + 10.0, 20.0),
-        pitch: -0.35,
+        position: glam::Vec3::new(0.5, surface as f32 + 1.4, 0.5),
+        pitch: -0.55,
+        yaw: 0.6,
         ..Camera::default()
     };
     (world, camera)
+}
+
+/// Assemble one frame's overlay.
+///
+/// Scanlines go on last so they lie over the world, the HUD and the menus
+/// alike — a CRT does not selectively skip the interesting parts.
+fn build_overlay(
+    renderer: &Renderer,
+    menus: &Menus,
+    state: &HudState,
+) -> vx_render::OverlayBuilder {
+    let mut ui = renderer.overlay_builder();
+
+    if !menus.is_open() {
+        hud::draw_crosshair(&mut ui);
+        hud::draw_hud(&mut ui, state);
+    }
+    hud::draw_menu(&mut ui, menus, state);
+    hud::draw_scanlines(&mut ui);
+
+    ui
+}
+
+/// Describe what the camera is looking at, for the HUD.
+fn describe_target(world: &World, camera: &Camera) -> Option<Target> {
+    let hit = interaction::target(world, camera)?;
+    let block = world.block(hit.block);
+    Some(Target {
+        position: hit.block,
+        name: world
+            .registry()
+            .get(block)
+            .map_or("UNKNOWN", |def| def.display_name.as_str())
+            .to_string(),
+    })
 }
 
 fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
@@ -145,9 +220,35 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     let (width, height) = (options.width, options.height);
     let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, width, height);
 
-    let (_world, mut camera) = build_scene(&context, &mut renderer, options.seed, 6);
+    let (world, mut camera) = build_scene(&context, &mut renderer, options.seed, 6);
     camera.aspect = width as f32 / height as f32;
     renderer.update_camera(&context.queue, &camera);
+
+    let hotbar = Hotbar::from_registry(world.registry());
+    let target = describe_target(&world, &camera);
+    renderer.set_selection(&context.queue, target.as_ref().map(|t| t.position));
+
+    let mut menus = Menus::default();
+    if let UiMode::Menu(screen) = options.ui {
+        menus.open();
+        menus.set_screen(screen);
+    }
+
+    if options.ui != UiMode::None {
+        let state = HudState {
+            fps: 60.0,
+            camera: camera.position,
+            chunks_loaded: renderer.loaded_chunk_count(),
+            chunks_meshed: renderer.loaded_chunk_count(),
+            triangles: renderer.triangle_count(),
+            seed: world.seed(),
+            hotbar: hotbar.names(world.registry()),
+            selected_slot: hotbar.selected_slot(),
+            target,
+        };
+        let ui = build_overlay(&renderer, &menus, &state);
+        renderer.set_overlay(&context.device, &context.queue, &ui);
+    }
 
     let capture = capture_frame(&context, &renderer, width, height);
     capture
@@ -188,6 +289,7 @@ struct Active {
     streamer: ChunkStreamer,
     camera: Camera,
     hotbar: Hotbar,
+    menus: Menus,
 }
 
 struct App {
@@ -198,9 +300,12 @@ struct App {
     controller: FlyController,
     input: InputState,
     last_frame: Instant,
-    // Frame timing for the title bar readout.
+    // Frame timing for the HUD readout.
     frames: u32,
     last_report: Instant,
+    /// Smoothed over the last reporting interval, so the HUD does not flicker
+    /// through a new number every frame.
+    last_fps: f32,
 }
 
 impl App {
@@ -215,6 +320,7 @@ impl App {
             last_frame: Instant::now(),
             frames: 0,
             last_report: Instant::now(),
+            last_fps: 0.0,
         }
     }
 
@@ -243,6 +349,43 @@ impl App {
         self.input.take_mouse_delta();
     }
 
+    fn menu_is_open(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_some_and(|active| active.menus.is_open())
+    }
+
+    /// Drive the menu from the keyboard. Only reached while one is open, so
+    /// none of these keys leak through to the world.
+    fn menu_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
+        let Some(active) = &mut self.active else { return };
+
+        let action = match code {
+            KeyCode::Escape => {
+                active.menus.back();
+                None
+            }
+            KeyCode::KeyW | KeyCode::ArrowUp => {
+                active.menus.move_selection(-1);
+                None
+            }
+            KeyCode::KeyS | KeyCode::ArrowDown => {
+                active.menus.move_selection(1);
+                None
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => active.menus.activate(),
+            _ => None,
+        };
+
+        match action {
+            Some(MenuAction::Quit) => event_loop.exit(),
+            // Held keys would otherwise stay down through the transition and
+            // send the camera flying the instant the world resumes.
+            Some(MenuAction::Resume) => self.input.clear_keys(),
+            None => {}
+        }
+    }
+
     /// Break or place against whatever the player is looking at.
     ///
     /// The edit marks its chunk dirty, so the streamer rebuilds that mesh on
@@ -267,7 +410,17 @@ impl App {
         // from `active`, so this is fine and lets the camera be mutated in
         // place rather than through a copy.
         let Some(active) = &mut self.active else { return };
-        self.controller.apply(&mut active.camera, &mut self.input, dt);
+
+        // A menu freezes the world rather than pausing it: chunks still stream
+        // so the view behind the panel stays coherent, but nothing the player
+        // does moves the camera.
+        if !active.menus.is_open() {
+            self.controller.apply(&mut active.camera, &mut self.input, dt);
+        } else {
+            // Drain motion that arrived while the menu was up, or the view
+            // lurches the moment it closes.
+            self.input.take_mouse_delta();
+        }
 
         // Keep chunks in step with where the camera is.
         let centre = chunk_at(active.camera.position);
@@ -281,6 +434,28 @@ impl App {
         active
             .renderer
             .update_camera(&active.context.queue, &active.camera);
+
+        // Outline whatever the crosshair is on, and rebuild the overlay.
+        let target = describe_target(&active.world, &active.camera);
+        active
+            .renderer
+            .set_selection(&active.context.queue, target.as_ref().map(|t| t.position));
+
+        let state = HudState {
+            fps: self.last_fps,
+            camera: active.camera.position,
+            chunks_loaded: active.renderer.loaded_chunk_count(),
+            chunks_meshed: active.streamer.meshed_count(),
+            triangles: active.renderer.triangle_count(),
+            seed: active.world.seed(),
+            hotbar: active.hotbar.names(active.world.registry()),
+            selected_slot: active.hotbar.selected_slot(),
+            target,
+        };
+        let ui = build_overlay(&active.renderer, &active.menus, &state);
+        active
+            .renderer
+            .set_overlay(&active.context.device, &active.context.queue, &ui);
 
         use wgpu::CurrentSurfaceTexture as Acquired;
 
@@ -340,15 +515,13 @@ impl App {
             return;
         }
 
+        self.last_fps = self.frames as f32 / elapsed.as_secs_f32();
+
         if let Some(active) = &self.active {
-            let fps = self.frames as f32 / elapsed.as_secs_f32();
-            // The hotbar has no on-screen presence yet, so the title bar is
-            // the only way to see what is held and how many slots exist.
+            // The readout moved on-screen; the title just names the window and
+            // what is held, for anyone reading a taskbar.
             active.window.set_title(&format!(
-                "gamingg - {fps:.0} fps - {}/{} chunks - {} tris - holding {} ({} of {})",
-                active.renderer.loaded_chunk_count(),
-                active.streamer.meshed_count(),
-                active.renderer.triangle_count(),
+                "gamingg - {} ({} of {})",
                 active.hotbar.selected_name(active.world.registry()),
                 active.hotbar.selected_slot() + 1,
                 active.hotbar.len(),
@@ -410,6 +583,7 @@ impl ApplicationHandler for App {
             streamer,
             camera,
             hotbar,
+            menus: Menus::default(),
         });
 
         // Drop the player onto the terrain rather than leaving them at a fixed
@@ -462,8 +636,18 @@ impl ApplicationHandler for App {
                 };
                 match event.state {
                     ElementState::Pressed => {
+                        if self.menu_is_open() {
+                            self.menu_key(code, event_loop);
+                            return;
+                        }
                         if code == KeyCode::Escape {
+                            // Escape leaves the world rather than only freeing
+                            // the pointer: the menu is where quitting lives.
                             self.set_capture(false);
+                            if let Some(active) = &mut self.active {
+                                active.menus.open();
+                            }
+                            return;
                         }
                         if let Some(slot) = hotbar_slot(code) {
                             if let Some(active) = &mut self.active {
@@ -481,6 +665,11 @@ impl ApplicationHandler for App {
                 button,
                 ..
             } => {
+                // The menu is keyboard-driven; clicking through it would grab
+                // the pointer while a panel is still up.
+                if self.menu_is_open() {
+                    return;
+                }
                 // The click that grabs the pointer must not also swing a pick:
                 // the player is clicking to enter the window, not to dig.
                 if !self.input.mouse_captured {
@@ -497,6 +686,9 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.menu_is_open() {
+                    return;
+                }
                 let scrolled = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     // Trackpads report pixels; only the sign matters here.

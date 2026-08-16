@@ -6,19 +6,24 @@
 //! a window and to an offscreen image in tests.
 
 pub mod camera;
+pub mod font;
 pub mod gpu;
 pub mod headless;
 pub mod mesh_buffer;
+pub mod overlay;
+pub mod selection;
 pub mod tiles;
 
 use std::collections::HashMap;
 
-use vx_core::ChunkPos;
+use vx_core::{BlockPos, ChunkPos};
 use vx_mesh::Mesh;
 
 pub use camera::{Camera, CameraUniform};
 pub use gpu::{GpuContext, GpuError, WindowSurface, DEPTH_FORMAT};
 pub use mesh_buffer::{ChunkMesh, VERTEX_LAYOUT};
+pub use overlay::{OverlayBuilder, OverlayRenderer};
+pub use selection::{SelectionRenderer, SELECTION_COLOUR};
 pub use tiles::TileTextures;
 
 /// Sky colour, used to clear each frame.
@@ -37,6 +42,8 @@ pub struct Renderer {
     tiles: TileTextures,
     depth_view: wgpu::TextureView,
     chunks: HashMap<ChunkPos, ChunkMesh>,
+    selection: SelectionRenderer,
+    overlay: OverlayRenderer,
     width: u32,
     height: u32,
 }
@@ -140,6 +147,15 @@ impl Renderer {
 
         let depth_view = context.create_depth_view(width, height);
 
+        let selection = SelectionRenderer::new(
+            device,
+            &camera_layout,
+            target_format,
+            DEPTH_FORMAT,
+            SELECTION_COLOUR,
+        );
+        let overlay = OverlayRenderer::new(device, &context.queue, target_format, DEPTH_FORMAT);
+
         Renderer {
             pipeline,
             camera_buffer,
@@ -147,9 +163,43 @@ impl Renderer {
             tiles,
             depth_view,
             chunks: HashMap::new(),
+            selection,
+            overlay,
             width,
             height,
         }
+    }
+
+    /// Outline the block being looked at, or clear it with `None`.
+    pub fn set_selection(&mut self, queue: &wgpu::Queue, target: Option<BlockPos>) {
+        self.selection.set_target(queue, target);
+    }
+
+    /// The block currently outlined.
+    pub fn selection(&self) -> Option<BlockPos> {
+        self.selection.target()
+    }
+
+    /// Replace the screen-space overlay.
+    pub fn set_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        built: &OverlayBuilder,
+    ) {
+        self.overlay.upload(device, queue, built);
+    }
+
+    /// A builder sized to this renderer's target, at a scale that keeps the UI
+    /// legible without depending on the window size.
+    pub fn overlay_builder(&self) -> OverlayBuilder {
+        OverlayBuilder::new(self.width, self.height, self.ui_scale())
+    }
+
+    /// Integer UI scale. Text is a bitmap face, so a fractional scale would
+    /// land glyph pixels between screen pixels and blur them.
+    pub fn ui_scale(&self) -> f32 {
+        (self.height as f32 / 240.0).floor().clamp(1.0, 6.0)
     }
 
     /// Rebuild the depth buffer for a new target size.
@@ -229,5 +279,11 @@ impl Renderer {
         for mesh in self.chunks.values() {
             mesh.draw(&mut pass);
         }
+
+        // Same pass, different pipelines: the outline is depth-tested against
+        // the terrain just drawn, and the overlay ignores depth entirely and
+        // lands on top of both.
+        self.selection.draw(&mut pass);
+        self.overlay.draw(&mut pass);
     }
 }

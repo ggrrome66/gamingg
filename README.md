@@ -25,9 +25,9 @@ there is a binary you can fly around in and build in.
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
 | `vx-world` | Paletted chunk storage, terrain generation, world state | Done |
 | `vx-mesh` | Greedy meshing | Done |
-| `vx-render` | wgpu renderer, camera, tile textures, offscreen capture | Done |
+| `vx-render` | wgpu renderer, camera, tiles, UI overlay, capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
-| `vx-app` | Window, fly controls, chunk streaming, building, `gamingg` binary | Done |
+| `vx-app` | Window, fly controls, streaming, building, HUD, `gamingg` | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | M3 |
 | `vx-steam` | Steam Workshop mod source | M4 |
 
@@ -42,11 +42,12 @@ there is a binary you can fly around in and build in.
 - Nothing persists. Edits live in the loaded chunk and are lost as soon as it
   unloads, so flying out past the render distance and back regenerates fresh
   terrain over whatever you built.
-- There is no crosshair and no highlight on the targeted block, so aiming is
-  guesswork at anything but point-blank range. Both want a renderer pass that
-  does not exist yet.
 - Breaking is instant and reach is a flat 6 blocks. `BlockDef::hardness` is
   respected only as breakable/unbreakable; nothing consumes the value itself.
+- The menus are keyboard-only. The mouse is ignored while one is open rather
+  than moving a pointer over the entries.
+- The overlay is rebuilt from scratch every frame. Fine at a few hundred
+  quads; it would want caching before the UI grows much past this.
 
 ## Design notes
 
@@ -66,6 +67,22 @@ namespaced string name (`engine:stone`), never the numeric id.
 
 **All `BlockView` coordinates are absolute world coordinates**, never
 chunk-local. Mixing the two makes geometry silently vanish.
+
+**The UI is laid out in pixels and owns no GPU types.** `vx-app::hud` takes
+state and an `OverlayBuilder` and emits quads; `vx-render::overlay` turns those
+into clip space and draws them. Because layout is a pure function of state, the
+crosshair, HUD and every menu screen are tested by inspecting the geometry they
+produce rather than by looking at them.
+
+**Text is a bitmap face defined in the source.** `vx-render::font` is a 5×7
+pixel font written as ASCII art, rasterised into an atlas at startup and
+sampled with a nearest filter. No font dependency, no licensing question, and
+filtering it would ruin the look anyway.
+
+**The block outline is twelve boxes, not a line list.** wgpu gives no control
+over line width — every line is one pixel at any resolution — so a wireframe
+cage would be nearly invisible. Solid edges also shrink with distance the way
+the rest of the world does.
 
 **Block picking walks the voxel grid, it does not sample along the ray.**
 Marching in fixed steps and testing each point either tunnels through blocks
@@ -95,9 +112,12 @@ sprint, click to capture the mouse for looking around, `Escape` to release it.
 
 Once the mouse is captured, **left click breaks** the block you are looking at
 and **right click places** the held one against the face you are pointing at.
-Number keys and the scroll wheel change what you are holding; the title bar
-shows it. The first click after `Escape` only re-captures the pointer — it does
-not also dig.
+The targeted block is outlined and named on screen. Number keys and the scroll
+wheel change what you are holding.
+
+`Escape` opens the menu — `W`/`S` to move, `Enter` to choose, `Escape` to back
+out. The world keeps streaming behind it but the camera is frozen, and clicks
+do not reach the world while a panel is up.
 
 Running windowed needs a Vulkan loader and drivers plus X11 and/or Wayland
 client libraries.
@@ -109,6 +129,14 @@ in CI:
 
 ```sh
 cargo run --release -p vx-app -- --screenshot frame.ppm --width 640 --height 360
+```
+
+`--ui` picks what the capture draws over the world — `hud` (the default),
+`none`, or a menu screen by name (`main`, `controls`, `world`). That is how the
+menus get reviewed without someone sitting in front of a window:
+
+```sh
+cargo run --release -p vx-app -- --screenshot menu.ppm --ui main
 ```
 
 The render tests do the same thing and assert on the pixels. Both run against a
