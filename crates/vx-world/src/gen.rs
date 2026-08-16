@@ -51,10 +51,11 @@ impl TerrainBlocks {
         };
 
         TerrainBlocks {
-            stone: register(BlockDef::uniform("engine:stone", 0)),
-            dirt: register(BlockDef::uniform("engine:dirt", 1)),
-            grass: register(BlockDef::columnar("engine:grass", 2, 3, 1)),
-            sand: register(BlockDef::uniform("engine:sand", 4).falling()),
+            // Hardness finally matters: soil digs fast, rock slow, ore slower.
+            stone: register(BlockDef::uniform("engine:stone", 0).with_hardness(Some(1.5))),
+            dirt: register(BlockDef::uniform("engine:dirt", 1).with_hardness(Some(0.5))),
+            grass: register(BlockDef::columnar("engine:grass", 2, 3, 1).with_hardness(Some(0.6))),
+            sand: register(BlockDef::uniform("engine:sand", 4).falling().with_hardness(Some(0.5))),
             water: register(
                 BlockDef::uniform("engine:water", 5)
                     .translucent()

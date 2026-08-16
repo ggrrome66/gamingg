@@ -17,15 +17,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use controller::{FlyController, WalkController};
-use hud::{HudState, MenuAction, Menus, Screen, SimStats, Target};
-use interaction::{hotbar_slot, Action};
+use hud::{DrillView, HudState, MenuAction, Menus, Screen, SimStats, Target};
+use interaction::Held;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
 use vx_platform::InputState;
 use vx_render::headless::{capture_frame, CAPTURE_FORMAT};
 use vx_render::{Camera, GpuContext, Renderer, WindowSurface};
 use vx_save::WorldStore;
-use vx_world::{Body, Inventory, TickClock, World, HOTBAR_SLOTS, TICKS_PER_SECOND};
+use vx_world::{Body, Drill, Inventory, ModuleKind, TickClock, World, MAX_MODULE_SLOTS, TICKS_PER_SECOND};
 
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -55,6 +55,8 @@ enum UiMode {
     None,
     Hud,
     Menu(Screen),
+    /// The deck, open on a given tab.
+    Deck(usize),
 }
 
 impl UiMode {
@@ -63,11 +65,14 @@ impl UiMode {
             "none" => Ok(UiMode::None),
             "hud" => Ok(UiMode::Hud),
             "main" => Ok(UiMode::Menu(Screen::Main)),
-            "inventory" => Ok(UiMode::Menu(Screen::Inventory)),
             "controls" => Ok(UiMode::Menu(Screen::Controls)),
             "world" => Ok(UiMode::Menu(Screen::World)),
+            "deck" => Ok(UiMode::Deck(0)),
+            "craft" => Ok(UiMode::Deck(1)),
+            "drill" => Ok(UiMode::Deck(2)),
             other => Err(format!(
-                "unknown --ui value '{other}' (none, hud, main, controls, world)"
+                "unknown --ui value '{other}' (none, hud, main, controls, world, \
+                 deck, craft, drill)"
             )),
         }
     }
@@ -227,6 +232,113 @@ fn build_overlay(
     ui
 }
 
+/// Entries selectable on a deck tab. The app owns this because it owns the
+/// state the tabs act on.
+fn deck_entry_count(tab: usize, world: &World) -> usize {
+    match tab {
+        1 => world.recipes().len(),
+        // The module slots plus the tier-upgrade line.
+        2 => MAX_MODULE_SLOTS + 1,
+        _ => 0,
+    }
+}
+
+/// Act on the highlighted entry of the current deck tab.
+fn deck_act(active: &mut Active) {
+    let items = active.world.items().clone();
+    match active.menus.deck_tab() {
+        // CRAFT: make the highlighted recipe. The screen stays open so
+        // batches are one keypress each.
+        1 => {
+            let recipes = active.world.recipes();
+            if let Some(recipe) = recipes.get(active.menus.selected()) {
+                recipe.craft(&mut active.inventory, &items);
+            }
+        }
+        // DRILL: toggle the highlighted slot, or buy the tier upgrade.
+        2 => {
+            let selected = active.menus.selected();
+            if selected < MAX_MODULE_SLOTS {
+                if active.drill.module(selected).is_some() {
+                    let removed = interaction::remove_module(
+                        &mut active.drill,
+                        &mut active.inventory,
+                        &items,
+                        selected,
+                    );
+                    if let Err(refusal) = removed {
+                        log::debug!("module removal refused: {refusal}");
+                    }
+                } else {
+                    // Install the first module kind the player carries. With
+                    // three kinds this is predictable; a picker can come with
+                    // a fourth.
+                    for kind in ModuleKind::ALL {
+                        if interaction::install_module(
+                            &mut active.drill,
+                            &mut active.inventory,
+                            &items,
+                            selected,
+                            kind,
+                        )
+                        .is_ok()
+                        {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                let upgrade = active.world.game_items().drill_upgrade;
+                if let Err(refusal) = interaction::upgrade_drill(
+                    &mut active.drill,
+                    &mut active.inventory,
+                    upgrade,
+                ) {
+                    log::debug!("tier upgrade refused: {refusal}");
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The drill as the deck's DRILL tab presents it.
+fn drill_view(drill: &Drill, world: &World) -> DrillView {
+    let slots = drill
+        .slots()
+        .map(|(index, module, unlocked)| {
+            let state = match (module, unlocked) {
+                (Some(kind), _) => kind.display_name().to_string(),
+                (None, true) => "[EMPTY]".to_string(),
+                (None, false) => "[LOCKED]".to_string(),
+            };
+            format!("SLOT {}: {state}", index + 1)
+        })
+        .collect();
+
+    let upgrade = if drill.tier() >= vx_world::MAX_TIER {
+        "TIER MAXED".to_string()
+    } else {
+        let recipes = world.recipes();
+        let upgrade_item = world.game_items().drill_upgrade;
+        let cost = recipes
+            .iter()
+            .find(|recipe| recipe.output.item == upgrade_item)
+            .map(|recipe| vx_world::recipe_label(recipe, world.items()))
+            .unwrap_or_else(|| "?".to_string());
+        format!("UPGRADE TIER (CRAFT: {cost})")
+    };
+
+    DrillView {
+        tier: drill.tier(),
+        speed: drill.speed(),
+        reach: drill.reach(),
+        slots,
+        bonus_drops: drill.bonus_drops(),
+        upgrade,
+    }
+}
+
 /// The occupied-slot labels for the inventory screen.
 fn carried_lines(inventory: &Inventory, world: &World) -> Vec<String> {
     inventory
@@ -257,8 +369,8 @@ fn recipe_lines(inventory: &Inventory, world: &World) -> Vec<(String, bool)> {
 }
 
 /// Describe what the camera is looking at, for the HUD.
-fn describe_target(world: &World, camera: &Camera) -> Option<Target> {
-    let hit = interaction::target(world, camera)?;
+fn describe_target(world: &World, camera: &Camera, reach: f32) -> Option<Target> {
+    let hit = interaction::target(world, camera, reach)?;
     let block = world.block(hit.block);
     Some(Target {
         position: hit.block,
@@ -284,18 +396,29 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // A staged inventory, so screenshots show the systems carrying data:
     // stacks on the hotbar, and a lamp recipe that is actually craftable.
     let mut inventory = Inventory::player();
-    let held = *world.game_items();
-    inventory.insert(held.stone, 32, world.items());
-    inventory.insert(held.dirt, 16, world.items());
-    inventory.insert(held.coal, 9, world.items());
-    inventory.insert(held.raw_iron, 3, world.items());
-    let target = describe_target(&world, &camera);
+    let kit = *world.game_items();
+    inventory.insert(kit.stone, 32, world.items());
+    inventory.insert(kit.dirt, 16, world.items());
+    inventory.insert(kit.coal, 9, world.items());
+    inventory.insert(kit.raw_iron, 3, world.items());
+    inventory.insert(kit.module_speed, 1, world.items());
+
+    // A drill with history, so the DRILL tab shows every slot state at once:
+    // fitted, empty, and locked.
+    let mut drill = Drill::new();
+    drill.upgrade();
+    drill.install(0, ModuleKind::Speed).ok();
+
+    let target = describe_target(&world, &camera, drill.reach());
     renderer.set_selection(&context.queue, target.as_ref().map(|t| t.position));
 
     let mut menus = Menus::default();
     if let UiMode::Menu(screen) = options.ui {
         menus.open();
         menus.set_screen(screen);
+    }
+    if let UiMode::Deck(tab) = options.ui {
+        menus.open_deck(tab, deck_entry_count(tab, &world));
     }
 
     if options.ui != UiMode::None {
@@ -307,8 +430,10 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             triangles: renderer.triangle_count(),
             seed: world.seed(),
             hotbar: interaction::hotbar_labels(&inventory, world.items()),
-            selected_slot: 0,
+            bar_selected: Held::Drill.bar_index(),
             target,
+            mine_progress: None,
+            drill: drill_view(&drill, &world),
             inventory_lines: carried_lines(&inventory, &world),
             recipes: recipe_lines(&inventory, &world),
             mode: "FLY",
@@ -377,8 +502,10 @@ struct Active {
     body: Body,
     mode: MoveMode,
     inventory: Inventory,
-    /// Which hotbar slot is in hand.
-    selected_slot: usize,
+    /// The tool everything is mined with, and the thing progression upgrades.
+    drill: Drill,
+    /// What is in hand across the nine-position bar.
+    held: Held,
     /// `None` when playing without a world on disk.
     store: Option<WorldStore>,
 }
@@ -400,6 +527,8 @@ struct App {
     controller: FlyController,
     walker: WalkController,
     input: InputState,
+    /// True while the mine button is held down.
+    mining_held: bool,
     last_frame: Instant,
     // Frame timing for the HUD readout.
     frames: u32,
@@ -423,6 +552,7 @@ impl App {
             controller: FlyController::default(),
             walker: WalkController::default(),
             input: InputState::new(),
+            mining_held: false,
             last_frame: Instant::now(),
             frames: 0,
             last_report: Instant::now(),
@@ -481,22 +611,29 @@ impl App {
                 active.menus.move_selection(1);
                 None
             }
+            // A and D page through the deck's tabs.
+            KeyCode::KeyA | KeyCode::ArrowLeft if active.menus.screen() == Screen::Deck => {
+                active.menus.move_tab(-1);
+                let count = deck_entry_count(active.menus.deck_tab(), &active.world);
+                active.menus.set_entry_count(count);
+                None
+            }
+            KeyCode::KeyD | KeyCode::ArrowRight if active.menus.screen() == Screen::Deck => {
+                active.menus.move_tab(1);
+                let count = deck_entry_count(active.menus.deck_tab(), &active.world);
+                active.menus.set_entry_count(count);
+                None
+            }
             KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
-                if active.menus.screen() == Screen::Inventory {
-                    // Enter crafts the highlighted recipe in place; the
-                    // screen stays open so batches are one keypress each.
-                    let recipes = active.world.recipes();
-                    if let Some(recipe) = recipes.get(active.menus.selected()) {
-                        let items = active.world.items().clone();
-                        recipe.craft(&mut active.inventory, &items);
-                    }
+                if active.menus.screen() == Screen::Deck {
+                    deck_act(active);
                     None
                 } else {
                     active.menus.activate()
                 }
             }
-            // E closes the inventory it opened.
-            KeyCode::KeyE if active.menus.screen() == Screen::Inventory => {
+            // E closes the deck it opened.
+            KeyCode::KeyE if active.menus.screen() == Screen::Deck => {
                 active.menus.back();
                 None
             }
@@ -561,24 +698,32 @@ impl App {
         self.last_save = Instant::now();
     }
 
-    /// Break or place against whatever the player is looking at.
-    ///
-    /// The edit marks its chunk dirty, so the streamer rebuilds that mesh on
-    /// the next frame; nothing here touches the renderer directly.
-    fn edit(&mut self, action: Action) {
+    /// Place from the held item slot against the targeted face.
+    fn place(&mut self) {
         let Some(active) = &mut self.active else { return };
+        let Held::Item(slot) = active.held else { return };
 
-        match interaction::apply(
+        match interaction::place(
             &mut active.world,
             &active.camera,
-            action,
             &mut active.inventory,
-            active.selected_slot,
+            slot,
+            active.drill.reach(),
         ) {
-            Ok(pos) => log::debug!("{action:?} at {pos:?}"),
-            // Refusals are ordinary play: clicking at the sky, or at bedrock.
-            Err(error) => log::debug!("{action:?} refused: {error}"),
+            Ok(pos) => log::debug!("placed at {pos:?}"),
+            // Refusals are ordinary play: the sky, an empty hand.
+            Err(error) => log::debug!("place refused: {error}"),
         }
+    }
+
+    /// Open the deck on `tab`, releasing the pointer.
+    fn open_deck(&mut self, tab: usize) {
+        self.set_capture(false);
+        let Some(active) = &mut self.active else { return };
+        active.world.stop_mining();
+        active.menus.open_deck(tab, 0);
+        let count = deck_entry_count(tab, &active.world);
+        active.menus.set_entry_count(count);
     }
 
     fn frame(&mut self) {
@@ -640,8 +785,28 @@ impl App {
             .renderer
             .update_camera(&active.context.queue, &active.camera);
 
+        // Drive the drill. Intent only: the world owns the progress and
+        // decides when the block yields.
+        if !active.menus.is_open()
+            && self.mining_held
+            && active.held == Held::Drill
+            && self.input.mouse_captured
+        {
+            if let Some(vx_world::MineOutcome::Broke(_)) = interaction::mine_tick(
+                &mut active.world,
+                &active.camera,
+                &active.drill,
+                &mut active.inventory,
+                dt,
+            ) {
+                log::debug!("block mined");
+            }
+        } else {
+            active.world.stop_mining();
+        }
+
         // Outline whatever the crosshair is on, and rebuild the overlay.
-        let target = describe_target(&active.world, &active.camera);
+        let target = describe_target(&active.world, &active.camera, active.drill.reach());
         active
             .renderer
             .set_selection(&active.context.queue, target.as_ref().map(|t| t.position));
@@ -654,8 +819,10 @@ impl App {
             triangles: active.renderer.triangle_count(),
             seed: active.world.seed(),
             hotbar: interaction::hotbar_labels(&active.inventory, active.world.items()),
-            selected_slot: active.selected_slot,
+            bar_selected: active.held.bar_index(),
             target,
+            mine_progress: active.world.mining_progress().map(|(_, progress)| progress),
+            drill: drill_view(&active.drill, &active.world),
             inventory_lines: carried_lines(&active.inventory, &active.world),
             recipes: recipe_lines(&active.inventory, &active.world),
             mode: match active.mode {
@@ -742,14 +909,18 @@ impl App {
         if let Some(active) = &self.active {
             // The readout moved on-screen; the title just names the window and
             // what is held, for anyone reading a taskbar.
-            active.window.set_title(&format!(
-                "gamingg - holding {}",
-                interaction::hotbar_label(
+            let held = match active.held {
+                Held::Deck => "DECK".to_string(),
+                Held::Drill => format!("DRILL T{}", active.drill.tier()),
+                Held::Item(slot) => interaction::hotbar_label(
                     &active.inventory,
                     active.world.items(),
-                    active.selected_slot,
+                    slot,
                 ),
-            ));
+            };
+            active
+                .window
+                .set_title(&format!("gamingg - holding {held}"));
         }
         self.frames = 0;
         self.last_report = Instant::now();
@@ -832,7 +1003,9 @@ impl ApplicationHandler for App {
             camera,
             // Empty on purpose: mining is how it fills.
             inventory: Inventory::player(),
-            selected_slot: 0,
+            drill: Drill::new(),
+            // Start holding the drill: the first thing to do is dig.
+            held: Held::Drill,
             menus: Menus::default(),
             // Feet on the ground under the camera; corrected against the
             // real surface a few lines down once the spawn chunk is loaded.
@@ -925,15 +1098,12 @@ impl ApplicationHandler for App {
                             }
                         }
                         if code == KeyCode::KeyE {
-                            self.set_capture(false);
-                            if let Some(active) = &mut self.active {
-                                active.menus.open_inventory(active.world.recipes().len());
-                            }
+                            self.open_deck(0);
                             return;
                         }
-                        if let Some(slot) = hotbar_slot(code) {
+                        if let Some(held) = Held::from_key(code) {
                             if let Some(active) = &mut self.active {
-                                active.selected_slot = slot;
+                                active.held = held;
                             }
                         }
                         self.input.press(code);
@@ -961,11 +1131,26 @@ impl ApplicationHandler for App {
                     return;
                 }
                 match button {
-                    MouseButton::Left => self.edit(Action::Break),
-                    MouseButton::Right => self.edit(Action::Place),
+                    // Mining is hold-to-dig, resolved per frame; the press
+                    // only opens the tap.
+                    MouseButton::Left => self.mining_held = true,
+                    MouseButton::Right => {
+                        let held = self.active.as_ref().map(|active| active.held);
+                        match held {
+                            Some(Held::Deck) => self.open_deck(0),
+                            Some(Held::Item(_)) => self.place(),
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 }
             }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => self.mining_held = false,
 
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.menu_is_open() {
@@ -978,11 +1163,9 @@ impl ApplicationHandler for App {
                 };
                 if scrolled != 0.0 {
                     if let Some(active) = &mut self.active {
-                        // Scrolling up should advance through the hotbar.
+                        // Scrolling up should advance along the bar.
                         let step: i32 = if scrolled > 0.0 { 1 } else { -1 };
-                        active.selected_slot = (active.selected_slot as i32 + step)
-                            .rem_euclid(HOTBAR_SLOTS as i32)
-                            as usize;
+                        active.held = active.held.cycled(step);
                     }
                 }
             }

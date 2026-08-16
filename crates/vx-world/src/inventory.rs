@@ -10,10 +10,13 @@
 
 use vx_core::{ItemId, ItemRegistry};
 
-/// Slots in a player inventory: nine on the hotbar, twenty-seven behind it.
+/// Slots in a player inventory: seven on the bar, twenty-nine behind them.
+/// Total capacity is unchanged from the old nine-slot bar — the first two bar
+/// positions now belong to the deck and drill, which are equipment rather
+/// than inventory, and the backpack absorbed the difference.
 pub const PLAYER_SLOTS: usize = 36;
-/// The first nine slots are the hotbar.
-pub const HOTBAR_SLOTS: usize = 9;
+/// The first seven slots are the item half of the bar.
+pub const HOTBAR_SLOTS: usize = 7;
 
 /// Some of one item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

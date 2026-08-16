@@ -6,6 +6,7 @@
 
 pub mod body;
 pub mod chunk;
+pub mod drill;
 pub mod gen;
 pub mod inventory;
 pub mod items;
@@ -18,6 +19,7 @@ pub mod world;
 
 pub use body::{Body, StepResult};
 pub use chunk::{BlockView, Chunk, SoloChunkView};
+pub use drill::{Drill, ModuleError, ModuleKind, MAX_MODULE_SLOTS, MAX_TIER};
 pub use gen::{TerrainBlocks, TerrainGenerator, SEA_LEVEL};
 pub use inventory::{Inventory, ItemStack, Recipe, HOTBAR_SLOTS, PLAYER_SLOTS};
 pub use items::{recipe_label, GameItems};
@@ -26,4 +28,4 @@ pub use noise::Fbm;
 pub use raycast::{cast_ray, RayHit};
 pub use storage::PalettedStorage;
 pub use tick::{Refusal, TickClock, TickLimits, TickScheduler, TICKS_PER_SECOND};
-pub use world::{EditError, TickReport, World};
+pub use world::{EditError, MineOutcome, TickReport, World};

@@ -20,6 +20,11 @@ pub struct GameItems {
     pub coal: ItemId,
     pub raw_iron: ItemId,
     pub raw_gold: ItemId,
+    pub module_speed: ItemId,
+    pub module_reach: ItemId,
+    pub module_fortune: ItemId,
+    /// Consumed to raise the drill's tier.
+    pub drill_upgrade: ItemId,
 }
 
 impl GameItems {
@@ -43,6 +48,27 @@ impl GameItems {
             coal: register(ItemDef::material("engine:coal")),
             raw_iron: register(ItemDef::material("engine:raw_iron")),
             raw_gold: register(ItemDef::material("engine:raw_gold")),
+            // Drill parts. Small stacks: these are milestones, not bulk goods.
+            module_speed: register(
+                ItemDef::material("engine:module_speed")
+                    .with_display_name("Speed Mod")
+                    .with_max_stack(4),
+            ),
+            module_reach: register(
+                ItemDef::material("engine:module_reach")
+                    .with_display_name("Reach Mod")
+                    .with_max_stack(4),
+            ),
+            module_fortune: register(
+                ItemDef::material("engine:module_fortune")
+                    .with_display_name("Fortune Mod")
+                    .with_max_stack(4),
+            ),
+            drill_upgrade: register(
+                ItemDef::material("engine:drill_upgrade")
+                    .with_display_name("Tier Kit")
+                    .with_max_stack(2),
+            ),
         }
     }
 
@@ -86,6 +112,25 @@ impl GameItems {
             Recipe {
                 inputs: vec![ItemStack::new(self.sand, 2), ItemStack::new(self.dirt, 2)],
                 output: ItemStack::new(self.grass, 1),
+            },
+            // Drill progression, craftable from the ore the drill mines.
+            // Vendors, dungeons and supply drops become alternative routes to
+            // these same items later, not separate systems.
+            Recipe {
+                inputs: vec![ItemStack::new(self.raw_iron, 3), ItemStack::new(self.coal, 2)],
+                output: ItemStack::new(self.module_speed, 1),
+            },
+            Recipe {
+                inputs: vec![ItemStack::new(self.raw_iron, 2), ItemStack::new(self.stone, 8)],
+                output: ItemStack::new(self.module_reach, 1),
+            },
+            Recipe {
+                inputs: vec![ItemStack::new(self.raw_gold, 2), ItemStack::new(self.coal, 3)],
+                output: ItemStack::new(self.module_fortune, 1),
+            },
+            Recipe {
+                inputs: vec![ItemStack::new(self.raw_iron, 5), ItemStack::new(self.raw_gold, 2)],
+                output: ItemStack::new(self.drill_upgrade, 1),
             },
         ]
     }

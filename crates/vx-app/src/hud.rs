@@ -28,6 +28,27 @@ pub const SCANLINE: [f32; 4] = [0.0, 0.0, 0.0, 0.16];
 /// A limit being hit. Amber rather than green: it should not look routine.
 pub const ALERT: [f32; 4] = [1.0, 0.72, 0.10, 1.0];
 
+/// The deck's tabs, in order. The last three are visible but offline —
+/// the roadmap in the player's hands, which is most of what makes a device
+/// feel like a device rather than a menu.
+pub const DECK_TABS: [&str; 6] = ["ITEMS", "CRAFT", "DRILL", "DRONES", "SUPPLY", "QUESTS"];
+/// Tabs at this index and beyond are not yet wired to anything.
+pub const FIRST_OFFLINE_TAB: usize = 3;
+
+/// The drill as the deck shows it.
+#[derive(Debug, Clone, Default)]
+pub struct DrillView {
+    pub tier: u8,
+    pub speed: f32,
+    pub reach: f32,
+    /// One label per module slot, locked ones included.
+    pub slots: Vec<String>,
+    /// Extra drops per block, from fortune modules.
+    pub bonus_drops: u32,
+    /// The upgrade line: what the next tier costs, or that it is maxed.
+    pub upgrade: String,
+}
+
 /// What the player is looking at, ready to print.
 pub struct Target {
     pub position: BlockPos,
@@ -43,8 +64,12 @@ pub struct HudState {
     pub triangles: u32,
     pub seed: u64,
     pub hotbar: Vec<String>,
-    pub selected_slot: usize,
+    /// Which of the nine bar positions is in hand: 0 deck, 1 drill, 2-8 items.
+    pub bar_selected: usize,
     pub target: Option<Target>,
+    /// Fraction of the current dig completed, while the drill is running.
+    pub mine_progress: Option<f32>,
+    pub drill: DrillView,
     /// Occupied inventory slots as display labels.
     pub inventory_lines: Vec<String>,
     /// Recipe labels, paired with whether they are currently craftable.
@@ -88,8 +113,8 @@ pub enum Screen {
     Main,
     Controls,
     World,
-    /// Carried items and the crafting list.
-    Inventory,
+    /// The handheld: items, crafting, the drill, and the offline subsystems.
+    Deck,
 }
 
 /// What activating a menu entry asked for.
@@ -107,8 +132,10 @@ pub struct Menus {
     screen: Screen,
     selected: usize,
     /// Entries on the current screen when they are not the static list —
-    /// the recipe count, for the inventory screen.
+    /// set per deck tab by the app, which knows the counts.
     dynamic_count: usize,
+    /// Which deck tab is showing.
+    deck_tab: usize,
 }
 
 impl Default for Menus {
@@ -117,6 +144,7 @@ impl Default for Menus {
             screen: Screen::Playing,
             selected: 0,
             dynamic_count: 0,
+            deck_tab: 0,
         }
     }
 }
@@ -152,11 +180,33 @@ impl Menus {
         self.selected = 0;
     }
 
-    /// Open the inventory screen, with `recipe_count` selectable entries.
-    pub fn open_inventory(&mut self, recipe_count: usize) {
-        self.screen = Screen::Inventory;
+    /// Open the deck on `tab`, with `count` selectable entries there.
+    pub fn open_deck(&mut self, tab: usize, count: usize) {
+        self.screen = Screen::Deck;
+        self.deck_tab = tab.min(DECK_TABS.len() - 1);
         self.selected = 0;
-        self.dynamic_count = recipe_count;
+        self.dynamic_count = count;
+    }
+
+    pub fn deck_tab(&self) -> usize {
+        self.deck_tab
+    }
+
+    /// Switch deck tab, wrapping. The app follows up with the new tab's
+    /// entry count via [`Menus::set_entry_count`].
+    pub fn move_tab(&mut self, delta: i32) {
+        if self.screen != Screen::Deck {
+            return;
+        }
+        let count = DECK_TABS.len() as i32;
+        self.deck_tab = (self.deck_tab as i32 + delta).rem_euclid(count) as usize;
+        self.selected = 0;
+    }
+
+    /// Tell the menu how many entries the current view offers.
+    pub fn set_entry_count(&mut self, count: usize) {
+        self.dynamic_count = count;
+        self.selected = self.selected.min(count.saturating_sub(1));
     }
 
     /// Entries on the current screen. Sub-screens are read-only, so they have
@@ -171,7 +221,7 @@ impl Menus {
     /// Move the highlight, wrapping at both ends.
     pub fn move_selection(&mut self, delta: i32) {
         let count = match self.screen {
-            Screen::Inventory => self.dynamic_count,
+            Screen::Deck => self.dynamic_count,
             _ => self.items().len(),
         };
         if count == 0 {
@@ -200,8 +250,8 @@ impl Menus {
                 Some("DISCONNECT") => Some(MenuAction::Quit),
                 _ => None,
             },
-            // Crafting is handled by the app, which owns the inventory.
-            Screen::Inventory => None,
+            // Deck actions are handled by the app, which owns the state.
+            Screen::Deck => None,
             // A sub-screen has nothing to activate; treat it as "go back".
             Screen::Controls | Screen::World => {
                 self.back();
@@ -212,10 +262,10 @@ impl Menus {
     }
 
     /// Step back one level: sub-screen to main menu, main menu to the world.
-    /// The inventory is not part of the pause menu, so it closes outright.
+    /// The deck is not part of the pause menu, so it closes outright.
     pub fn back(&mut self) {
         match self.screen {
-            Screen::Inventory => self.close(),
+            Screen::Deck => self.close(),
             Screen::Controls | Screen::World => {
                 self.screen = Screen::Main;
                 self.selected = 0;
@@ -313,6 +363,17 @@ pub fn draw_hud(ui: &mut OverlayBuilder, state: &HudState) {
         );
     }
 
+    // The dig, as a bar filling under the crosshair.
+    if let Some(progress) = state.mine_progress {
+        let bar_w = 40.0 * scale;
+        let bar_h = 3.0 * scale;
+        let bx = (width - bar_w) / 2.0;
+        let by = height / 2.0 + 9.0 * scale;
+        ui.rect(bx, by, bar_w, bar_h, PANEL);
+        ui.rect_outline(bx, by, bar_w, bar_h, 1.0, DIM);
+        ui.rect(bx, by, bar_w * progress.clamp(0.0, 1.0), bar_h, GREEN);
+    }
+
     // What the crosshair is on, just under the centre so the eye finds it
     // without leaving the middle of the screen.
     if let Some(target) = &state.target {
@@ -337,11 +398,17 @@ fn draw_hotbar(ui: &mut OverlayBuilder, state: &HudState) {
     let line = ui.line_height();
     let pad = 3.0 * scale;
 
-    let labels: Vec<String> = state
-        .hotbar
-        .iter()
-        .enumerate()
-        .map(|(index, name)| format!("{}:{}", index + 1, name))
+    // Devices first — permanent, unmistakable — then the seven item slots,
+    // numbered as the keys that select them.
+    let labels: Vec<String> = ["1:DECK".to_string(), "2:DRILL".to_string()]
+        .into_iter()
+        .chain(
+            state
+                .hotbar
+                .iter()
+                .enumerate()
+                .map(|(index, name)| format!("{}:{}", index + 3, name)),
+        )
         .collect();
 
     let widths: Vec<f32> = labels
@@ -350,12 +417,14 @@ fn draw_hotbar(ui: &mut OverlayBuilder, state: &HudState) {
         .collect();
     let total: f32 = widths.iter().sum::<f32>() + pad * (labels.len() as f32 - 1.0);
 
-    let mut x = (width - total) / 2.0;
+    // Clamped: a bar wider than the frame starts at the edge and clips its
+    // tail, rather than losing both ends to centring.
+    let mut x = ((width - total) / 2.0).max(pad);
     let y = height - line - pad * 3.0;
 
     for (index, label) in labels.iter().enumerate() {
         let w = widths[index];
-        let held = index == state.selected_slot;
+        let held = index == state.bar_selected;
 
         if held {
             // The held slot inverts: lit bar, dark text. Unmissable at a
@@ -419,8 +488,8 @@ pub fn draw_menu(ui: &mut OverlayBuilder, menus: &Menus, state: &HudState) {
         Screen::Main => draw_main_items(ui, menus, inner_x, y, panel_w - 12.0 * scale),
         Screen::Controls => draw_controls(ui, inner_x, y),
         Screen::World => draw_world(ui, inner_x, y, state),
-        Screen::Inventory => {
-            draw_inventory(ui, menus, state, inner_x, y, panel_w - 12.0 * scale)
+        Screen::Deck => {
+            draw_deck(ui, menus, state, inner_x, y, panel_w - 12.0 * scale)
         }
         Screen::Playing => {}
     }
@@ -428,7 +497,7 @@ pub fn draw_menu(ui: &mut OverlayBuilder, menus: &Menus, state: &HudState) {
     // Footer hint, pinned to the bottom of the panel.
     let footer = match menus.screen() {
         Screen::Main => "[W/S] MOVE   [ENTER] EXEC   [ESC] RESUME",
-        Screen::Inventory => "[W/S] PICK   [ENTER] MAKE   [E] CLOSE",
+        Screen::Deck => "[A/D] TAB   [W/S] PICK   [ENTER] ACT   [E] CLOSE",
         _ => "[ESC] BACK",
     };
     // Clear of the double border, not tucked under it.
@@ -440,8 +509,8 @@ pub fn draw_menu(ui: &mut OverlayBuilder, menus: &Menus, state: &HudState) {
     );
 }
 
-/// Carried stacks, then the crafting list with its selection bar.
-fn draw_inventory(
+/// The deck: tab strip, then whichever tab is open.
+fn draw_deck(
     ui: &mut OverlayBuilder,
     menus: &Menus,
     state: &HudState,
@@ -452,27 +521,65 @@ fn draw_inventory(
     let scale = ui.scale();
     let line = ui.line_height();
 
+    // The tab strip. Offline tabs are dim: visible on purpose, so the device
+    // advertises what it will grow into.
+    let mut tab_x = x;
+    for (index, name) in DECK_TABS.iter().enumerate() {
+        let width = ui.text_width(name) + 4.0 * scale;
+        let offline = index >= FIRST_OFFLINE_TAB;
+        if index == menus.deck_tab() {
+            ui.rect(tab_x, y - scale, width, line, if offline { DIM } else { GREEN });
+            ui.text(tab_x + 2.0 * scale, y, name, INVERSE);
+        } else {
+            ui.text(tab_x + 2.0 * scale, y, name, if offline { DIM } else { GREEN });
+        }
+        tab_x += width + 2.0 * scale;
+    }
+    y += line * 1.2;
+    ui.rect(x, y, w, scale, DIM);
+    y += line * 0.8;
+
+    match menus.deck_tab() {
+        0 => draw_deck_items(ui, state, x, y, w),
+        1 => draw_deck_craft(ui, menus, state, x, y, w),
+        2 => draw_deck_drill(ui, menus, state, x, y, w),
+        _ => {
+            ui.text(x, y + line, "// SUBSYSTEM OFFLINE //", ALERT);
+            ui.text(x, y + line * 2.4, "AWAITING HARDWARE. CHECK BACK LATER.", DIM);
+        }
+    }
+}
+
+fn draw_deck_items(ui: &mut OverlayBuilder, state: &HudState, x: f32, mut y: f32, w: f32) {
+    let scale = ui.scale();
+    let line = ui.line_height();
+
     ui.text(x, y, "CARRYING", DIM);
     y += line * 1.3;
 
     if state.inventory_lines.is_empty() {
         ui.text(x + 3.0 * scale, y, "NOTHING. GO DIG.", DIM);
-        y += line;
+        return;
     }
     // Two columns, so a fuller inventory stays inside the panel.
-    let column_rows = 6;
+    let column_rows = 9;
     for (index, label) in state.inventory_lines.iter().take(column_rows * 2).enumerate() {
         let column = (index / column_rows) as f32;
         let row = (index % column_rows) as f32;
         ui.text(x + 3.0 * scale + column * (w / 2.0), y + row * line, label, GREEN);
     }
-    if !state.inventory_lines.is_empty() {
-        y += line * column_rows.min(state.inventory_lines.len()) as f32;
-    }
+}
 
-    y += line * 0.6;
-    ui.rect(x, y, w, scale, DIM);
-    y += line;
+fn draw_deck_craft(
+    ui: &mut OverlayBuilder,
+    menus: &Menus,
+    state: &HudState,
+    x: f32,
+    mut y: f32,
+    w: f32,
+) {
+    let scale = ui.scale();
+    let line = ui.line_height();
 
     ui.text(x, y, "FABRICATE", DIM);
     y += line * 1.3;
@@ -486,7 +593,50 @@ fn draw_inventory(
             let colour = if *craftable { GREEN } else { DIM };
             ui.text(x + 3.0 * scale, y, &format!("  {label}"), colour);
         }
-        y += line * 1.4;
+        y += line * 1.3;
+    }
+}
+
+fn draw_deck_drill(
+    ui: &mut OverlayBuilder,
+    menus: &Menus,
+    state: &HudState,
+    x: f32,
+    mut y: f32,
+    w: f32,
+) {
+    let scale = ui.scale();
+    let line = ui.line_height();
+    let drill = &state.drill;
+
+    ui.text(x, y, &format!("DRILL // TIER {}", drill.tier), BRIGHT);
+    y += line * 1.3;
+    ui.text(
+        x,
+        y,
+        &format!(
+            "SPEED {:.2}   REACH {:.1}   BONUS DROPS +{}",
+            drill.speed, drill.reach, drill.bonus_drops
+        ),
+        DIM,
+    );
+    y += line * 1.6;
+
+    // Module slots, then the upgrade line, as one selectable list.
+    for (index, label) in drill
+        .slots
+        .iter()
+        .chain(std::iter::once(&drill.upgrade))
+        .enumerate()
+    {
+        let held = index == menus.selected();
+        if held {
+            ui.rect(x, y - scale, w, line, GREEN);
+            ui.text(x + 3.0 * scale, y, &format!("> {label}"), INVERSE);
+        } else {
+            ui.text(x + 3.0 * scale, y, &format!("  {label}"), GREEN);
+        }
+        y += line * 1.3;
     }
 }
 
@@ -566,8 +716,17 @@ mod tests {
             triangles: 1234,
             seed: 2024,
             hotbar: vec!["STONE".into(), "DIRT".into(), "GRASS".into()],
-            selected_slot: 0,
+            bar_selected: 1,
             target: None,
+            mine_progress: Some(0.4),
+            drill: DrillView {
+                tier: 1,
+                speed: 0.4,
+                reach: 4.5,
+                slots: vec!["SLOT 1: [EMPTY]".into(), "SLOT 2: [LOCKED]".into()],
+                bonus_drops: 0,
+                upgrade: "UPGRADE TIER: 5 RAW IRON + 2 RAW GOLD".into(),
+            },
             inventory_lines: vec!["STONE x12".into()],
             recipes: vec![("3 STONE + 1 COAL = 1 LAMP".into(), true)],
             mode: "WALK",
@@ -721,7 +880,7 @@ mod tests {
 
     #[test]
     fn every_menu_screen_draws_and_stays_on_screen() {
-        for screen in [Screen::Main, Screen::Controls, Screen::World, Screen::Inventory] {
+        for screen in [Screen::Main, Screen::Controls, Screen::World, Screen::Deck] {
             let mut menus = Menus::default();
             menus.open();
             menus.screen = screen;

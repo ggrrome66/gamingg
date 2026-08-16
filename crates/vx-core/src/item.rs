@@ -53,6 +53,11 @@ impl ItemDef {
         def
     }
 
+    pub fn with_display_name(mut self, display_name: impl Into<String>) -> Self {
+        self.display_name = display_name.into();
+        self
+    }
+
     pub fn with_max_stack(mut self, max_stack: u32) -> Self {
         // A zero max stack would make the item impossible to hold at all.
         self.max_stack = max_stack.max(1);

@@ -36,6 +36,27 @@ pub struct TickReport {
     pub chunks_relit: usize,
 }
 
+/// What one frame of drilling achieved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MineOutcome {
+    /// Still digging; the fraction complete, for the progress bar.
+    Progressing(f32),
+    /// The block yielded. Carries what it was, for drops.
+    Broke(BlockId),
+    /// This block cannot be mined.
+    Refused(EditError),
+}
+
+/// Ceiling on the dig speed the world will honour, in hardness-units per
+/// second. The drill's own clamp is lower; this one exists because `mine`'s
+/// caller is the client, and the client is untrusted by construction. When
+/// the drill state moves server-side this stays as defence in depth.
+const MAX_MINE_SPEED: f32 = 16.0;
+
+/// Longest single step of mining time accepted. Anything above this is a
+/// stall or a hostile dt, and either way it must not become instant progress.
+const MAX_MINE_STEP: f32 = 0.25;
+
 /// Why a block edit was refused.
 ///
 /// Edits are the command interface a client drives the world through, so a
@@ -76,6 +97,11 @@ pub struct World {
     updates_dropped: u64,
     /// Chunks whose lighting needs recomputing.
     relight_queue: std::collections::HashSet<ChunkPos>,
+    /// The block being drilled and how far along it is, if any.
+    ///
+    /// A single option, not a map: one block is mined at a time, so there is
+    /// no keyed collection to grow without bound.
+    mining: Option<(BlockPos, f32)>,
     /// Resource ceilings for simulation. A property of the world rather than
     /// an argument, so no call site can accidentally pass looser ones.
     limits: TickLimits,
@@ -98,6 +124,7 @@ impl World {
             updates: VecDeque::new(),
             updates_dropped: 0,
             relight_queue: std::collections::HashSet::new(),
+            mining: None,
             limits: TickLimits::default(),
         }
     }
@@ -618,6 +645,68 @@ impl World {
         if let Some(chunk) = self.chunks.get_mut(&pos) {
             chunk.clear_dirty();
         }
+    }
+
+    /// Apply one frame of drilling at `pos`.
+    ///
+    /// The caller reports *intent* — where it is pointing and how fast its
+    /// drill runs — and the world decides when the block yields. Keeping the
+    /// decision here is what makes this design survivable over a socket
+    /// later: a protocol where the client announces "I broke it" cannot be
+    /// made safe afterwards.
+    pub fn mine(&mut self, pos: BlockPos, speed: f32, dt: f32) -> MineOutcome {
+        // Both inputs arrive from outside the simulation, so neither is
+        // trusted: NaN poisons the accumulator, and an absurd speed or dt is
+        // instant mining.
+        if !speed.is_finite() || !dt.is_finite() {
+            return MineOutcome::Refused(EditError::OutOfReach);
+        }
+        let speed = speed.clamp(0.0, MAX_MINE_SPEED);
+        let dt = dt.clamp(0.0, MAX_MINE_STEP);
+
+        let block = self.block(pos);
+        if !pos.in_vertical_bounds() || !self.is_loaded(pos.chunk()) {
+            self.mining = None;
+            return MineOutcome::Refused(EditError::Unloaded);
+        }
+        if block.is_air() {
+            self.mining = None;
+            return MineOutcome::Refused(EditError::Empty);
+        }
+        let Some(hardness) = self.registry.get(block).and_then(|def| def.hardness) else {
+            self.mining = None;
+            return MineOutcome::Refused(EditError::Unbreakable);
+        };
+
+        // Progress belongs to one specific block. Retargeting resets it —
+        // otherwise it can be charged on soft dirt and spent on hard ore.
+        let mut progress = match self.mining {
+            Some((current, progress)) if current == pos => progress,
+            _ => 0.0,
+        };
+
+        progress += (speed * dt) / hardness.max(0.05);
+
+        if progress >= 1.0 {
+            self.mining = None;
+            return match self.break_block(pos) {
+                Ok(broken) => MineOutcome::Broke(broken),
+                Err(refusal) => MineOutcome::Refused(refusal),
+            };
+        }
+
+        self.mining = Some((pos, progress));
+        MineOutcome::Progressing(progress)
+    }
+
+    /// The drill came off the block: whatever was accumulated is gone.
+    pub fn stop_mining(&mut self) {
+        self.mining = None;
+    }
+
+    /// The block being drilled and its completion fraction, for the HUD.
+    pub fn mining_progress(&self) -> Option<(BlockPos, f32)> {
+        self.mining
     }
 
     /// True when the block at `pos` blocks movement.
@@ -1492,6 +1581,146 @@ mod tests {
 
         world.unload_beyond(ChunkPos::new(0, 0), 0);
         assert_eq!(world.pending_relights(), 0, "relight outlived its chunk");
+    }
+
+    #[test]
+    fn mining_takes_time_and_hardness_makes_it_take_longer() {
+        let mut world = sandbox();
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let dirt = world.registry().id_of("engine:dirt").unwrap();
+        let stone_pos = BlockPos::new(2, 200, 2);
+        let dirt_pos = BlockPos::new(4, 200, 4);
+        world.set_block(stone_pos, stone);
+        world.set_block(dirt_pos, dirt);
+
+        // Same drill, same cadence: count the frames each takes.
+        let frames_to_break = |world: &mut World, pos| {
+            let mut frames = 0;
+            loop {
+                frames += 1;
+                assert!(frames < 10_000, "mining never completed");
+                match world.mine(pos, 0.4, 0.016) {
+                    MineOutcome::Broke(_) => break frames,
+                    MineOutcome::Progressing(_) => {}
+                    MineOutcome::Refused(refusal) => panic!("refused: {refusal}"),
+                }
+            }
+        };
+
+        let dirt_frames = frames_to_break(&mut world, dirt_pos);
+        let stone_frames = frames_to_break(&mut world, stone_pos);
+
+        assert!(dirt_frames > 1, "dirt broke in a single frame");
+        assert!(
+            stone_frames > dirt_frames,
+            "stone ({stone_frames} frames) was not harder than dirt ({dirt_frames})"
+        );
+    }
+
+    #[test]
+    fn looking_away_discards_mining_progress() {
+        let mut world = sandbox();
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let first = BlockPos::new(2, 200, 2);
+        let second = BlockPos::new(4, 200, 4);
+        world.set_block(first, stone);
+        world.set_block(second, stone);
+
+        // Charge the first block nearly to completion.
+        for _ in 0..50 {
+            world.mine(first, 0.4, 0.016);
+        }
+        let charged = world.mining_progress().unwrap().1;
+        assert!(charged > 0.2, "nothing accumulated");
+
+        // One frame elsewhere, then back: the accumulation must be gone.
+        world.mine(second, 0.4, 0.016);
+        match world.mine(first, 0.4, 0.016) {
+            MineOutcome::Progressing(progress) => {
+                assert!(
+                    progress < charged / 2.0,
+                    "progress {progress} survived retargeting"
+                )
+            }
+            other => panic!("expected fresh progress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_mining_discards_progress_too() {
+        let mut world = sandbox();
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let pos = BlockPos::new(2, 200, 2);
+        world.set_block(pos, stone);
+
+        world.mine(pos, 0.4, 0.016);
+        assert!(world.mining_progress().is_some());
+        world.stop_mining();
+        assert!(world.mining_progress().is_none());
+    }
+
+    #[test]
+    fn an_absurd_speed_is_clamped_rather_than_obeyed() {
+        // The caller is the client; a modified client asks for a million.
+        let mut world = sandbox();
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let pos = BlockPos::new(2, 200, 2);
+        world.set_block(pos, stone);
+
+        match world.mine(pos, 1.0e9, 0.016) {
+            MineOutcome::Broke(_) => panic!("one frame at absurd speed broke the block"),
+            MineOutcome::Progressing(progress) => {
+                assert!(progress < 0.5, "clamp leaked: {progress} in one frame")
+            }
+            MineOutcome::Refused(refusal) => panic!("refused: {refusal}"),
+        }
+
+        // A hostile dt is clamped the same way.
+        world.stop_mining();
+        match world.mine(pos, 0.4, 3600.0) {
+            MineOutcome::Broke(_) => panic!("an hour-long dt broke the block instantly"),
+            MineOutcome::Progressing(progress) => assert!(progress < 0.5),
+            MineOutcome::Refused(refusal) => panic!("refused: {refusal}"),
+        }
+
+        // Non-finite input is refused outright.
+        assert!(matches!(
+            world.mine(pos, f32::NAN, 0.016),
+            MineOutcome::Refused(_)
+        ));
+        assert!(matches!(
+            world.mine(pos, 0.4, f32::INFINITY),
+            MineOutcome::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn bedrock_refuses_the_drill_at_any_speed() {
+        let mut world = sandbox();
+        let bedrock = world.registry().id_of("engine:bedrock").unwrap();
+        let pos = BlockPos::new(2, 200, 2);
+        world.set_block(pos, bedrock);
+
+        for _ in 0..1_000 {
+            match world.mine(pos, MAX_MINE_SPEED, 0.25) {
+                MineOutcome::Refused(EditError::Unbreakable) => {}
+                other => panic!("bedrock yielded: {other:?}"),
+            }
+        }
+        assert_eq!(world.block(pos), bedrock);
+    }
+
+    #[test]
+    fn mining_air_or_unloaded_space_is_refused() {
+        let mut world = sandbox();
+        assert!(matches!(
+            world.mine(BlockPos::new(2, 200, 2), 1.0, 0.016),
+            MineOutcome::Refused(EditError::Empty)
+        ));
+        assert!(matches!(
+            world.mine(BlockPos::new(5000, 60, 5000), 1.0, 0.016),
+            MineOutcome::Refused(EditError::Unloaded)
+        ));
     }
 
     #[test]

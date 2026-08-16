@@ -19,7 +19,8 @@ art exists.
 
 Milestone 1 is complete: the world generates, meshes, streams and renders, and
 there is a binary you can walk, jump, mine, craft and build in, with flight
-one key away.
+one key away. Mining runs through a drill you upgrade for the whole game, and
+everything else runs through the deck — a handheld that is the game's UI.
 
 | Crate | What it does | State |
 |---|---|---|
@@ -66,6 +67,10 @@ foundation is solid rather than being designed around up front.
   until its neighbour streams in.
 - There is no backup or rollback. The atomic rename means a crash cannot leave
   a half-written region, but nothing keeps the previous version of one.
+- The DRILL tab installs the first module kind you carry into the chosen
+  slot; there is no picker yet. With three kinds this is predictable.
+- The bar clips its tail on very long item labels rather than shrinking.
+- The drill's tier and modules are not persisted yet, same as the inventory.
 - A full inventory loses the drop when you mine. There are no dropped-item
   entities yet for it to fall into, and refusing the break would trap the
   player in a hole they cannot dig out of.
@@ -206,6 +211,20 @@ depth-precision noise of the face they lie on, and they break into dashes at
 distance. Biasing the two passes differently would stop them being complements
 and put a double-drawn band along every edge.
 
+**The deck and drill are equipment, not items.** They live on the player, not
+in the inventory, so they cannot be dropped, overwritten or lost — and since
+the deck is the only crafting interface, that turns a possible softlock into
+an unrepresentable state. It also means modules live on a plain `Drill` struct
+instead of forcing per-item instance data into the item system for one object.
+
+**Mining progress belongs to the world, not the client.** The app reports
+intent — "the drill is on this block" — and `World::mine` accumulates progress
+and decides when the block yields, clamping the claimed speed and dt because
+the caller is untrusted by construction. A protocol where the client announces
+"I broke it" cannot be made multiplayer-safe afterwards; this one never says
+it. Progress resets when the target changes, so it cannot be charged on soft
+dirt and spent on hard ore.
+
 **Inventory arithmetic is conservation law first.** Fixed slots that never
 grow, stacks that cannot pass their ceiling, all-or-nothing removal so nothing
 can be half-paid, and inserts that return their overflow instead of vanishing
@@ -258,9 +277,19 @@ capture the mouse for looking around. `F` switches between walking and flying;
 in flight, `Space`/`Left Shift` move up and down. `E` opens the inventory and
 crafting screen; `Escape` opens the menu.
 
+The bar's first two positions are permanent equipment: the **deck** (a
+handheld computer — crafting today, drones, supply drops and quests on its
+greyed tabs later) and the **drill**, the only thing that breaks blocks.
+`1`/`2` select them, `3`–`9` the seven item slots. Digging is hold-to-mine:
+hardness finally matters, a progress bar fills under the crosshair, and
+looking away discards the dig.
+
 You start with nothing: mining fills the inventory, placing drains the held
-hotbar stack, and ores drop their mineral rather than themselves. Lamps exist
-only through crafting — three stone and a coal.
+stack, and ores drop their mineral rather than themselves. The drill starts
+slow on purpose. Speed, reach and fortune modules — and the tier kits that
+unlock more module slots — are crafted from mined ore on the deck's DRILL
+tab, so the first upgrade is felt on every block after it. Vendors, dungeon
+loot and supply drops will later be alternative routes to these same items.
 
 Once the mouse is captured, **left click breaks** the block you are looking at
 and **right click places** the held one against the face you are pointing at.
