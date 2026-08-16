@@ -23,7 +23,7 @@ there is a binary you can fly around in and build in.
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
-| `vx-world` | Paletted chunk storage, terrain generation, world state | Done |
+| `vx-world` | Chunk storage, worldgen, world state, simulation tick | Done |
 | `vx-mesh` | Greedy meshing | Done |
 | `vx-render` | wgpu renderer, camera, tiles, UI overlay, capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
@@ -47,6 +47,13 @@ foundation is solid rather than being designed around up front.
 - Saved chunks are stored uncompressed. A modified chunk costs about 8 KiB and
   a region file has an 8 KiB header floor, which is fine at this scale but is
   the obvious thing to compress later.
+- Scheduled ticks are not persisted. Nothing schedules work far enough ahead
+  for it to matter yet — a falling block resolves within a few steps — but
+  anything with a long-running internal state will need the chunk format to
+  carry its pending ticks, which is a version bump.
+- Falling blocks are instant per step rather than animated, and they do not
+  fall into unloaded chunks, so a column at the edge of the loaded world waits
+  until its neighbour streams in.
 - There is no backup or rollback. The atomic rename means a crash cannot leave
   a half-written region, but nothing keeps the previous version of one.
 - Breaking is instant and reach is a flat 6 blocks. `BlockDef::hardness` is
@@ -67,6 +74,26 @@ interface over a socket rather than restructuring world logic.
 `BlockId` each would cost 128 KiB. Instead blocks index a per-chunk palette,
 packed at the narrowest bit width that fits it. An untouched air chunk collapses
 to zero bits and an empty buffer.
+
+**Simulation runs at a fixed rate, decoupled from the frame rate.** A renderer
+that skips a frame looks briefly worse; a simulation that skips a step
+diverges. `TickClock` accumulates real time and hands out whole steps.
+
+**The tick system is bounded everywhere, on purpose.** It is the engine's most
+inviting denial-of-service surface, because the work it does is driven by world
+content rather than by anything the player asks for directly. Three failure
+modes are designed against, each with a test that shows the bound holding.
+*Runaway catch-up*: a suspended process reports an enormous elapsed time, and
+naively catching up takes longer than the frame it is catching up on, so the
+next frame owes more — the spiral of death. Catch-up is capped and the
+remaining debt is discarded rather than carried. *Queue flooding*: a tick
+handler may schedule more ticks, so a cascade is amplification; the queue has a
+hard ceiling, refuses past it, and de-duplicates by position so repeatedly
+scheduling one block cannot fill it. *Overflow*: a due time is `now + delay`,
+and wrapping it would leave a tick permanently overdue, firing every step
+forever; delays are capped and the arithmetic saturates. Refusals are counted
+and surfaced on the HUD, because a limit that is silently absorbed looks
+exactly like one that is never reached.
 
 **A save is the diff against what generation would produce.** Worldgen is a
 pure function of `(seed, position)`, so an untouched chunk can be recreated

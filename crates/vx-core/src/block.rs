@@ -47,6 +47,8 @@ pub struct BlockDef {
     pub textures: [u16; 6],
     /// Time multiplier to break. `None` means unbreakable.
     pub hardness: Option<f32>,
+    /// Falls when the space beneath it is free, like sand and gravel.
+    pub gravity: bool,
 }
 
 impl BlockDef {
@@ -61,6 +63,7 @@ impl BlockDef {
             opaque: true,
             textures: [texture; 6],
             hardness: Some(1.0),
+            gravity: false,
         }
     }
 
@@ -79,6 +82,12 @@ impl BlockDef {
 
     pub fn with_hardness(mut self, hardness: Option<f32>) -> Self {
         self.hardness = hardness;
+        self
+    }
+
+    /// Mark as falling: unsupported blocks drop until something stops them.
+    pub fn falling(mut self) -> Self {
+        self.gravity = true;
         self
     }
 
@@ -148,6 +157,7 @@ impl BlockRegistry {
             opaque: false,
             textures: [0; 6],
             hardness: None,
+            gravity: false,
         };
         let mut registry = BlockRegistry {
             defs: Vec::new(),
@@ -221,6 +231,11 @@ impl BlockRegistry {
     /// breakable, so a stale id cannot be dug out of the world.
     pub fn is_breakable(&self, id: BlockId) -> bool {
         self.get(id).is_some_and(|def| def.hardness.is_some())
+    }
+
+    /// True when the block falls if unsupported.
+    pub fn has_gravity(&self, id: BlockId) -> bool {
+        self.get(id).is_some_and(|def| def.gravity)
     }
 }
 

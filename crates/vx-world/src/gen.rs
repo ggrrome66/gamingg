@@ -40,7 +40,7 @@ impl TerrainBlocks {
             stone: register(BlockDef::uniform("engine:stone", 0)),
             dirt: register(BlockDef::uniform("engine:dirt", 1)),
             grass: register(BlockDef::columnar("engine:grass", 2, 3, 1)),
-            sand: register(BlockDef::uniform("engine:sand", 4)),
+            sand: register(BlockDef::uniform("engine:sand", 4).falling()),
             water: register(
                 BlockDef::uniform("engine:water", 5)
                     .translucent()

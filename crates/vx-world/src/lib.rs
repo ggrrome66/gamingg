@@ -9,6 +9,7 @@ pub mod gen;
 pub mod noise;
 pub mod raycast;
 pub mod storage;
+pub mod tick;
 pub mod world;
 
 pub use chunk::{BlockView, Chunk, SoloChunkView};
@@ -16,4 +17,5 @@ pub use gen::{TerrainBlocks, TerrainGenerator, SEA_LEVEL};
 pub use noise::Fbm;
 pub use raycast::{cast_ray, RayHit};
 pub use storage::PalettedStorage;
-pub use world::{EditError, World};
+pub use tick::{Refusal, TickClock, TickLimits, TickScheduler, TICKS_PER_SECOND};
+pub use world::{EditError, TickReport, World};

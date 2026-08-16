@@ -25,6 +25,8 @@ pub const SHADE: [f32; 4] = [0.0, 0.02, 0.01, 0.78];
 pub const INVERSE: [f32; 4] = [0.02, 0.10, 0.03, 1.0];
 /// The scanline overlay.
 pub const SCANLINE: [f32; 4] = [0.0, 0.0, 0.0, 0.16];
+/// A limit being hit. Amber rather than green: it should not look routine.
+pub const ALERT: [f32; 4] = [1.0, 0.72, 0.10, 1.0];
 
 /// What the player is looking at, ready to print.
 pub struct Target {
@@ -43,6 +45,33 @@ pub struct HudState {
     pub hotbar: Vec<String>,
     pub selected_slot: usize,
     pub target: Option<Target>,
+    /// Simulation counters. These exist to make the engine's resource
+    /// ceilings visible: a limit that is silently absorbed looks identical to
+    /// one that is never reached.
+    pub sim: SimStats,
+}
+
+/// What the simulation is doing, and what it is having to refuse.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SimStats {
+    /// Scheduled ticks waiting to run.
+    pub pending_ticks: usize,
+    /// Block updates waiting to be examined.
+    pub pending_updates: usize,
+    /// Schedule requests turned away because a ceiling was reached.
+    pub refused: u64,
+    /// Notifications discarded because the queue was full.
+    pub dropped: u64,
+    /// Simulation steps abandoned to keep catch-up bounded.
+    pub skipped: u64,
+}
+
+impl SimStats {
+    /// True when any ceiling has been hit. Worth showing loudly: it means the
+    /// world is producing more work than the engine will accept.
+    pub fn strained(&self) -> bool {
+        self.refused > 0 || self.dropped > 0 || self.skipped > 0
+    }
 }
 
 /// Which screen is showing.
@@ -225,6 +254,10 @@ pub fn draw_hud(ui: &mut OverlayBuilder, state: &HudState) {
         ),
         format!("> CHUNK {}/{}", state.chunks_meshed, state.chunks_loaded),
         format!("> TRIS {}", state.triangles),
+        format!(
+            "> SIM Q{} U{}",
+            state.sim.pending_ticks, state.sim.pending_updates
+        ),
     ];
     // Backing panel. Dim green on a sunlit hillside is close to invisible, and
     // the readout has to stay legible over whatever the world puts behind it.
@@ -232,17 +265,26 @@ pub fn draw_hud(ui: &mut OverlayBuilder, state: &HudState) {
         .iter()
         .map(|text| ui.text_width(text))
         .fold(0.0, f32::max);
-    ui.rect(
-        pad / 2.0,
-        pad / 2.0,
-        widest + pad,
-        line * lines.len() as f32 + pad,
-        PANEL,
-    );
+    let rows = lines.len() as f32 + if state.sim.strained() { 1.0 } else { 0.0 };
+    ui.rect(pad / 2.0, pad / 2.0, widest + pad, line * rows + pad, PANEL);
 
     for (index, text) in lines.iter().enumerate() {
         let colour = if index == 0 { GREEN } else { DIM };
         ui.text(pad, pad + index as f32 * line, text, colour);
+    }
+
+    // Only shown when a ceiling has actually been hit, so it reads as a
+    // condition rather than as decoration.
+    if state.sim.strained() {
+        ui.text(
+            pad,
+            pad + lines.len() as f32 * line,
+            &format!(
+                "! LIMIT R{} D{} S{}",
+                state.sim.refused, state.sim.dropped, state.sim.skipped
+            ),
+            ALERT,
+        );
     }
 
     // What the crosshair is on, just under the centre so the eye finds it
@@ -445,6 +487,7 @@ mod tests {
             hotbar: vec!["STONE".into(), "DIRT".into(), "GRASS".into()],
             selected_slot: 0,
             target: None,
+            sim: SimStats::default(),
         }
     }
 

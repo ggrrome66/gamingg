@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use controller::FlyController;
-use hud::{HudState, MenuAction, Menus, Screen, Target};
+use hud::{HudState, MenuAction, Menus, Screen, SimStats, Target};
 use interaction::{hotbar_slot, Action, Hotbar};
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -25,7 +25,7 @@ use vx_platform::InputState;
 use vx_render::headless::{capture_frame, CAPTURE_FORMAT};
 use vx_render::{Camera, GpuContext, Renderer, WindowSurface};
 use vx_save::WorldStore;
-use vx_world::World;
+use vx_world::{TickClock, World, TICKS_PER_SECOND};
 
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -270,6 +270,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             hotbar: hotbar.names(world.registry()),
             selected_slot: hotbar.selected_slot(),
             target,
+            sim: SimStats::default(),
         };
         let ui = build_overlay(&renderer, &menus, &state);
         renderer.set_overlay(&context.device, &context.queue, &ui);
@@ -348,6 +349,8 @@ struct App {
     /// through a new number every frame.
     last_fps: f32,
     last_save: Instant,
+    /// Drives simulation at a fixed rate, independent of frame rate.
+    clock: TickClock,
 }
 
 impl App {
@@ -365,6 +368,7 @@ impl App {
             last_report: Instant::now(),
             last_fps: 0.0,
             last_save: Instant::now(),
+            clock: TickClock::new(TICKS_PER_SECOND),
         }
     }
 
@@ -496,7 +500,8 @@ impl App {
 
     fn frame(&mut self) {
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32().min(0.1);
+        let frame_started = self.last_frame;
+        let dt = (now - frame_started).as_secs_f32().min(0.1);
         self.last_frame = now;
 
         // Disjoint field borrows: the controller and input are separate fields
@@ -513,6 +518,16 @@ impl App {
             // Drain motion that arrived while the menu was up, or the view
             // lurches the moment it closes.
             self.input.take_mouse_delta();
+        }
+
+        // Fixed-step simulation, decoupled from the frame rate. `advance` caps
+        // the catch-up, so a long stall skips time rather than trying to
+        // simulate all of it at once and falling further behind each frame.
+        let steps = self
+            .clock
+            .advance(now - frame_started, active.world.limits().max_catchup_steps);
+        for _ in 0..steps {
+            active.world.tick();
         }
 
         // Keep chunks in step with where the camera is.
@@ -545,6 +560,13 @@ impl App {
             hotbar: active.hotbar.names(active.world.registry()),
             selected_slot: active.hotbar.selected_slot(),
             target,
+            sim: SimStats {
+                pending_ticks: active.world.scheduler().pending(),
+                pending_updates: active.world.pending_updates(),
+                refused: active.world.scheduler().refused(),
+                dropped: active.world.updates_dropped(),
+                skipped: self.clock.skipped(),
+            },
         };
         let ui = build_overlay(&active.renderer, &active.menus, &state);
         active
