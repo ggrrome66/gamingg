@@ -23,7 +23,7 @@ there is a binary you can fly around in and build in.
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
-| `vx-world` | Chunk storage, worldgen, world state, simulation tick | Done |
+| `vx-world` | Chunk storage, worldgen, state, tick, lighting | Done |
 | `vx-mesh` | Greedy meshing | Done |
 | `vx-render` | wgpu renderer, camera, tiles, UI overlay, capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
@@ -51,6 +51,12 @@ foundation is solid rather than being designed around up front.
   for it to matter yet — a falling block resolves within a few steps — but
   anything with a long-running internal state will need the chunk format to
   carry its pending ticks, which is a version bump.
+- Lighting is flat per face, not smoothed per vertex. It suits the blocky look,
+  but there is no ambient occlusion softening the corners.
+- There is no day/night cycle yet, so sky light is always full strength. The
+  channel is kept separate ready for one.
+- A block edit relights its whole chunk on the next tick rather than doing an
+  incremental update around the change. Correct, and far more work than needed.
 - Falling blocks are instant per step rather than animated, and they do not
   fall into unloaded chunks, so a column at the edge of the loaded world waits
   until its neighbour streams in.
@@ -94,6 +100,19 @@ and wrapping it would leave a tick permanently overdue, firing every step
 forever; delays are capped and the arithmetic saturates. Refusals are counted
 and surfaced on the HUD, because a limit that is silently absorbed looks
 exactly like one that is never reached.
+
+**Light is derived state, so it is recomputed rather than saved.** Two
+channels of four bits each — sky and block — kept apart because a day/night
+cycle will dim one and not the other. Recomputing on load keeps saves smaller
+and means there is no lighting data on disk for a corrupt file to lie about;
+the nibble packing makes an out-of-range level unrepresentable rather than
+merely unlikely. Propagation is a flood fill with a hard work ceiling, since
+one edit can in principle relight a whole cavern.
+
+**Light is part of the greedy mesher's merge key.** Faces are lit per-quad, and
+merging compares the whole facet rather than just the block, so a lit floor and
+its shadow never fold into one flat quad. Getting that wrong does not crash —
+it silently smears shadows across whole chunks.
 
 **A save is the diff against what generation would produce.** Worldgen is a
 pure function of `(seed, position)`, so an untouched chunk can be recreated

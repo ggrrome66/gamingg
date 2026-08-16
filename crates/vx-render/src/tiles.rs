@@ -23,8 +23,9 @@ pub mod slot {
     pub const SAND: u32 = 4;
     pub const WATER: u32 = 5;
     pub const BEDROCK: u32 = 6;
+    pub const LAMP: u32 = 7;
     /// Total generated tiles.
-    pub const COUNT: u32 = 7;
+    pub const COUNT: u32 = 8;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -78,6 +79,17 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                     texel
                 }
                 slot::BEDROCK => shade([0.18, 0.18, 0.20], noise * 0.22),
+                slot::LAMP => {
+                    // A bright core inside a darker frame, so a lamp reads as
+                    // a light source even in a frame where everything around
+                    // it is already lit by it.
+                    let edge = x == 0 || y == 0 || x == TILE_SIZE - 1 || y == TILE_SIZE - 1;
+                    if edge {
+                        shade([0.42, 0.34, 0.16], noise * 0.10)
+                    } else {
+                        shade([0.98, 0.90, 0.62], noise * 0.06)
+                    }
+                }
                 // Unknown slots get magenta, the universal "missing texture".
                 _ => [255, 0, 255, 255],
             };

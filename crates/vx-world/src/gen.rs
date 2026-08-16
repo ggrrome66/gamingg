@@ -22,6 +22,7 @@ pub struct TerrainBlocks {
     pub sand: BlockId,
     pub water: BlockId,
     pub bedrock: BlockId,
+    pub lamp: BlockId,
 }
 
 impl TerrainBlocks {
@@ -48,6 +49,9 @@ impl TerrainBlocks {
                     .with_hardness(None),
             ),
             bedrock: register(BlockDef::uniform("engine:bedrock", 6).with_hardness(None)),
+            // Nothing generates lamps; they exist to be placed, and to give
+            // the block-light channel a real source to propagate from.
+            lamp: register(BlockDef::uniform("engine:lamp", 7).emitting(14)),
         }
     }
 
@@ -61,6 +65,7 @@ impl TerrainBlocks {
             sand: registry.id_of("engine:sand")?,
             water: registry.id_of("engine:water")?,
             bedrock: registry.id_of("engine:bedrock")?,
+            lamp: registry.id_of("engine:lamp")?,
         })
     }
 }

@@ -7,10 +7,11 @@
 use std::collections::{HashMap, VecDeque};
 
 use glam::Vec3;
-use vx_core::{BlockId, BlockPos, BlockRegistry, ChunkPos, Face};
+use vx_core::{BlockId, BlockPos, BlockRegistry, ChunkPos, Face, CHUNK_HEIGHT, CHUNK_SIZE};
 
 use crate::chunk::{BlockView, Chunk};
 use crate::gen::{TerrainBlocks, TerrainGenerator};
+use crate::light::{Channel, LightQueue, MAX_LIGHT, RELIGHT_BUDGET};
 use crate::raycast::{cast_ray, RayHit};
 use crate::tick::{TickLimits, TickScheduler};
 
@@ -29,6 +30,8 @@ pub struct TickReport {
     pub blocks_moved: usize,
     /// Notifications discarded because the queue was full.
     pub updates_dropped: usize,
+    /// Chunks whose lighting was recomputed.
+    pub chunks_relit: usize,
 }
 
 /// Why a block edit was refused.
@@ -64,6 +67,8 @@ pub struct World {
     /// Positions to re-examine because a neighbour changed.
     updates: VecDeque<BlockPos>,
     updates_dropped: u64,
+    /// Chunks whose lighting needs recomputing.
+    relight_queue: std::collections::HashSet<ChunkPos>,
     /// Resource ceilings for simulation. A property of the world rather than
     /// an argument, so no call site can accidentally pass looser ones.
     limits: TickLimits,
@@ -81,6 +86,7 @@ impl World {
             scheduler: TickScheduler::new(),
             updates: VecDeque::new(),
             updates_dropped: 0,
+            relight_queue: std::collections::HashSet::new(),
             limits: TickLimits::default(),
         }
     }
@@ -127,13 +133,20 @@ impl World {
 
     /// Load `pos`, generating it if it is not already resident.
     pub fn load_chunk(&mut self, pos: ChunkPos) -> &Chunk {
-        self.chunks
-            .entry(pos)
-            .or_insert_with(|| self.generator.generate(pos))
+        if !self.chunks.contains_key(&pos) {
+            let chunk = self.generator.generate(pos);
+            self.chunks.insert(pos, chunk);
+            // Freshly generated blocks carry no lighting. Queue it here rather
+            // than relying on every caller to remember, or terrain loaded by
+            // any route but the streamer renders black.
+            self.relight_queue.insert(pos);
+        }
+        self.chunks.get(&pos).expect("just inserted")
     }
 
     /// Load every chunk within `radius` of `centre`, returning how many were
-    /// newly generated.
+    /// newly generated. Lighting is queued, not computed — call
+    /// [`World::relight_chunk`] or run a tick before meshing.
     pub fn load_around(&mut self, centre: ChunkPos, radius: i32) -> usize {
         let mut generated = 0;
         for dz in -radius..=radius {
@@ -156,7 +169,9 @@ impl World {
     ///
     /// Replaces whatever was resident at that position.
     pub fn insert_chunk(&mut self, chunk: Chunk) {
-        self.chunks.insert(chunk.pos(), chunk);
+        let pos = chunk.pos();
+        self.chunks.insert(pos, chunk);
+        self.relight_queue.insert(pos);
     }
 
     /// Remove chunks further than `radius` from `centre` and hand them back.
@@ -189,6 +204,7 @@ impl World {
             let gone: std::collections::HashSet<ChunkPos> =
                 unloaded.iter().map(|chunk| chunk.pos()).collect();
             self.updates.retain(|pos| !gone.contains(&pos.chunk()));
+            self.relight_queue.retain(|pos| !gone.contains(pos));
         }
 
         unloaded
@@ -235,8 +251,213 @@ impl World {
             for face in Face::ALL {
                 self.notify(pos.neighbour(face));
             }
+
+            // Light is derived from the blocks, so it is now stale. Deferred
+            // to the tick rather than recomputed here: a chunk relight is far
+            // too heavy to run inside every single block placement.
+            self.relight_queue.insert(pos.chunk());
+            for face in Face::ALL {
+                let neighbour = pos.neighbour(face).chunk();
+                if neighbour != pos.chunk() && self.chunks.contains_key(&neighbour) {
+                    self.relight_queue.insert(neighbour);
+                }
+            }
         }
         Some(previous)
+    }
+
+    /// Packed light at a world position: sky in the high nibble, block in the
+    /// low. Unloaded space reads as full daylight rather than darkness, so the
+    /// edge of the loaded world is not ringed with black.
+    pub fn light(&self, pos: BlockPos) -> u8 {
+        let Some(local) = pos.local() else {
+            // Above the world is open sky; below it is solid rock.
+            return if pos.y >= CHUNK_HEIGHT { 0xf0 } else { 0 };
+        };
+        match self.chunks.get(&pos.chunk()) {
+            Some(chunk) => chunk.light().packed(local.index()),
+            None => 0xf0,
+        }
+    }
+
+    /// Sky light only, 0 where nothing is loaded.
+    fn sky_light(&self, pos: BlockPos) -> u8 {
+        let Some(local) = pos.local() else { return 0 };
+        self.chunks
+            .get(&pos.chunk())
+            .map_or(0, |chunk| chunk.light().sky(local.index()))
+    }
+
+    fn block_light(&self, pos: BlockPos) -> u8 {
+        let Some(local) = pos.local() else { return 0 };
+        self.chunks
+            .get(&pos.chunk())
+            .map_or(0, |chunk| chunk.light().block(local.index()))
+    }
+
+    /// Raise a light level, reporting whether it actually changed. Only ever
+    /// raises: the flood fill takes the brightest contribution.
+    fn raise_light(&mut self, pos: BlockPos, channel: Channel, level: u8) -> bool {
+        let Some(local) = pos.local() else { return false };
+        let Some(chunk) = self.chunks.get_mut(&pos.chunk()) else {
+            return false;
+        };
+        let index = local.index();
+        let grid = chunk.light_mut();
+        let current = match channel {
+            Channel::Sky => grid.sky(index),
+            Channel::Block => grid.block(index),
+        };
+        if current >= level {
+            return false;
+        }
+        match channel {
+            Channel::Sky => grid.set_sky(index, level),
+            Channel::Block => grid.set_block(index, level),
+        }
+        true
+    }
+
+    /// Queue a chunk to have its lighting recomputed.
+    pub fn request_relight(&mut self, pos: ChunkPos) {
+        if self.is_loaded(pos) {
+            self.relight_queue.insert(pos);
+        }
+    }
+
+    pub fn pending_relights(&self) -> usize {
+        self.relight_queue.len()
+    }
+
+    /// Recompute lighting for one chunk, spreading into loaded neighbours.
+    ///
+    /// Returns every chunk whose light changed, so the caller can remesh them.
+    /// Light is a pure function of nearby blocks, so this can always be redone
+    /// from scratch — which is why none of it is persisted.
+    pub fn relight_chunk(&mut self, pos: ChunkPos) -> Vec<ChunkPos> {
+        if !self.is_loaded(pos) {
+            return Vec::new();
+        }
+        // This request is now satisfied however it was made.
+        self.relight_queue.remove(&pos);
+
+        let mut touched: std::collections::HashSet<ChunkPos> = std::collections::HashSet::new();
+        touched.insert(pos);
+
+        if let Some(chunk) = self.chunks.get_mut(&pos) {
+            chunk.light_mut().clear();
+        }
+
+        let origin = pos.origin();
+        let mut sky = LightQueue::new();
+        let mut block = LightQueue::new();
+
+        // Daylight falls straight down a column at full strength until
+        // something opaque stops it. Everything below that starts dark and is
+        // reached, if at all, by the flood fill.
+        for local_z in 0..CHUNK_SIZE {
+            for local_x in 0..CHUNK_SIZE {
+                for y in (0..CHUNK_HEIGHT).rev() {
+                    let at = BlockPos::new(origin.x + local_x, y, origin.z + local_z);
+                    let here = self.block(at);
+                    if self.registry.is_opaque(here) {
+                        break;
+                    }
+                    self.raise_light(at, Channel::Sky, MAX_LIGHT);
+                }
+            }
+        }
+
+        // Seed both fills. Only cells that actually border something darker
+        // need to spread; seeding every lit cell would push tens of thousands
+        // of entries that immediately do nothing.
+        for local_z in 0..CHUNK_SIZE {
+            for local_x in 0..CHUNK_SIZE {
+                for y in 0..CHUNK_HEIGHT {
+                    let at = BlockPos::new(origin.x + local_x, y, origin.z + local_z);
+
+                    let emitted = self.registry.emission(self.block(at));
+                    if emitted > 0 {
+                        self.raise_light(at, Channel::Block, emitted);
+                        block.push(at, emitted);
+                    }
+
+                    let level = self.sky_light(at);
+                    if level > 1 && self.borders_darkness(at, Channel::Sky, level) {
+                        sky.push(at, level);
+                    }
+                    let level = self.block_light(at);
+                    if level > 1 && self.borders_darkness(at, Channel::Block, level) {
+                        block.push(at, level);
+                    }
+                }
+            }
+        }
+
+        self.flood(&mut sky, Channel::Sky, &mut touched);
+        self.flood(&mut block, Channel::Block, &mut touched);
+
+        for chunk in &touched {
+            if let Some(chunk) = self.chunks.get_mut(chunk) {
+                chunk.mark_dirty();
+            }
+        }
+        touched.into_iter().collect()
+    }
+
+    /// True when some neighbour is transparent and darker than `level - 1`,
+    /// so this cell has somewhere to spread to.
+    fn borders_darkness(&self, pos: BlockPos, channel: Channel, level: u8) -> bool {
+        Face::ALL.iter().any(|face| {
+            let next = pos.neighbour(*face);
+            if self.registry.is_opaque(self.block(next)) {
+                return false;
+            }
+            let there = match channel {
+                Channel::Sky => self.sky_light(next),
+                Channel::Block => self.block_light(next),
+            };
+            there + 1 < level
+        })
+    }
+
+    /// Breadth-first spread until the frontier empties or the budget runs out.
+    fn flood(
+        &mut self,
+        queue: &mut LightQueue,
+        channel: Channel,
+        touched: &mut std::collections::HashSet<ChunkPos>,
+    ) {
+        while let Some(pending) = queue.pop(RELIGHT_BUDGET) {
+            if pending.level <= 1 {
+                continue;
+            }
+            let spread = pending.level - 1;
+
+            for face in Face::ALL {
+                let next = pending.pos.neighbour(face);
+                if !next.in_vertical_bounds() || !self.is_loaded(next.chunk()) {
+                    continue;
+                }
+                // Opaque blocks stop light dead.
+                if self.registry.is_opaque(self.block(next)) {
+                    continue;
+                }
+                if self.raise_light(next, channel, spread) {
+                    touched.insert(next.chunk());
+                    queue.push(next, spread);
+                }
+            }
+        }
+
+        if queue.exhausted(RELIGHT_BUDGET) {
+            // Lighting is left subtly wrong in a very large volume rather than
+            // the frame stalling. Worth knowing about.
+            log::warn!(
+                "relight hit its {RELIGHT_BUDGET}-block budget with {} still queued",
+                queue.len()
+            );
+        }
     }
 
     /// The tick queue, for diagnostics and for the app's readout.
@@ -276,6 +497,14 @@ impl World {
     pub fn tick(&mut self) -> TickReport {
         let limits = self.limits;
         let mut report = TickReport::default();
+
+        // One chunk per step. Relighting is the most expensive thing the tick
+        // does, and spreading it out costs nothing but a frame of latency on
+        // a shadow moving.
+        if let Some(pos) = self.relight_queue.iter().next().copied() {
+            self.relight_queue.remove(&pos);
+            report.chunks_relit = self.relight_chunk(pos).len();
+        }
 
         // Notifications first: a block that just lost its support should be
         // queued before this step's ticks run, not after.
@@ -427,6 +656,10 @@ impl World {
 impl BlockView for World {
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockId {
         self.block(BlockPos::new(x, y, z))
+    }
+
+    fn light_at(&self, x: i32, y: i32, z: i32) -> u8 {
+        self.light(BlockPos::new(x, y, z))
     }
 }
 
@@ -749,6 +982,9 @@ mod tests {
     fn sandbox() -> World {
         let mut world = World::new(7);
         world.load_chunk(ChunkPos::new(0, 0));
+        // Loading queues a relight; settle it so tests start from a world
+        // with nothing outstanding.
+        world.relight_chunk(ChunkPos::new(0, 0));
         world
     }
 
@@ -1035,6 +1271,198 @@ mod tests {
 
         assert!(moved > 0, "the simulation stopped making progress");
         assert!(world.scheduler().pending() <= limits.max_pending);
+    }
+
+    /// Hollow out a sealed room and report its interior bounds.
+    fn carve_room(world: &mut World, centre: BlockPos, half: i32) {
+        for x in -half..=half {
+            for y in -half..=half {
+                for z in -half..=half {
+                    world.set_block(centre.offset([x, y, z]), BlockId::AIR);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn open_sky_is_fully_lit_and_solid_ground_is_dark() {
+        let mut world = sandbox();
+        world.relight_chunk(ChunkPos::new(0, 0));
+
+        let surface = world.surface_y(8, 8).unwrap();
+        let sky = BlockPos::new(8, surface + 20, 8);
+        assert_eq!(world.light(sky) >> 4, MAX_LIGHT, "open sky is not lit");
+
+        // Well inside the rock, with daylight blocked by everything above.
+        let buried = BlockPos::new(8, surface - 20, 8);
+        assert_eq!(world.light(buried), 0, "light reached solid ground");
+    }
+
+    #[test]
+    fn a_sealed_room_underground_stays_dark() {
+        let mut world = sandbox();
+        let surface = world.surface_y(8, 8).unwrap();
+        let centre = BlockPos::new(8, surface - 12, 8);
+
+        carve_room(&mut world, centre, 2);
+        world.relight_chunk(ChunkPos::new(0, 0));
+
+        assert_eq!(
+            world.light(centre),
+            0,
+            "a sealed room has no light source and no way in"
+        );
+    }
+
+    #[test]
+    fn a_lamp_lights_its_room_and_falls_off_with_distance() {
+        let mut world = sandbox();
+        let surface = world.surface_y(8, 8).unwrap();
+        let centre = BlockPos::new(8, surface - 12, 8);
+        carve_room(&mut world, centre, 3);
+
+        let lamp = world.registry().id_of("engine:lamp").unwrap();
+        let emission = world.registry().emission(lamp);
+        world.set_block(centre, lamp);
+        world.relight_chunk(ChunkPos::new(0, 0));
+
+        // Dimmer the further out you go, and never brighter than the source.
+        let near = world.light(centre.offset([1, 0, 0])) & 0x0f;
+        let far = world.light(centre.offset([3, 0, 0])) & 0x0f;
+
+        assert!(near > 0, "the lamp lit nothing");
+        assert!(near <= emission, "light exceeded what the lamp emits");
+        assert!(far < near, "light did not fall off: {near} then {far}");
+    }
+
+    #[test]
+    fn light_does_not_leak_through_solid_rock() {
+        // The wall of a lit room must leave the rock behind it dark, or every
+        // cave would glow through its own ceiling.
+        let mut world = sandbox();
+        let surface = world.surface_y(8, 8).unwrap();
+        let centre = BlockPos::new(8, surface - 12, 8);
+        carve_room(&mut world, centre, 2);
+
+        let lamp = world.registry().id_of("engine:lamp").unwrap();
+        world.set_block(centre, lamp);
+        world.relight_chunk(ChunkPos::new(0, 0));
+
+        // Four blocks out is past the room wall and into solid stone.
+        let through_the_wall = centre.offset([4, 0, 0]);
+        assert!(world.is_solid(through_the_wall));
+        assert_eq!(
+            world.light(through_the_wall) & 0x0f,
+            0,
+            "block light passed through rock"
+        );
+    }
+
+    #[test]
+    fn opening_a_roof_lets_daylight_down_the_shaft() {
+        let mut world = sandbox();
+        let surface = world.surface_y(8, 8).unwrap();
+        world.relight_chunk(ChunkPos::new(0, 0));
+
+        let below = BlockPos::new(8, surface - 3, 8);
+        assert_eq!(world.light(below) >> 4, 0, "already lit before digging");
+
+        // Dig a shaft straight down from the surface.
+        for y in (surface - 3)..=surface {
+            world.set_block(BlockPos::new(8, y, 8), BlockId::AIR);
+        }
+        world.relight_chunk(ChunkPos::new(0, 0));
+
+        assert_eq!(
+            world.light(below) >> 4,
+            MAX_LIGHT,
+            "daylight did not reach the bottom of an open shaft"
+        );
+    }
+
+    #[test]
+    fn an_edit_queues_a_relight_that_the_tick_carries_out() {
+        let mut world = sandbox();
+        world.relight_chunk(ChunkPos::new(0, 0));
+        assert_eq!(world.pending_relights(), 0);
+
+        let surface = world.surface_y(8, 8).unwrap();
+        world.break_block(BlockPos::new(8, surface - 1, 8)).unwrap();
+
+        assert!(world.pending_relights() > 0, "the edit did not stale the light");
+
+        let report = world.tick();
+        assert_eq!(report.chunks_relit, 1);
+        assert_eq!(world.pending_relights(), 0);
+    }
+
+    #[test]
+    fn relighting_is_reproducible() {
+        // Light is derived state, which is the whole reason it is not saved.
+        // Recomputing must give the same answer every time or that breaks.
+        let mut world = sandbox();
+        let surface = world.surface_y(8, 8).unwrap();
+        let centre = BlockPos::new(8, surface - 10, 8);
+        carve_room(&mut world, centre, 3);
+        world.set_block(centre, world.registry().id_of("engine:lamp").unwrap());
+
+        world.relight_chunk(ChunkPos::new(0, 0));
+        let first: Vec<u8> = (0..40)
+            .map(|offset| world.light(centre.offset([0, 0, 0]).offset([offset % 5, 0, offset / 5])))
+            .collect();
+
+        world.relight_chunk(ChunkPos::new(0, 0));
+        let second: Vec<u8> = (0..40)
+            .map(|offset| world.light(centre.offset([0, 0, 0]).offset([offset % 5, 0, offset / 5])))
+            .collect();
+
+        assert_eq!(first, second, "relighting the same world gave a different answer");
+    }
+
+    #[test]
+    fn spreading_light_never_brightens_it() {
+        // A flood fill that raised a level anywhere would feed itself and
+        // light the whole world from one lamp.
+        let mut world = sandbox();
+        let surface = world.surface_y(8, 8).unwrap();
+        let centre = BlockPos::new(8, surface - 10, 8);
+        carve_room(&mut world, centre, 3);
+
+        let lamp = world.registry().id_of("engine:lamp").unwrap();
+        let emission = world.registry().emission(lamp);
+        world.set_block(centre, lamp);
+        world.relight_chunk(ChunkPos::new(0, 0));
+
+        for x in -3..=3 {
+            for y in -3..=3 {
+                for z in -3..=3 {
+                    let packed = world.light(centre.offset([x, y, z]));
+                    assert!(
+                        packed & 0x0f <= emission,
+                        "block light {} exceeds the lamp's {emission}",
+                        packed & 0x0f
+                    );
+                    assert!(packed >> 4 <= MAX_LIGHT);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unloading_a_chunk_drops_its_queued_relight() {
+        let mut world = World::new(7);
+        world.load_around(ChunkPos::new(0, 0), 1);
+        // Settle everything loading queued, so what remains is deliberate.
+        while let Some(pos) = world.relight_queue.iter().next().copied() {
+            world.relight_chunk(pos);
+        }
+
+        let leaving = ChunkPos::new(1, 0);
+        world.request_relight(leaving);
+        assert_eq!(world.pending_relights(), 1);
+
+        world.unload_beyond(ChunkPos::new(0, 0), 0);
+        assert_eq!(world.pending_relights(), 0, "relight outlived its chunk");
     }
 
     #[test]

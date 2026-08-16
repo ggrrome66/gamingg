@@ -182,7 +182,9 @@ fn build_scene(
     });
 
     let centre = vx_core::ChunkPos::new(0, 0);
-    world.load_around(centre, radius);
+    // Loading is left to the streamer rather than done up front: it is what
+    // lights each chunk as it arrives, and pre-loading would make it skip them
+    // as already resident and mesh unlit terrain.
     // Screenshots never touch disk, so no store.
     streamer.update(&mut world, renderer, &context.device, centre, None);
 

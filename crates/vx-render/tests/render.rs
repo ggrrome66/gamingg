@@ -8,7 +8,7 @@
 //! Where no adapter exists at all the tests skip rather than fail, so a
 //! contributor without Vulkan installed is not blocked.
 
-use vx_core::{BlockPos, ChunkPos, CHUNK_SIZE};
+use vx_core::{BlockId, BlockPos, ChunkPos, CHUNK_SIZE};
 use vx_mesh::build_mesh;
 use vx_render::headless::{capture_frame, Capture, CAPTURE_FORMAT};
 use vx_render::{Camera, GpuContext, Renderer, SKY_COLOUR};
@@ -58,6 +58,11 @@ fn scene(context: &GpuContext, renderer: &mut Renderer, radius: i32) -> World {
         .filter(|pos| world.is_loaded(*pos))
         .collect();
 
+    // Light before meshing: the mesher bakes light into its vertices, so an
+    // unlit world meshes black.
+    for pos in &positions {
+        world.relight_chunk(*pos);
+    }
     for pos in positions {
         let origin = pos.origin();
         let mesh = build_mesh(&world, world.registry(), [origin.x, 0, origin.z]);
@@ -184,6 +189,8 @@ fn facing_quad(z: f32, half_extent: f32, tile: u32) -> vx_mesh::Mesh {
             normal: [0.0, 0.0, 1.0],
             uv,
             tile,
+            // Full daylight: this quad is a lighting-independent fixture.
+            light: 0xf0,
         })
         .collect();
 
@@ -481,4 +488,95 @@ fn clearing_the_selection_removes_the_cage() {
     assert!(shown > 0);
     assert_eq!(cleared, 0, "the outline survived being cleared");
     assert_eq!(renderer.selection(), None);
+}
+
+/// Wider than the other tests: this one exists to be looked at.
+const DEMO_WIDTH: u32 = 960;
+const DEMO_HEIGHT: u32 = 540;
+
+#[test]
+fn a_lamp_lights_the_room_it_is_placed_in() {
+    // The only way to see lighting work without caves in the world yet: hollow
+    // a room out of solid rock, where sky light cannot reach, and put the one
+    // light source in it. Sealed rock around it stays black, so the falloff is
+    // visible rather than washed out by daylight.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, DEMO_WIDTH, DEMO_HEIGHT);
+
+    let mut world = World::new(2024);
+    world.load_around(ChunkPos::new(0, 0), 1);
+
+    let surface = world.surface_y(8, 8).expect("origin chunk is loaded");
+    let floor = surface - 18;
+
+    // A room carved into the rock, and a lamp standing on its floor.
+    for x in 1..15 {
+        for z in 1..15 {
+            for y in floor..floor + 6 {
+                world.set_block(BlockPos::new(x, y, z), BlockId::AIR);
+            }
+        }
+    }
+    let lamp = world.registry().id_of("engine:lamp").unwrap();
+    world.set_block(BlockPos::new(5, floor, 5), lamp);
+
+    let positions: Vec<ChunkPos> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| ChunkPos::new(x, z)))
+        .filter(|pos| world.is_loaded(*pos))
+        .collect();
+    for pos in &positions {
+        world.relight_chunk(*pos);
+    }
+    for pos in &positions {
+        let origin = pos.origin();
+        let mesh = build_mesh(&world, world.registry(), [origin.x, 0, origin.z]);
+        renderer.set_chunk_mesh(&context.device, *pos, &mesh);
+    }
+
+    let camera = Camera {
+        position: glam::Vec3::new(12.5, floor as f32 + 3.2, 12.5),
+        yaw: -0.82,
+        pitch: -0.30,
+        aspect: DEMO_WIDTH as f32 / DEMO_HEIGHT as f32,
+        ..Camera::default()
+    };
+    renderer.update_camera(&context.queue, &camera);
+
+    let capture = capture_frame(&context, &renderer, DEMO_WIDTH, DEMO_HEIGHT);
+    save(&capture, "lit-room.ppm");
+
+    // The room is underground and sealed, so nothing here is daylight — every
+    // lit pixel came from the lamp.
+    let sky = sky_rgb();
+    assert_eq!(
+        capture
+            .pixels
+            .chunks_exact(4)
+            .filter(|texel| texel[0..3] == sky)
+            .count(),
+        0,
+        "sky is visible, so the camera is not inside the room"
+    );
+
+    // Some of the frame is lit and some is not: that contrast is the feature.
+    let brightness = |texel: &[u8]| texel[0] as u32 + texel[1] as u32 + texel[2] as u32;
+    let lit = capture
+        .pixels
+        .chunks_exact(4)
+        .filter(|texel| brightness(texel) > 150)
+        .count();
+    let dark = capture
+        .pixels
+        .chunks_exact(4)
+        .filter(|texel| brightness(texel) < 60)
+        .count();
+    let total = (DEMO_WIDTH * DEMO_HEIGHT) as usize;
+
+    eprintln!(
+        "lit {:.1}%, dark {:.1}%",
+        lit as f32 / total as f32 * 100.0,
+        dark as f32 / total as f32 * 100.0
+    );
+    assert!(lit > total / 50, "the lamp lit almost nothing: {lit} pixels");
+    assert!(dark > total / 50, "nothing is in shadow: {dark} pixels");
 }

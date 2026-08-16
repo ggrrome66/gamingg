@@ -30,6 +30,11 @@ pub const VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferL
             shader_location: 3,
             format: wgpu::VertexFormat::Uint32, // tile
         },
+        wgpu::VertexAttribute {
+            offset: 36,
+            shader_location: 4,
+            format: wgpu::VertexFormat::Uint32, // packed light
+        },
     ],
 };
 
@@ -86,18 +91,18 @@ mod tests {
     fn the_vertex_layout_matches_the_vertex_struct() {
         // A mismatch here corrupts every attribute downstream and shows up as
         // scrambled geometry, so pin the offsets explicitly.
-        assert_eq!(std::mem::size_of::<Vertex>(), 36);
-        assert_eq!(VERTEX_LAYOUT.array_stride, 36);
+        assert_eq!(std::mem::size_of::<Vertex>(), 40);
+        assert_eq!(VERTEX_LAYOUT.array_stride, 40);
 
         let offsets: Vec<u64> = VERTEX_LAYOUT.attributes.iter().map(|a| a.offset).collect();
-        assert_eq!(offsets, vec![0, 12, 24, 32]);
+        assert_eq!(offsets, vec![0, 12, 24, 32, 36]);
 
         let locations: Vec<u32> = VERTEX_LAYOUT
             .attributes
             .iter()
             .map(|a| a.shader_location)
             .collect();
-        assert_eq!(locations, vec![0, 1, 2, 3]);
+        assert_eq!(locations, vec![0, 1, 2, 3, 4]);
     }
 
     #[test]

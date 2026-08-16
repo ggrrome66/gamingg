@@ -49,6 +49,9 @@ pub struct BlockDef {
     pub hardness: Option<f32>,
     /// Falls when the space beneath it is free, like sand and gravel.
     pub gravity: bool,
+    /// Light this block gives off, 0 to 15. Zero for everything that is not a
+    /// light source.
+    pub light: u8,
 }
 
 impl BlockDef {
@@ -64,6 +67,7 @@ impl BlockDef {
             textures: [texture; 6],
             hardness: Some(1.0),
             gravity: false,
+            light: 0,
         }
     }
 
@@ -88,6 +92,14 @@ impl BlockDef {
     /// Mark as falling: unsupported blocks drop until something stops them.
     pub fn falling(mut self) -> Self {
         self.gravity = true;
+        self
+    }
+
+    /// Make this block a light source. Clamped to the four bits light levels
+    /// are stored in, so a definition cannot ask for a level that cannot be
+    /// represented.
+    pub fn emitting(mut self, level: u8) -> Self {
+        self.light = level.min(15);
         self
     }
 
@@ -158,6 +170,7 @@ impl BlockRegistry {
             textures: [0; 6],
             hardness: None,
             gravity: false,
+            light: 0,
         };
         let mut registry = BlockRegistry {
             defs: Vec::new(),
@@ -236,6 +249,11 @@ impl BlockRegistry {
     /// True when the block falls if unsupported.
     pub fn has_gravity(&self, id: BlockId) -> bool {
         self.get(id).is_some_and(|def| def.gravity)
+    }
+
+    /// Light this block emits, or zero for an unknown id.
+    pub fn emission(&self, id: BlockId) -> u8 {
+        self.get(id).map_or(0, |def| def.light)
     }
 }
 

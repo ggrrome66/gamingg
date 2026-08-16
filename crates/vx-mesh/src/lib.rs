@@ -29,6 +29,10 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     pub tile: u32,
+    /// Packed light for the whole quad: sky in the high nibble, block light in
+    /// the low. Flat across the face rather than interpolated per corner,
+    /// which suits blocky terrain and keeps merged quads honest.
+    pub light: u32,
 }
 
 /// Renderable geometry for one chunk.
@@ -53,7 +57,14 @@ impl Mesh {
     }
 
     /// Append one quad, given its four corners in winding order.
-    fn push_quad(&mut self, corners: [[f32; 3]; 4], normal: [f32; 3], size: [f32; 2], tile: u32) {
+    fn push_quad(
+        &mut self,
+        corners: [[f32; 3]; 4],
+        normal: [f32; 3],
+        size: [f32; 2],
+        tile: u32,
+        light: u32,
+    ) {
         let base = self.vertices.len() as u32;
         let [w, h] = size;
         let uvs = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
@@ -64,6 +75,7 @@ impl Mesh {
                 normal,
                 uv,
                 tile,
+                light,
             });
         }
         self.indices
@@ -119,7 +131,15 @@ fn mesh_face_direction(
     let offset = face.offset();
     let normal = face.normal();
 
-    let mut mask: Vec<Option<BlockId>> = vec![None; (du * dv) as usize];
+    /// What a visible face looks like. Merging compares the whole thing, so a
+    /// face lit differently from its neighbour is never folded into it.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct Facet {
+        block: BlockId,
+        light: u8,
+    }
+
+    let mut mask: Vec<Option<Facet>> = vec![None; (du * dv) as usize];
 
     for slice in 0..dd {
         // Build the visibility mask for this slice.
@@ -142,13 +162,22 @@ fn mesh_face_direction(
                     world[2] + offset[2],
                 );
 
-                mask[(iv * du + iu) as usize] =
-                    face_is_visible(registry, block, neighbour).then_some(block);
+                // Light is sampled from the open block the face looks into,
+                // not from the solid block itself, which is always dark.
+                mask[(iv * du + iu) as usize] = face_is_visible(registry, block, neighbour)
+                    .then(|| Facet {
+                        block,
+                        light: view.light_at(
+                            world[0] + offset[0],
+                            world[1] + offset[1],
+                            world[2] + offset[2],
+                        ),
+                    });
             }
         }
 
-        emit_merged_quads(&mut mask, du, dv, |iu, iv, w, h, block| {
-            let tile = registry.get_or_air(block).texture(face) as u32;
+        emit_merged_quads(&mut mask, du, dv, |iu, iv, w, h, facet| {
+            let tile = registry.get_or_air(facet.block).texture(face) as u32;
 
             // The quad sits on the far side of the voxel for positive faces.
             let plane = slice + i32::from(face.is_positive());
@@ -185,7 +214,13 @@ fn mesh_face_direction(
                 ]
             };
 
-            mesh.push_quad(corners, normal, [w as f32, h as f32], tile);
+            mesh.push_quad(
+                corners,
+                normal,
+                [w as f32, h as f32],
+                tile,
+                facet.light as u32,
+            );
         });
     }
 }
@@ -193,24 +228,24 @@ fn mesh_face_direction(
 /// Merge the mask into maximal rectangles, calling `emit` for each.
 ///
 /// Consumed entries are cleared as it goes, so every face is emitted once.
-fn emit_merged_quads(
-    mask: &mut [Option<BlockId>],
+fn emit_merged_quads<T: Copy + PartialEq>(
+    mask: &mut [Option<T>],
     du: i32,
     dv: i32,
-    mut emit: impl FnMut(i32, i32, i32, i32, BlockId),
+    mut emit: impl FnMut(i32, i32, i32, i32, T),
 ) {
     for iv in 0..dv {
         let mut iu = 0;
         while iu < du {
             let index = (iv * du + iu) as usize;
-            let Some(block) = mask[index] else {
+            let Some(facet) = mask[index] else {
                 iu += 1;
                 continue;
             };
 
-            // Grow along u while the block matches.
+            // Grow along u while the facet matches exactly.
             let mut width = 1;
-            while iu + width < du && mask[(iv * du + iu + width) as usize] == Some(block) {
+            while iu + width < du && mask[(iv * du + iu + width) as usize] == Some(facet) {
                 width += 1;
             }
 
@@ -219,14 +254,14 @@ fn emit_merged_quads(
             let mut height = 1;
             'grow: while iv + height < dv {
                 for offset in 0..width {
-                    if mask[((iv + height) * du + iu + offset) as usize] != Some(block) {
+                    if mask[((iv + height) * du + iu + offset) as usize] != Some(facet) {
                         break 'grow;
                     }
                 }
                 height += 1;
             }
 
-            emit(iu, iv, width, height, block);
+            emit(iu, iv, width, height, facet);
 
             // Clear the consumed rectangle.
             for row in 0..height {

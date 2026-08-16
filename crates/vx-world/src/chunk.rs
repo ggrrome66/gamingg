@@ -2,6 +2,7 @@
 
 use vx_core::{BlockId, ChunkPos, LocalPos, CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_VOLUME};
 
+use crate::light::LightGrid;
 use crate::storage::PalettedStorage;
 
 /// One 16×256×16 column of blocks.
@@ -11,6 +12,9 @@ pub struct Chunk {
     blocks: PalettedStorage,
     /// Set when the contents change, cleared once a mesh has been rebuilt.
     dirty: bool,
+    /// Per-block light. Derived from the blocks, so it is recomputed on load
+    /// rather than saved.
+    light: LightGrid,
     /// Set when the contents diverge from what generation would produce,
     /// cleared once written to disk.
     ///
@@ -27,6 +31,7 @@ impl Chunk {
         Chunk {
             pos,
             blocks: PalettedStorage::empty_chunk(),
+            light: LightGrid::dark(),
             dirty: false,
             modified: false,
         }
@@ -37,6 +42,7 @@ impl Chunk {
         Chunk {
             pos,
             blocks,
+            light: LightGrid::dark(),
             // Freshly loaded geometry has never been meshed.
             dirty: true,
             // It came from disk, so it is already saved.
@@ -96,6 +102,14 @@ impl Chunk {
         &self.blocks
     }
 
+    pub fn light(&self) -> &LightGrid {
+        &self.light
+    }
+
+    pub fn light_mut(&mut self) -> &mut LightGrid {
+        &mut self.light
+    }
+
     /// Compact the palette after bulk edits such as generation.
     pub fn optimise(&mut self) {
         self.blocks.optimise();
@@ -142,6 +156,16 @@ impl Chunk {
 /// place — or vanishes.
 pub trait BlockView {
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockId;
+
+    /// Packed light at a world position: sky in the high nibble, block light
+    /// in the low.
+    ///
+    /// Defaults to full daylight so views that track no lighting — tests, and
+    /// meshing a chunk in isolation — still render at full brightness instead
+    /// of coming out black.
+    fn light_at(&self, _x: i32, _y: i32, _z: i32) -> u8 {
+        0xf0
+    }
 }
 
 /// A chunk meshed in isolation, treating everything outside it as air.

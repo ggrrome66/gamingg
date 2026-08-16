@@ -4,7 +4,7 @@
 //! produces a visible hitch when flying, so a bounded number are processed per
 //! frame and the rest wait their turn.
 
-use vx_core::{BlockPos, ChunkPos};
+use vx_core::{BlockPos, ChunkPos, Face};
 use vx_mesh::build_mesh;
 use vx_render::Renderer;
 use vx_save::WorldStore;
@@ -119,6 +119,17 @@ impl ChunkStreamer {
                     world.load_chunk(*pos);
                 }
             }
+
+            // Light before meshing, or the chunk is uploaded pitch black and
+            // only corrects itself when something else dirties it. Neighbours
+            // are queued rather than done here: light spilling across the new
+            // seam changes them too, but that can wait for a tick.
+            world.relight_chunk(*pos);
+            for face in [Face::NegX, Face::PosX, Face::NegZ, Face::PosZ] {
+                let offset = face.offset();
+                world.request_relight(ChunkPos::new(pos.x + offset[0], pos.z + offset[2]));
+            }
+
             generated += 1;
         }
 

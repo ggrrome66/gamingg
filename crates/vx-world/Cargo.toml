@@ -10,3 +10,4 @@ description = "Chunk storage, terrain generation and world state."
 vx-core.workspace = true
 glam.workspace = true
 thiserror.workspace = true
+log.workspace = true
