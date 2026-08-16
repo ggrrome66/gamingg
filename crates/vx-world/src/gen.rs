@@ -141,6 +141,10 @@ impl TerrainGenerator {
         // Generation touches the palette heavily; compact before it is cached.
         chunk.optimise();
         chunk.clear_dirty();
+        // Generation is reproducible from the seed, so a freshly generated
+        // chunk is already "saved" — writing it would store nothing that
+        // regenerating could not recreate exactly.
+        chunk.mark_saved();
         chunk
     }
 

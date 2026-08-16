@@ -110,14 +110,46 @@ impl World {
         generated
     }
 
-    /// Drop chunks further than `radius` from `centre`. Returns how many were
-    /// unloaded. Edits are lost until saving lands in M2.
-    pub fn unload_beyond(&mut self, centre: ChunkPos, radius: i32) -> usize {
+    /// Take a chunk that came from somewhere other than the generator —
+    /// off disk, or across a network once that exists.
+    ///
+    /// Replaces whatever was resident at that position.
+    pub fn insert_chunk(&mut self, chunk: Chunk) {
+        self.chunks.insert(chunk.pos(), chunk);
+    }
+
+    /// Remove chunks further than `radius` from `centre` and hand them back.
+    ///
+    /// Returned rather than dropped so the caller can persist anything
+    /// modified first. Dropping them here is how edits used to disappear the
+    /// moment you walked away from them.
+    pub fn unload_beyond(&mut self, centre: ChunkPos, radius: i32) -> Vec<Chunk> {
         let limit = (radius as i64) * (radius as i64);
-        let before = self.chunks.len();
-        self.chunks
-            .retain(|pos, _| pos.distance_squared(centre) <= limit);
-        before - self.chunks.len()
+        let mut unloaded = Vec::new();
+        self.chunks.retain(|pos, chunk| {
+            if pos.distance_squared(centre) <= limit {
+                return true;
+            }
+            // `retain` cannot move the value out, so swap a husk into its place
+            // and take the real one. Cheaper than a second pass to collect the
+            // keys and remove them.
+            let taken = std::mem::replace(chunk, Chunk::empty(*pos));
+            unloaded.push(taken);
+            false
+        });
+        unloaded
+    }
+
+    /// Every resident chunk holding unsaved changes.
+    pub fn modified_chunks(&self) -> impl Iterator<Item = &Chunk> + '_ {
+        self.chunks.values().filter(|chunk| chunk.is_modified())
+    }
+
+    /// Mark a resident chunk as written to disk.
+    pub fn mark_saved(&mut self, pos: ChunkPos) {
+        if let Some(chunk) = self.chunks.get_mut(&pos) {
+            chunk.mark_saved();
+        }
     }
 
     /// Block at a world position. Unloaded chunks and out-of-bounds heights
@@ -286,7 +318,7 @@ mod tests {
         world.load_around(ChunkPos::new(0, 0), 3);
         let before = world.loaded_chunk_count();
 
-        let dropped = world.unload_beyond(ChunkPos::new(0, 0), 1);
+        let dropped = world.unload_beyond(ChunkPos::new(0, 0), 1).len();
 
         assert!(dropped > 0);
         assert_eq!(world.loaded_chunk_count(), before - dropped);

@@ -7,6 +7,7 @@
 use vx_core::{BlockPos, ChunkPos};
 use vx_mesh::build_mesh;
 use vx_render::Renderer;
+use vx_save::WorldStore;
 use vx_world::World;
 
 /// Chunk-streaming settings.
@@ -83,20 +84,42 @@ impl ChunkStreamer {
         renderer: &mut Renderer,
         device: &wgpu::Device,
         centre: ChunkPos,
+        mut store: Option<&mut WorldStore>,
     ) -> usize {
         let radius = self.config.render_distance;
         let wanted = chunks_in_range(centre, radius);
 
-        // Generate a few of the nearest missing chunks.
+        // Fill in the nearest missing chunks, preferring what is on disk.
         let mut generated = 0;
         for pos in &wanted {
             if generated >= self.config.generate_budget {
                 break;
             }
-            if !world.is_loaded(*pos) {
-                world.load_chunk(*pos);
-                generated += 1;
+            if world.is_loaded(*pos) {
+                continue;
             }
+
+            // A chunk that fails to decode is logged and regenerated rather
+            // than taking the session down: losing one column beats losing the
+            // world to a single bad payload.
+            let restored = match store.as_deref_mut() {
+                Some(store) => match store.load_chunk(*pos, world.registry()) {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        log::error!("could not load chunk {},{}: {error}", pos.x, pos.z);
+                        None
+                    }
+                },
+                None => None,
+            };
+
+            match restored {
+                Some(chunk) => world.insert_chunk(chunk),
+                None => {
+                    world.load_chunk(*pos);
+                }
+            }
+            generated += 1;
         }
 
         // Drop anything that has drifted out of range, with a margin so a
@@ -112,7 +135,21 @@ impl ChunkStreamer {
             renderer.remove_chunk(pos);
             self.meshed.remove(&pos);
         }
-        world.unload_beyond(centre, keep);
+
+        // Anything the player changed has to be staged before it leaves
+        // memory. This is the moment edits used to be lost.
+        let unloaded = world.unload_beyond(centre, keep);
+        if let Some(store) = store {
+            for chunk in unloaded.iter().filter(|chunk| chunk.is_modified()) {
+                if let Err(error) = store.store_chunk(chunk, world.registry()) {
+                    log::error!(
+                        "could not stage chunk {},{} for saving: {error}",
+                        chunk.pos().x,
+                        chunk.pos().z
+                    );
+                }
+            }
+        }
 
         // Mesh whatever is loaded but not yet uploaded, plus anything the
         // world has flagged dirty after an edit.
@@ -228,11 +265,11 @@ mod tests {
         let centre = ChunkPos::new(0, 0);
 
         world.load_around(centre, 1);
-        streamer.update(&mut world, &mut renderer, &context.device, centre);
+        streamer.update(&mut world, &mut renderer, &context.device, centre, None);
 
         // A second update with nothing dirty must upload nothing, or the
         // "changed" assertions below prove nothing.
-        let idle = streamer.update(&mut world, &mut renderer, &context.device, centre);
+        let idle = streamer.update(&mut world, &mut renderer, &context.device, centre, None);
         assert_eq!(idle, 0, "the streamer re-meshed a clean world");
         let before = renderer.triangle_count();
 
@@ -243,7 +280,7 @@ mod tests {
         let stone = world.registry().id_of("engine:stone").unwrap();
         world.place_block(floating, stone).unwrap();
 
-        let uploaded = streamer.update(&mut world, &mut renderer, &context.device, centre);
+        let uploaded = streamer.update(&mut world, &mut renderer, &context.device, centre, None);
 
         assert_eq!(uploaded, 1, "the edited chunk was not re-meshed");
         assert_eq!(
@@ -254,13 +291,162 @@ mod tests {
 
         // And breaking it puts the world back exactly as it was.
         world.break_block(floating).unwrap();
-        streamer.update(&mut world, &mut renderer, &context.device, centre);
+        streamer.update(&mut world, &mut renderer, &context.device, centre, None);
 
         assert_eq!(
             renderer.triangle_count(),
             before,
             "breaking the block did not undo the geometry it added"
         );
+    }
+
+    /// A scratch saves directory that cleans up after itself.
+    struct TempSaves(std::path::PathBuf);
+
+    impl TempSaves {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "vx-app-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            TempSaves(path)
+        }
+    }
+
+    impl Drop for TempSaves {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_build_survives_walking_away_and_coming_back() {
+        // The whole point of persistence, end to end through the streamer:
+        // place a block, travel far enough that its chunk unloads, then return
+        // with a fresh world and store. Before this, `unload_beyond` dropped
+        // the chunk and the edit was gone.
+        let Ok(context) = vx_render::GpuContext::headless_blocking() else {
+            eprintln!("skipping: no Vulkan adapter available");
+            return;
+        };
+        let saves = TempSaves::new("roundtrip");
+
+        let mut renderer =
+            vx_render::Renderer::new(&context, vx_render::headless::CAPTURE_FORMAT, 64, 64);
+        let mut streamer = settled();
+        let origin = ChunkPos::new(0, 0);
+        let marker = BlockPos::new(4, 200, 4);
+
+        let placed = {
+            let mut store = vx_save::WorldStore::open(&saves.0, "test", 2024).unwrap();
+            let mut world = vx_world::World::new(store.seed());
+
+            streamer.update(
+                &mut world,
+                &mut renderer,
+                &context.device,
+                origin,
+                Some(&mut store),
+            );
+
+            let stone = world.registry().id_of("engine:stone").unwrap();
+            world.place_block(marker, stone).unwrap();
+            assert_eq!(world.modified_chunks().count(), 1);
+
+            // Travel far enough that the edited chunk falls outside the keep
+            // radius, which is what stages it for writing.
+            streamer.update(
+                &mut world,
+                &mut renderer,
+                &context.device,
+                ChunkPos::new(400, 400),
+                Some(&mut store),
+            );
+            assert!(!world.is_loaded(origin), "the chunk never unloaded");
+
+            store.flush().unwrap();
+            stone
+        };
+
+        // Nothing shared with the first session but the directory on disk.
+        let mut store = vx_save::WorldStore::open(&saves.0, "test", 999).unwrap();
+        assert_eq!(store.seed(), 2024, "the saved seed was not honoured");
+
+        let mut world = vx_world::World::new(store.seed());
+        let mut streamer = settled();
+        streamer.update(
+            &mut world,
+            &mut renderer,
+            &context.device,
+            origin,
+            Some(&mut store),
+        );
+
+        assert_eq!(
+            world.block(marker),
+            placed,
+            "the block did not survive the round trip"
+        );
+    }
+
+    #[test]
+    fn untouched_terrain_is_never_written_to_disk() {
+        // Generation is reproducible from the seed, so streaming across a
+        // world without building anything must leave the save empty.
+        let Ok(context) = vx_render::GpuContext::headless_blocking() else {
+            eprintln!("skipping: no Vulkan adapter available");
+            return;
+        };
+        let saves = TempSaves::new("clean");
+
+        let mut renderer =
+            vx_render::Renderer::new(&context, vx_render::headless::CAPTURE_FORMAT, 64, 64);
+        let mut store = vx_save::WorldStore::open(&saves.0, "test", 7).unwrap();
+        let mut world = vx_world::World::new(store.seed());
+        let mut streamer = settled();
+
+        for centre in [ChunkPos::new(0, 0), ChunkPos::new(50, 0), ChunkPos::new(0, 50)] {
+            streamer.update(
+                &mut world,
+                &mut renderer,
+                &context.device,
+                centre,
+                Some(&mut store),
+            );
+        }
+
+        assert_eq!(
+            store.flush().unwrap(),
+            0,
+            "generated terrain was written to disk"
+        );
+    }
+
+    #[test]
+    fn streaming_without_a_store_still_works() {
+        // Screenshots and smoke tests run with no world on disk at all.
+        let Ok(context) = vx_render::GpuContext::headless_blocking() else {
+            eprintln!("skipping: no Vulkan adapter available");
+            return;
+        };
+        let mut renderer =
+            vx_render::Renderer::new(&context, vx_render::headless::CAPTURE_FORMAT, 64, 64);
+        let mut world = vx_world::World::new(3);
+        let mut streamer = settled();
+
+        let uploaded = streamer.update(
+            &mut world,
+            &mut renderer,
+            &context.device,
+            ChunkPos::new(0, 0),
+            None,
+        );
+        assert!(uploaded > 0);
     }
 
     #[test]
@@ -283,9 +469,9 @@ mod tests {
         let centre = ChunkPos::new(0, 0);
 
         world.load_around(centre, 1);
-        streamer.update(&mut world, &mut renderer, &context.device, centre);
+        streamer.update(&mut world, &mut renderer, &context.device, centre, None);
         assert_eq!(
-            streamer.update(&mut world, &mut renderer, &context.device, centre),
+            streamer.update(&mut world, &mut renderer, &context.device, centre, None),
             0
         );
 
@@ -296,7 +482,7 @@ mod tests {
         let stone = world.registry().id_of("engine:stone").unwrap();
         world.place_block(seam, stone).unwrap();
 
-        let uploaded = streamer.update(&mut world, &mut renderer, &context.device, centre);
+        let uploaded = streamer.update(&mut world, &mut renderer, &context.device, centre, None);
 
         assert_eq!(
             uploaded, 2,

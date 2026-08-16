@@ -2000,6 +2000,7 @@ dependencies = [
  "vx-mesh",
  "vx-platform",
  "vx-render",
+ "vx-save",
  "vx-world",
  "wgpu",
  "winit",
@@ -2045,6 +2046,16 @@ dependencies = [
  "vx-mesh",
  "vx-world",
  "wgpu",
+]
+
+[[package]]
+name = "vx-save"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "thiserror 2.0.20",
+ "vx-core",
+ "vx-world",
 ]
 
 [[package]]

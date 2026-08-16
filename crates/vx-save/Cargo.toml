@@ -1,0 +1,13 @@
+[package]
+name = "vx-save"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "On-disk world format: region files, chunk serialisation and world metadata."
+
+[dependencies]
+vx-core.workspace = true
+vx-world.workspace = true
+thiserror.workspace = true
+log.workspace = true

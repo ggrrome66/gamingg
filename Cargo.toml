@@ -6,6 +6,7 @@ members = [
     "crates/vx-mesh",
     "crates/vx-render",
     "crates/vx-platform",
+    "crates/vx-save",
     "crates/vx-app",
 ]
 
@@ -21,6 +22,7 @@ vx-world = { path = "crates/vx-world" }
 vx-mesh = { path = "crates/vx-mesh" }
 vx-render = { path = "crates/vx-render" }
 vx-platform = { path = "crates/vx-platform" }
+vx-save = { path = "crates/vx-save" }
 
 glam = "0.33"
 rayon = "1.12"

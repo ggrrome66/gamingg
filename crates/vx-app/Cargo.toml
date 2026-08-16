@@ -16,6 +16,7 @@ vx-world.workspace = true
 vx-mesh.workspace = true
 vx-render.workspace = true
 vx-platform.workspace = true
+vx-save.workspace = true
 glam.workspace = true
 winit.workspace = true
 wgpu.workspace = true

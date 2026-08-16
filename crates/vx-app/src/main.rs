@@ -14,7 +14,7 @@ mod interaction;
 mod streaming;
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use controller::FlyController;
 use hud::{HudState, MenuAction, Menus, Screen, Target};
@@ -24,6 +24,7 @@ use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 use vx_platform::InputState;
 use vx_render::headless::{capture_frame, CAPTURE_FORMAT};
 use vx_render::{Camera, GpuContext, Renderer, WindowSurface};
+use vx_save::WorldStore;
 use vx_world::World;
 
 use winit::application::ApplicationHandler;
@@ -43,6 +44,9 @@ struct Options {
     /// Which UI to draw in a screenshot. Lets the menus be captured headlessly
     /// rather than only ever being seen by someone sitting at a window.
     ui: UiMode,
+    /// World to load and save. `None` plays without touching disk, which is
+    /// what screenshots and smoke tests want.
+    world: Option<String>,
 }
 
 /// UI selection for `--screenshot`.
@@ -75,6 +79,7 @@ fn parse_args() -> Result<Options, String> {
         width: 1280,
         height: 720,
         ui: UiMode::Hud,
+        world: None,
     };
 
     let mut args = std::env::args().skip(1);
@@ -91,6 +96,16 @@ fn parse_args() -> Result<Options, String> {
             }
             "--screenshot" => options.screenshot = Some(value()?),
             "--ui" => options.ui = UiMode::parse(&value()?)?,
+            "--world" => {
+                let name = value()?;
+                if !vx_save::is_safe_world_name(&name) {
+                    return Err(format!(
+                        "--world {name:?} is not a usable world name (letters, digits, \
+                         spaces, dashes, underscores and dots; no separators)"
+                    ));
+                }
+                options.world = Some(name);
+            }
             "--width" => {
                 options.width = value()?
                     .parse()
@@ -105,7 +120,10 @@ fn parse_args() -> Result<Options, String> {
                 println!(
                     "gamingg\n\n\
                      Options:\n  \
-                     --seed <n>          world seed (default {DEFAULT_SEED})\n  \
+                     --world <name>      world to load and save under the saves\n                       \
+                                         directory; omit to play without saving\n  \
+                     --seed <n>          seed for a new world (default {DEFAULT_SEED});\n                       \
+                                         an existing world keeps its own\n  \
                      --screenshot <path> render one frame to a PPM file and exit\n  \
                      --ui <mode>         UI to draw in a screenshot: none, hud,\n                       \
                                          main, controls, world (default hud)\n  \
@@ -132,7 +150,13 @@ fn main() {
     };
 
     let result = match &options.screenshot {
-        Some(path) => run_screenshot(&options, path),
+        Some(path) => {
+            if options.world.is_some() {
+                // Better to say so than to let the flag look like it worked.
+                eprintln!("warning: --world is ignored with --screenshot, which never touches disk");
+            }
+            run_screenshot(&options, path)
+        }
         None => run_windowed(&options),
     };
 
@@ -159,7 +183,8 @@ fn build_scene(
 
     let centre = vx_core::ChunkPos::new(0, 0);
     world.load_around(centre, radius);
-    streamer.update(&mut world, renderer, &context.device, centre);
+    // Screenshots never touch disk, so no store.
+    streamer.update(&mut world, renderer, &context.device, centre, None);
 
     let surface = world.surface_y(0, 0).unwrap_or(80);
     // Standing height rather than a bird's-eye view: close enough that the
@@ -273,7 +298,12 @@ fn run_windowed(options: &Options) -> Result<(), String> {
     })?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::new(options.seed, options.width, options.height);
+    let mut app = App::new(
+        options.seed,
+        options.width,
+        options.height,
+        options.world.clone(),
+    );
     event_loop
         .run_app(&mut app)
         .map_err(|error| format!("event loop failed: {error}"))
@@ -290,12 +320,23 @@ struct Active {
     camera: Camera,
     hotbar: Hotbar,
     menus: Menus,
+    /// `None` when playing without a world on disk.
+    store: Option<WorldStore>,
 }
+
+/// How often modified chunks are written out while playing.
+///
+/// Staging on unload is not enough on its own: a chunk the player is standing
+/// in never unloads, so without a timer a crash would cost the whole session's
+/// building.
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 struct App {
     seed: u64,
     width: u32,
     height: u32,
+    /// World name to load and save, or `None` to play without touching disk.
+    world: Option<String>,
     active: Option<Active>,
     controller: FlyController,
     input: InputState,
@@ -306,14 +347,16 @@ struct App {
     /// Smoothed over the last reporting interval, so the HUD does not flicker
     /// through a new number every frame.
     last_fps: f32,
+    last_save: Instant,
 }
 
 impl App {
-    fn new(seed: u64, width: u32, height: u32) -> Self {
+    fn new(seed: u64, width: u32, height: u32, world: Option<String>) -> Self {
         App {
             seed,
             width,
             height,
+            world,
             active: None,
             controller: FlyController::default(),
             input: InputState::new(),
@@ -321,6 +364,7 @@ impl App {
             frames: 0,
             last_report: Instant::now(),
             last_fps: 0.0,
+            last_save: Instant::now(),
         }
     }
 
@@ -378,12 +422,61 @@ impl App {
         };
 
         match action {
-            Some(MenuAction::Quit) => event_loop.exit(),
+            Some(MenuAction::Quit) => {
+                self.save();
+                event_loop.exit();
+            }
             // Held keys would otherwise stay down through the transition and
             // send the camera flying the instant the world resumes.
             Some(MenuAction::Resume) => self.input.clear_keys(),
             None => {}
         }
+    }
+
+    /// Stage every modified resident chunk and write out what is pending.
+    ///
+    /// Chunks that unloaded were already staged on the way out; this covers
+    /// the ones still in memory, which includes the one the player is standing
+    /// in and has been building in all session.
+    fn save(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let Some(store) = &mut active.store else { return };
+
+        let pending: Vec<vx_core::ChunkPos> = active
+            .world
+            .modified_chunks()
+            .map(|chunk| chunk.pos())
+            .collect();
+
+        for pos in &pending {
+            let Some(chunk) = active.world.chunk(*pos) else {
+                continue;
+            };
+            if let Err(error) = store.store_chunk(chunk, active.world.registry()) {
+                log::error!("could not stage chunk {},{}: {error}", pos.x, pos.z);
+            }
+        }
+
+        match store.flush() {
+            Ok(0) => {}
+            Ok(written) => {
+                // Only clear the modified flags once the bytes are actually
+                // down. Clearing them on staging would lose the edits for good
+                // if the write then failed.
+                for pos in &pending {
+                    active.world.mark_saved(*pos);
+                }
+                store.evict_clean_regions();
+                log::info!("saved {} chunks across {written} regions", pending.len());
+            }
+            Err(failures) => {
+                for error in failures {
+                    log::error!("save failed: {error}");
+                }
+            }
+        }
+
+        self.last_save = Instant::now();
     }
 
     /// Break or place against whatever the player is looking at.
@@ -429,6 +522,7 @@ impl App {
             &mut active.renderer,
             &active.context.device,
             centre,
+            active.store.as_mut(),
         );
 
         active
@@ -506,6 +600,10 @@ impl App {
         }
 
         self.report_framerate();
+
+        if self.last_save.elapsed() >= AUTOSAVE_INTERVAL {
+            self.save();
+        }
     }
 
     fn report_framerate(&mut self) {
@@ -564,7 +662,27 @@ impl ApplicationHandler for App {
 
         let renderer = Renderer::new(&context, surface.format(), size.width, size.height);
 
-        let world = World::new(self.seed);
+        // Open the world before building it, because an existing one supplies
+        // its own seed and generating against a different one would seam
+        // against whatever is already saved.
+        let store = match &self.world {
+            Some(name) => match WorldStore::open(&vx_platform::paths::saves_dir(), name, self.seed)
+            {
+                Ok(store) => {
+                    log::info!("world {:?} at {}", name, store.root().display());
+                    Some(store)
+                }
+                Err(error) => {
+                    log::error!("could not open world {name:?}: {error}");
+                    event_loop.exit();
+                    return;
+                }
+            },
+            None => None,
+        };
+
+        let seed = store.as_ref().map_or(self.seed, |store| store.seed());
+        let world = World::new(seed);
         let hotbar = Hotbar::from_registry(world.registry());
         let streamer = ChunkStreamer::new(StreamingConfig::default());
         let camera = Camera {
@@ -584,6 +702,7 @@ impl ApplicationHandler for App {
             camera,
             hotbar,
             menus: Menus::default(),
+            store,
         });
 
         // Drop the player onto the terrain rather than leaving them at a fixed
@@ -607,7 +726,10 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.save();
+                event_loop.exit();
+            }
 
             WindowEvent::Resized(size) => {
                 if let Some(active) = &mut self.active {

@@ -18,6 +18,43 @@ use vx_core::{BlockId, CHUNK_VOLUME};
 /// direct representation would be, so packing stops paying for itself.
 const MAX_BITS: u32 = 16;
 
+/// Most palette entries a storage may hold, implied by [`MAX_BITS`].
+pub const MAX_PALETTE: usize = 1 << MAX_BITS;
+
+/// Why packed storage could not be rebuilt from its serialised parts.
+///
+/// Every one of these is reachable from a corrupt or hostile save file, so
+/// they are values to report rather than assertions to trip. In particular
+/// [`StorageError::IndexOutOfPalette`] guards a real memory-safety-adjacent
+/// hazard: [`PalettedStorage::get`] indexes the palette directly, so an index
+/// past its end is a panic in the middle of meshing.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StorageError {
+    #[error("palette is empty")]
+    EmptyPalette,
+    #[error("palette holds {0} entries, more than the {MAX_PALETTE} supported")]
+    PaletteTooLarge(usize),
+    #[error("bit width {0} exceeds the {MAX_BITS} supported")]
+    BitsTooWide(u32),
+    #[error("bit width {bits} cannot index a palette of {entries}")]
+    BitsTooNarrow { bits: u32, entries: usize },
+    #[error("uniform storage needs exactly one palette entry and no data words")]
+    MalformedUniform,
+    #[error("expected {expected} data words for {len} blocks at {bits} bits, found {actual}")]
+    DataLengthMismatch {
+        expected: usize,
+        actual: usize,
+        len: usize,
+        bits: u32,
+    },
+    #[error("block {at} selects palette slot {index}, beyond the {entries} present")]
+    IndexOutOfPalette {
+        at: usize,
+        index: usize,
+        entries: usize,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PalettedStorage {
     palette: Vec<BlockId>,
@@ -65,6 +102,95 @@ impl PalettedStorage {
 
     pub fn palette_len(&self) -> usize {
         self.palette.len()
+    }
+
+    /// The palette itself, for serialisation.
+    pub fn palette(&self) -> &[BlockId] {
+        &self.palette
+    }
+
+    /// The packed index words, for serialisation. Empty when uniform.
+    pub fn raw_data(&self) -> &[u64] {
+        &self.data
+    }
+
+    /// Rebuild storage from serialised parts, checking every invariant the
+    /// accessors rely on.
+    ///
+    /// This is the trust boundary for saved worlds. The parts arrive from a
+    /// file that may be corrupt, truncated, or written by something hostile,
+    /// so nothing here may be assumed — least of all that packed indices are
+    /// inside the palette, which [`PalettedStorage::get`] would otherwise use
+    /// to index out of bounds.
+    pub fn from_parts(
+        palette: Vec<BlockId>,
+        bits: u32,
+        data: Vec<u64>,
+        len: usize,
+    ) -> Result<Self, StorageError> {
+        if palette.is_empty() {
+            return Err(StorageError::EmptyPalette);
+        }
+        if palette.len() > MAX_PALETTE {
+            return Err(StorageError::PaletteTooLarge(palette.len()));
+        }
+        if bits > MAX_BITS {
+            return Err(StorageError::BitsTooWide(bits));
+        }
+
+        if bits == 0 {
+            // Uniform storage carries one entry and no words; anything else
+            // means the width and the payload disagree.
+            if palette.len() != 1 || !data.is_empty() {
+                return Err(StorageError::MalformedUniform);
+            }
+            return Ok(PalettedStorage {
+                palette,
+                bits,
+                data,
+                len,
+            });
+        }
+
+        if bits < Self::bits_for(palette.len()) {
+            return Err(StorageError::BitsTooNarrow {
+                bits,
+                entries: palette.len(),
+            });
+        }
+
+        // Derive the expected word count rather than trusting the one on disk.
+        let expected = Self::words_needed(len, bits);
+        if data.len() != expected {
+            return Err(StorageError::DataLengthMismatch {
+                expected,
+                actual: data.len(),
+                len,
+                bits,
+            });
+        }
+
+        let storage = PalettedStorage {
+            palette,
+            bits,
+            data,
+            len,
+        };
+
+        // O(len), paid once per chunk load, and the only thing standing
+        // between a doctored file and an out-of-bounds palette read.
+        for at in 0..storage.len {
+            let index = storage.get_index(at);
+            if index >= storage.palette.len() {
+                return Err(StorageError::IndexOutOfPalette {
+                    at,
+                    index,
+                    entries: storage.palette.len(),
+                });
+            }
+        }
+
+        Ok(storage)
     }
 
     pub fn bits_per_index(&self) -> u32 {

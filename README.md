@@ -27,9 +27,14 @@ there is a binary you can fly around in and build in.
 | `vx-mesh` | Greedy meshing | Done |
 | `vx-render` | wgpu renderer, camera, tiles, UI overlay, capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
+| `vx-save` | Region files, chunk format, world metadata | Done |
 | `vx-app` | Window, fly controls, streaming, building, HUD, `gamingg` | Done |
-| `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | M3 |
-| `vx-steam` | Steam Workshop mod source | M4 |
+| `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | Later |
+| `vx-steam` | Steam Workshop mod source | Later |
+
+The near-term focus is the engine core — simulation tick, lighting, world
+richness, player physics, items. Third-party mod loading comes after that
+foundation is solid rather than being designed around up front.
 
 ### Known rough edges
 
@@ -39,9 +44,11 @@ there is a binary you can fly around in and build in.
   translucent block; looks wrong the moment two transparent surfaces overlap.
 - Chunks are edited and meshed on the main thread. Meshing is throttled per
   frame to hide it, but it belongs on a worker pool.
-- Nothing persists. Edits live in the loaded chunk and are lost as soon as it
-  unloads, so flying out past the render distance and back regenerates fresh
-  terrain over whatever you built.
+- Saved chunks are stored uncompressed. A modified chunk costs about 8 KiB and
+  a region file has an 8 KiB header floor, which is fine at this scale but is
+  the obvious thing to compress later.
+- There is no backup or rollback. The atomic rename means a crash cannot leave
+  a half-written region, but nothing keeps the previous version of one.
 - Breaking is instant and reach is a flat 6 blocks. `BlockDef::hardness` is
   respected only as breakable/unbreakable; nothing consumes the value itself.
 - The menus are keyboard-only. The mouse is ignored while one is open rather
@@ -60,6 +67,28 @@ interface over a socket rather than restructuring world logic.
 `BlockId` each would cost 128 KiB. Instead blocks index a per-chunk palette,
 packed at the narrowest bit width that fits it. An untouched air chunk collapses
 to zero bits and an empty buffer.
+
+**A save is the diff against what generation would produce.** Worldgen is a
+pure function of `(seed, position)`, so an untouched chunk can be recreated
+exactly and is never written. Only chunks somebody actually modified reach the
+disk, which is why streaming across a world you have not built in produces an
+empty save. `Chunk` tracks that separately from its mesh-dirty flag.
+
+**Reading a save is a trust boundary.** Save files can be truncated by a crash,
+corrupted on disk, or crafted deliberately, so `vx-save` treats every byte as
+hostile: lengths are checked against the bytes actually present before anything
+is allocated, offsets use overflow-checked arithmetic, and every packed block
+index is verified to lie inside its palette — `PalettedStorage::get` indexes the
+palette directly, so an out-of-range index would panic in the middle of meshing.
+World names are matched against an allowed character set rather than filtered
+for dangerous sequences, because filtering invites being outsmarted. Malformed
+input produces an error; it never panics.
+
+**Regions are rewritten whole, through a temporary file and a rename.** Simpler
+than an in-place allocator with a free list, and a torn write is impossible: the
+old file stays intact until the rename succeeds. Viable only because saves hold
+just the modified chunks; if regions ever grow large this is the thing to
+revisit.
 
 **Block ids are not stable across runs.** They are assigned in registration
 order, so the mod set changes them. Anything persisted to disk must key on the
@@ -117,7 +146,14 @@ cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run --release -p vx-app          # opens a window
+cargo run --release -p vx-app -- --world myworld
 ```
+
+Without `--world` nothing is written to disk. With it, the world lives under
+`$XDG_DATA_HOME/gamingg/saves/<name>`; modified chunks are written when they
+unload, every thirty seconds, and on exit. An existing world keeps its own
+seed, so `--seed` only applies when creating one — generating against a
+different seed would seam against whatever is already saved.
 
 Controls: `WASD` to move, `Space`/`Left Shift` for up and down, `Left Ctrl` to
 sprint, click to capture the mouse for looking around, `Escape` to release it.

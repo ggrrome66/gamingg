@@ -11,6 +11,14 @@ pub struct Chunk {
     blocks: PalettedStorage,
     /// Set when the contents change, cleared once a mesh has been rebuilt.
     dirty: bool,
+    /// Set when the contents diverge from what generation would produce,
+    /// cleared once written to disk.
+    ///
+    /// Distinct from `dirty`, which is about the mesh. Worldgen is a pure
+    /// function of `(seed, position)`, so an untouched chunk can be recreated
+    /// exactly and is not worth a byte on disk — only chunks somebody actually
+    /// changed need saving.
+    modified: bool,
 }
 
 impl Chunk {
@@ -20,6 +28,19 @@ impl Chunk {
             pos,
             blocks: PalettedStorage::empty_chunk(),
             dirty: false,
+            modified: false,
+        }
+    }
+
+    /// Rebuild a chunk from storage that came off disk.
+    pub fn from_storage(pos: ChunkPos, blocks: PalettedStorage) -> Self {
+        Chunk {
+            pos,
+            blocks,
+            // Freshly loaded geometry has never been meshed.
+            dirty: true,
+            // It came from disk, so it is already saved.
+            modified: false,
         }
     }
 
@@ -38,8 +59,20 @@ impl Chunk {
         if previous != block {
             self.blocks.set(index, block);
             self.dirty = true;
+            self.modified = true;
         }
         previous
+    }
+
+    /// True when this chunk holds changes not yet on disk.
+    pub fn is_modified(&self) -> bool {
+        self.modified
+    }
+
+    /// Mark the chunk as matching what is stored. Called after a successful
+    /// write, and by generation, whose output is reproducible from the seed.
+    pub fn mark_saved(&mut self) {
+        self.modified = false;
     }
 
     /// True when nothing in this chunk is worth meshing.
