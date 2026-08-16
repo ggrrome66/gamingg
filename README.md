@@ -84,6 +84,18 @@ over line width — every line is one pixel at any resolution — so a wireframe
 cage would be nearly invisible. Solid edges also shrink with distance the way
 the rest of the world does.
 
+**The outline is drawn twice, by complementary depth tests.** A single
+depth-tested pass shows only the edges of the block's exposed face, so a block
+buried in terrain gets no outline at all and two stacked blocks are
+indistinguishable. Instead one pass uses `Less` and draws the edges standing
+clear of the world; a second uses `Greater`, which passes exactly where
+something nearer has already written depth, and draws the buried remainder
+faintly. The tests are complements, so nothing is drawn twice. Both passes
+carry the same negative depth bias — inflation alone leaves edges within
+depth-precision noise of the face they lie on, and they break into dashes at
+distance. Biasing the two passes differently would stop them being complements
+and put a double-drawn band along every edge.
+
 **Block picking walks the voxel grid, it does not sample along the ray.**
 Marching in fixed steps and testing each point either tunnels through blocks
 met at an angle or wastes most of its samples; `vx-world::raycast` uses a grid

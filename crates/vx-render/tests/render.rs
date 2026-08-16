@@ -8,7 +8,7 @@
 //! Where no adapter exists at all the tests skip rather than fail, so a
 //! contributor without Vulkan installed is not blocked.
 
-use vx_core::{ChunkPos, CHUNK_SIZE};
+use vx_core::{BlockPos, ChunkPos, CHUNK_SIZE};
 use vx_mesh::build_mesh;
 use vx_render::headless::{capture_frame, Capture, CAPTURE_FORMAT};
 use vx_render::{Camera, GpuContext, Renderer, SKY_COLOUR};
@@ -338,4 +338,147 @@ fn greedy_meshing_keeps_the_triangle_count_modest() {
         "{per_chunk} triangles per chunk suggests merging is not working \
          (a {CHUNK_SIZE}-wide column of naive cubes would be far more)"
     );
+}
+
+/// Pixels close to the selection colour, as it appears after sRGB encoding.
+///
+/// Matched loosely rather than exactly: the cage is alpha-blended over
+/// whatever is behind it, so no pixel is the pure constant. Phosphor green is
+/// far enough from terrain and sky that "much greener than it is red" is an
+/// unambiguous test.
+fn cage_pixels(capture: &Capture) -> usize {
+    capture
+        .pixels
+        .chunks_exact(4)
+        .filter(|texel| {
+            let (r, g, b) = (texel[0] as i32, texel[1] as i32, texel[2] as i32);
+            g > 150 && g - r > 60 && g - b > 60
+        })
+        .count()
+}
+
+/// A camera looking straight down at the column through `(x, z)`.
+fn looking_down_at(x: i32, z: i32, height: f32) -> Camera {
+    Camera {
+        position: glam::Vec3::new(x as f32 + 0.5, height, z as f32 + 0.5),
+        yaw: 0.0,
+        pitch: -std::f32::consts::FRAC_PI_2 + 0.001,
+        aspect: WIDTH as f32 / HEIGHT as f32,
+        ..Camera::default()
+    }
+}
+
+#[test]
+fn the_selection_cage_reaches_the_screen() {
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 1);
+
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
+    let camera = looking_down_at(0, 0, surface as f32 + 3.0);
+    renderer.update_camera(&context.queue, &camera);
+
+    let before = cage_pixels(&capture_frame(&context, &renderer, WIDTH, HEIGHT));
+
+    // The topmost solid block, directly under the camera.
+    renderer.set_selection(&context.queue, Some(BlockPos::new(0, surface - 1, 0)));
+    let capture = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    save(&capture, "selection-visible.ppm");
+
+    assert_eq!(before, 0, "the terrain already contains cage-coloured pixels");
+    assert!(
+        cage_pixels(&capture) > 50,
+        "the selection outline drew {} matching pixels",
+        cage_pixels(&capture)
+    );
+}
+
+#[test]
+fn a_buried_block_still_shows_its_cage() {
+    // The regression this guards: with a single depth-tested pass, a block
+    // with solid neighbours on every side has no visible edges at all, so you
+    // cannot tell which of two stacked blocks you are pointing at. The
+    // occluded pass draws the buried remainder faintly.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 1);
+
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
+    let camera = looking_down_at(0, 0, surface as f32 + 3.0);
+    renderer.update_camera(&context.queue, &camera);
+
+    // Well below the surface, so every face of it is against solid rock.
+    let buried = BlockPos::new(0, surface - 6, 0);
+    assert!(world.is_solid(buried), "the test block is not underground");
+    assert!(
+        world.is_solid(buried.offset([0, 1, 0])) && world.is_solid(buried.offset([1, 0, 0])),
+        "the test block is not fully enclosed"
+    );
+
+    renderer.set_selection(&context.queue, Some(buried));
+    let capture = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    save(&capture, "selection-buried.ppm");
+
+    assert!(
+        cage_pixels(&capture) > 20,
+        "a buried block drew {} cage pixels; the occluded pass is not drawing",
+        cage_pixels(&capture)
+    );
+}
+
+#[test]
+fn the_cage_never_occludes_the_world() {
+    // It is depth-tested but must write no depth of its own, and must not
+    // paint over sky it does not cover. Comparing sky pixel counts catches
+    // both: a depth-writing cage would punch a hole in the terrain behind it.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 2);
+
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
+    let camera = Camera {
+        position: glam::Vec3::new(0.5, surface as f32 + 2.0, 0.5),
+        yaw: 0.4,
+        pitch: -0.5,
+        aspect: WIDTH as f32 / HEIGHT as f32,
+        ..Camera::default()
+    };
+    renderer.update_camera(&context.queue, &camera);
+
+    let sky = sky_rgb();
+    let count_sky = |capture: &Capture| {
+        capture
+            .pixels
+            .chunks_exact(4)
+            .filter(|texel| texel[0..3] == sky)
+            .count()
+    };
+
+    let without = count_sky(&capture_frame(&context, &renderer, WIDTH, HEIGHT));
+    renderer.set_selection(&context.queue, Some(BlockPos::new(0, surface - 1, 0)));
+    let with = count_sky(&capture_frame(&context, &renderer, WIDTH, HEIGHT));
+
+    assert_eq!(with, without, "the cage changed how much sky is visible");
+}
+
+#[test]
+fn clearing_the_selection_removes_the_cage() {
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 1);
+
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
+    let camera = looking_down_at(0, 0, surface as f32 + 3.0);
+    renderer.update_camera(&context.queue, &camera);
+
+    renderer.set_selection(&context.queue, Some(BlockPos::new(0, surface - 1, 0)));
+    assert!(renderer.selection().is_some());
+    let shown = cage_pixels(&capture_frame(&context, &renderer, WIDTH, HEIGHT));
+
+    renderer.set_selection(&context.queue, None);
+    let cleared = cage_pixels(&capture_frame(&context, &renderer, WIDTH, HEIGHT));
+
+    assert!(shown > 0);
+    assert_eq!(cleared, 0, "the outline survived being cleared");
+    assert_eq!(renderer.selection(), None);
 }

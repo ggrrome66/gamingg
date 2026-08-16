@@ -15,10 +15,35 @@ pub const SELECTION_COLOUR: [f32; 4] = [0.0, 1.0, 0.25, 0.95];
 
 /// Edge thickness, in blocks.
 const THICKNESS: f32 = 0.04;
-/// How far the cage sits proud of the block's own faces. Without this the
-/// outline and the surface it hugs fight over the same depth values and the
-/// edges break up into dashes as the camera moves.
-const INFLATE: f32 = 0.006;
+/// How far the cage sits proud of the block's own faces, so it visibly wraps
+/// the block rather than hugging it. Well short of half a block, or the cage
+/// would start reading as an outline around the neighbour instead.
+const INFLATE: f32 = 0.02;
+
+/// Alpha applied to the occluded half of the cage.
+///
+/// The value itself lives in `selection.wgsl`, which is where it is used;
+/// this mirrors it so the pairing is visible from Rust and is checked by
+/// `the_shader_declares_both_passes_and_the_agreed_ghost_alpha`.
+#[cfg(test)]
+const GHOST_ALPHA: f32 = 0.25;
+
+/// Pulls the cage toward the viewer in depth.
+///
+/// Inflation alone is not enough: an edge lying along a block face sits within
+/// depth-precision noise of it, and at distance or at grazing angles the
+/// outline breaks into dashes. Depth runs 0-near to 1-far here — `camera.rs`
+/// uses the `directx` projection convention — so the bias is negative.
+/// `slope_scale` covers the grazing case, which a constant alone does not.
+///
+/// **Both pipelines use this same value.** They are complementary depth tests,
+/// and biasing them differently would leave a band along every edge where both
+/// pass and draw over each other.
+const DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: -2,
+    slope_scale: -1.0,
+    clamp: 0.0,
+};
 
 /// Corners per edge box, edges per block.
 const EDGES: usize = 12;
@@ -142,8 +167,14 @@ fn push_box(
 }
 
 /// GPU resources for the outline.
+///
+/// Two pipelines share one buffer. `visible` draws the edges in front of the
+/// world, `occluded` draws the rest faintly, so the whole cage always reads
+/// even when the targeted block is buried in terrain — without which you
+/// cannot tell which of two stacked blocks you have.
 pub struct SelectionRenderer {
-    pipeline: wgpu::RenderPipeline,
+    visible: wgpu::RenderPipeline,
+    occluded: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
@@ -170,45 +201,63 @@ impl SelectionRenderer {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("selection pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[SELECTION_VERTEX_LAYOUT],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                // Thin boxes seen edge-on would lose half their faces to
-                // culling, so keep both sides.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth_format,
-                // Depth-tested so terrain in front hides the outline, but it
-                // writes nothing: the cage must not occlude the world.
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        // The two passes differ only in which side of the depth test they take
+        // and how bright they draw, so they are built from one description.
+        let pipeline = |label, compare, entry_point| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[SELECTION_VERTEX_LAYOUT],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    // Thin boxes seen edge-on would lose half their faces to
+                    // culling, so keep both sides.
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: depth_format,
+                    // Never writes depth: the cage must not occlude the world.
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(compare),
+                    stencil: wgpu::StencilState::default(),
+                    bias: DEPTH_BIAS,
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry_point),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        // `Less` passes where nothing nearer has been drawn — including against
+        // the cleared depth of open sky. `Greater` passes exactly where
+        // something nearer already wrote depth, which is the buried remainder.
+        // The two are complements, so no fragment is drawn twice.
+        let visible = pipeline(
+            "selection pipeline (visible)",
+            wgpu::CompareFunction::Less,
+            "fs_main",
+        );
+        let occluded = pipeline(
+            "selection pipeline (occluded)",
+            wgpu::CompareFunction::Greater,
+            "fs_ghost",
+        );
 
         // The geometry is a fixed twelve boxes, so the buffers never grow.
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -223,7 +272,8 @@ impl SelectionRenderer {
         });
 
         SelectionRenderer {
-            pipeline,
+            visible,
+            occluded,
             vertex_buffer,
             index_buffer,
             index_count: 0,
@@ -262,10 +312,16 @@ impl SelectionRenderer {
         if self.index_count == 0 {
             return;
         }
-        pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..self.index_count, 0, 0..1);
+
+        // Buried edges first, then the ones in the open over the top. The
+        // depth tests are complementary so the order is cosmetic, but drawing
+        // the faint pass first matches how they layer conceptually.
+        for pipeline in [&self.occluded, &self.visible] {
+            pass.set_pipeline(pipeline);
+            pass.draw_indexed(0..self.index_count, 0, 0..1);
+        }
     }
 }
 
@@ -365,5 +421,46 @@ mod tests {
     fn the_vertex_layout_matches_the_struct() {
         assert_eq!(std::mem::size_of::<SelectionVertex>(), 28);
         assert_eq!(SELECTION_VERTEX_LAYOUT.array_stride, 28);
+    }
+
+    #[test]
+    fn the_shader_declares_both_passes_and_the_agreed_ghost_alpha() {
+        // The ghost strength lives in the shader but is documented here, and
+        // the two passes are named from Rust. Either drifting would be silent:
+        // a renamed entry point fails only at pipeline creation, and a changed
+        // alpha would never fail at all.
+        let shader = include_str!("selection.wgsl");
+        assert!(shader.contains("fn fs_main"), "visible pass entry point");
+        assert!(shader.contains("fn fs_ghost"), "occluded pass entry point");
+        assert!(
+            shader.contains(&format!("GHOST_ALPHA: f32 = {GHOST_ALPHA}")),
+            "shader ghost alpha no longer matches {GHOST_ALPHA}"
+        );
+    }
+
+    #[test]
+    fn the_cage_stands_clear_of_the_block_face() {
+        // Inflation is what stops the outline sharing depth values with the
+        // surface it hugs. Measured off the built geometry rather than the
+        // constant, so it still means something if the construction changes.
+        let (vertices, _) = build_outline(BlockPos::new(0, 0, 0), GREEN);
+
+        for axis in 0..3 {
+            let lowest = vertices
+                .iter()
+                .map(|v| v.position[axis])
+                .fold(f32::INFINITY, f32::min);
+            let highest = vertices
+                .iter()
+                .map(|v| v.position[axis])
+                .fold(f32::NEG_INFINITY, f32::max);
+
+            // Too tight and the edges dash against the face they lie on.
+            assert!(lowest < -0.01, "axis {axis} hugs the face at {lowest}");
+            assert!(highest > 1.01, "axis {axis} hugs the face at {highest}");
+            // Too loose and it reads as an outline around the neighbour.
+            assert!(lowest > -0.25, "axis {axis} reaches {lowest}");
+            assert!(highest < 1.25, "axis {axis} reaches {highest}");
+        }
     }
 }

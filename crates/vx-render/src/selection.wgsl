@@ -28,7 +28,18 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+// The edges standing clear of the world, at full strength.
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return in.colour;
+}
+
+// The edges buried inside terrain. Same geometry, same colour, drawn faintly
+// by the pass whose depth test only accepts occluded fragments — so the cage
+// stays a complete cube even when five of its faces are inside rock.
+const GHOST_ALPHA: f32 = 0.25;
+
+@fragment
+fn fs_ghost(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.colour.rgb, in.colour.a * GHOST_ALPHA);
 }
