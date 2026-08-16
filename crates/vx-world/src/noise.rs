@@ -29,6 +29,16 @@ fn hash_2d(seed: u64, x: i32, z: i32) -> f32 {
     ((mix64(key) >> 40) as f32) / ((1u32 << 24) as f32)
 }
 
+/// Hash a 3D lattice point to a float in `[0, 1)`.
+#[inline]
+fn hash_3d(seed: u64, x: i32, y: i32, z: i32) -> f32 {
+    let key = seed
+        ^ mix64(x as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ mix64(y as i64 as u64).wrapping_mul(0x85eb_ca6b_c2b2_ae35)
+        ^ mix64(z as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
+    ((mix64(key) >> 40) as f32) / ((1u32 << 24) as f32)
+}
+
 /// Smoothstep, so interpolated values meet lattice points with zero gradient
 /// and the terrain has no visible grid creases.
 #[inline]
@@ -57,6 +67,44 @@ pub fn value_2d(seed: u64, x: f32, z: f32) -> f32 {
     lerp(lerp(c00, c10, tx), lerp(c01, c11, tx), tz)
 }
 
+/// Sample 3D value noise in `[0, 1)`. Caves need a field that varies with
+/// height, which a heightmap cannot express.
+pub fn value_3d(seed: u64, x: f32, y: f32, z: f32) -> f32 {
+    let (x0, y0, z0) = (x.floor(), y.floor(), z.floor());
+    let (tx, ty, tz) = (smooth(x - x0), smooth(y - y0), smooth(z - z0));
+    let (xi, yi, zi) = (x0 as i32, y0 as i32, z0 as i32);
+
+    let corner = |dx, dy, dz| hash_3d(seed, xi + dx, yi + dy, zi + dz);
+
+    let c00 = lerp(corner(0, 0, 0), corner(1, 0, 0), tx);
+    let c10 = lerp(corner(0, 1, 0), corner(1, 1, 0), tx);
+    let c01 = lerp(corner(0, 0, 1), corner(1, 0, 1), tx);
+    let c11 = lerp(corner(0, 1, 1), corner(1, 1, 1), tx);
+
+    lerp(lerp(c00, c10, ty), lerp(c01, c11, ty), tz)
+}
+
+/// Push a `[0, 1]` value away from its middle, so a noise stack that clusters
+/// around its mean produces contrast instead of a narrow band.
+///
+/// This is the shaping step that turns rolling sameness into lowland and
+/// highland. `strength` of 1 leaves the value untouched; higher values
+/// flatten the middle and steepen the ends.
+pub fn contrast(value: f32, strength: f32) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    if value < 0.5 {
+        0.5 * (2.0 * value).powf(strength)
+    } else {
+        1.0 - 0.5 * (2.0 * (1.0 - value)).powf(strength)
+    }
+}
+
+/// Fold noise about its midpoint to make ridges: the fold leaves a crease
+/// where the underlying field crosses 0.5, which reads as a ridgeline.
+pub fn ridged(value: f32) -> f32 {
+    1.0 - (value * 2.0 - 1.0).abs()
+}
+
 /// Settings for a stack of noise octaves.
 #[derive(Debug, Clone, Copy)]
 pub struct Fbm {
@@ -81,6 +129,30 @@ impl Default for Fbm {
 }
 
 impl Fbm {
+    /// Sum the octaves in three dimensions, normalised to `[0, 1]`.
+    pub fn sample_3d(&self, seed: u64, x: f32, y: f32, z: f32) -> f32 {
+        let mut total = 0.0;
+        let mut amplitude = 1.0;
+        let mut frequency = self.frequency;
+        let mut max_amplitude = 0.0;
+
+        for octave in 0..self.octaves.max(1) {
+            // Each octave gets its own seed, or they would all sample the same
+            // lattice and reinforce into visible grid artefacts.
+            let seed = seed ^ mix64(octave as u64 + 0x51ed);
+            total += value_3d(seed, x * frequency, y * frequency, z * frequency) * amplitude;
+            max_amplitude += amplitude;
+            amplitude *= self.persistence;
+            frequency *= self.lacunarity;
+        }
+
+        if max_amplitude > 0.0 {
+            total / max_amplitude
+        } else {
+            0.0
+        }
+    }
+
     /// Sum the octaves, normalised to `[0, 1]`.
     pub fn sample(&self, seed: u64, x: f32, z: f32) -> f32 {
         let mut total = 0.0;

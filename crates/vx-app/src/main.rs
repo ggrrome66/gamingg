@@ -690,7 +690,12 @@ impl ApplicationHandler for App {
         // its own seed and generating against a different one would seam
         // against whatever is already saved.
         let store = match &self.world {
-            Some(name) => match WorldStore::open(&vx_platform::paths::saves_dir(), name, self.seed)
+            Some(name) => match WorldStore::open(
+                &vx_platform::paths::saves_dir(),
+                name,
+                self.seed,
+                vx_world::gen::GENERATOR_VERSION,
+            )
             {
                 Ok(store) => {
                     log::info!("world {:?} at {}", name, store.root().display());

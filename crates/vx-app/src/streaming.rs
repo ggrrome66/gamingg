@@ -354,7 +354,7 @@ mod tests {
         let marker = BlockPos::new(4, 200, 4);
 
         let placed = {
-            let mut store = vx_save::WorldStore::open(&saves.0, "test", 2024).unwrap();
+            let mut store = vx_save::WorldStore::open(&saves.0, "test", 2024, vx_world::gen::GENERATOR_VERSION).unwrap();
             let mut world = vx_world::World::new(store.seed());
 
             streamer.update(
@@ -385,7 +385,7 @@ mod tests {
         };
 
         // Nothing shared with the first session but the directory on disk.
-        let mut store = vx_save::WorldStore::open(&saves.0, "test", 999).unwrap();
+        let mut store = vx_save::WorldStore::open(&saves.0, "test", 999, vx_world::gen::GENERATOR_VERSION).unwrap();
         assert_eq!(store.seed(), 2024, "the saved seed was not honoured");
 
         let mut world = vx_world::World::new(store.seed());
@@ -417,7 +417,7 @@ mod tests {
 
         let mut renderer =
             vx_render::Renderer::new(&context, vx_render::headless::CAPTURE_FORMAT, 64, 64);
-        let mut store = vx_save::WorldStore::open(&saves.0, "test", 7).unwrap();
+        let mut store = vx_save::WorldStore::open(&saves.0, "test", 7, vx_world::gen::GENERATOR_VERSION).unwrap();
         let mut world = vx_world::World::new(store.seed());
         let mut streamer = settled();
 

@@ -24,8 +24,11 @@ pub mod slot {
     pub const WATER: u32 = 5;
     pub const BEDROCK: u32 = 6;
     pub const LAMP: u32 = 7;
+    pub const COAL_ORE: u32 = 8;
+    pub const IRON_ORE: u32 = 9;
+    pub const GOLD_ORE: u32 = 10;
     /// Total generated tiles.
-    pub const COUNT: u32 = 8;
+    pub const COUNT: u32 = 11;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -48,6 +51,21 @@ fn shade(base: [f32; 3], amount: f32) -> [u8; 4] {
         ((base[2] + amount).clamp(0.0, 1.0) * 255.0) as u8,
         255,
     ]
+}
+
+/// Ore: stone with a few blobs of the mineral scattered through it.
+///
+/// The blobs come from the same hash the rest of the tile uses, so an ore tile
+/// is as reproducible as anything else here.
+fn ore_texel(mineral: [f32; 3], noise: f32, tile: u32, x: u32, y: u32) -> [u8; 4] {
+    // Cluster the speckles rather than dusting them evenly, so the result
+    // reads as veins instead of static.
+    let blob = jitter(tile ^ 0x51, x / 3, y / 3) + jitter(tile, x, y) * 0.35;
+    if blob > 0.22 {
+        shade(mineral, noise * 0.10)
+    } else {
+        shade([0.50, 0.50, 0.52], noise * 0.10)
+    }
 }
 
 /// Generate the RGBA pixels for one tile.
@@ -79,6 +97,9 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                     texel
                 }
                 slot::BEDROCK => shade([0.18, 0.18, 0.20], noise * 0.22),
+                slot::COAL_ORE => ore_texel([0.12, 0.12, 0.13], noise, tile, x, y),
+                slot::IRON_ORE => ore_texel([0.78, 0.62, 0.46], noise, tile, x, y),
+                slot::GOLD_ORE => ore_texel([0.92, 0.78, 0.24], noise, tile, x, y),
                 slot::LAMP => {
                     // A bright core inside a darker frame, so a lamp reads as
                     // a light source even in a frame where everything around

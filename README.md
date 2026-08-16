@@ -38,8 +38,11 @@ foundation is solid rather than being designed around up front.
 
 ### Known rough edges
 
-- Terrain reads as broad flat terraces. The noise stack clusters near its mean,
-  so relief is only ~22 blocks spread over a wide area. Needs shaping work.
+- Terrain has relief but little character: no biomes, so the whole world is
+  one palette of grass, dirt and sand, and there are no trees or structures.
+- Caves are noise-carved rather than tunnelled, so they wander without ever
+  leading anywhere. Nothing generates an entrance, either — you find one by
+  digging or by luck.
 - Water is alpha-blended without depth sorting. Fine while water is the only
   translucent block; looks wrong the moment two transparent surfaces overlap.
 - Chunks are edited and meshed on the main thread. Meshing is throttled per
@@ -80,6 +83,26 @@ interface over a socket rather than restructuring world logic.
 `BlockId` each would cost 128 KiB. Instead blocks index a per-chunk palette,
 packed at the narrowest bit width that fits it. An untouched air chunk collapses
 to zero bits and an empty buffer.
+
+**Terrain shaping is deliberately gentle.** Raw fbm clusters around its mean,
+which is what made the first terrain a set of broad terraces spanning barely
+twenty blocks. A redistribution curve spreads it across the full height range
+— but only mildly: a strong curve flattens the middle of the distribution into
+literal plateaus joined by cliffs, trading one kind of terracing for a worse
+one. Ridged noise adds mountains, weighted by the continent value so they rise
+out of highland instead of erupting from the sea.
+
+**Cave thresholds are far higher than they look.** Value noise clusters around
+its mean and the ridge fold peaks exactly there, so a threshold that reads as
+selective is not: the first attempt carved a sixth of the underground into
+swiss cheese and multiplied the triangle count twenty-fold. The calibration
+test reports the real carve fraction, and asserts it stays in a sane band.
+
+**The world records which generator shaped it.** Saves store only modified
+chunks, so changing generation silently rewrites the untouched parts of every
+existing world, leaving cliffs where old edits meet new ground. `level.dat`
+carries a generator version and a mismatch is reported rather than left to be
+discovered as a seam through somebody's house.
 
 **Simulation runs at a fixed rate, decoupled from the frame rate.** A renderer
 that skips a frame looks briefly worse; a simulation that skips a step

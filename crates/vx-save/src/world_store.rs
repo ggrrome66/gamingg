@@ -11,7 +11,7 @@ use crate::cursor::{Cursor, CursorError};
 use crate::region::{region_file_name, region_of, slot_of, Region, RegionError};
 
 const LEVEL_MAGIC: [u8; 4] = *b"VXLV";
-pub const LEVEL_FORMAT_VERSION: u16 = 1;
+pub const LEVEL_FORMAT_VERSION: u16 = 2;
 const LEVEL_FILE: &str = "level.dat";
 const REGION_DIR: &str = "region";
 
@@ -58,6 +58,13 @@ pub enum SaveError {
 pub struct WorldMeta {
     pub seed: u64,
     pub name: String,
+    /// Which terrain generator shaped this world.
+    ///
+    /// Only modified chunks are stored, so everything else is regenerated on
+    /// demand. If the generator changes underneath an existing world, the
+    /// untouched parts come back a different shape and meet the saved parts as
+    /// a cliff. Recording it lets that be reported instead of discovered.
+    pub generator_version: u32,
 }
 
 impl WorldMeta {
@@ -66,6 +73,7 @@ impl WorldMeta {
         out.extend_from_slice(&LEVEL_MAGIC);
         out.extend_from_slice(&LEVEL_FORMAT_VERSION.to_le_bytes());
         out.extend_from_slice(&self.seed.to_le_bytes());
+        out.extend_from_slice(&self.generator_version.to_le_bytes());
         let name = self.name.as_bytes();
         out.extend_from_slice(&(name.len() as u16).to_le_bytes());
         out.extend_from_slice(name);
@@ -94,11 +102,16 @@ impl WorldMeta {
         }
 
         let seed = cursor.take_u64().map_err(malformed)?;
+        let generator_version = cursor.take_u32().map_err(malformed)?;
         let name = cursor
             .take_string("world name", MAX_WORLD_NAME)
             .map_err(malformed)?;
 
-        Ok(WorldMeta { seed, name })
+        Ok(WorldMeta {
+            seed,
+            name,
+            generator_version,
+        })
     }
 }
 
@@ -139,7 +152,12 @@ impl WorldStore {
     /// An existing world keeps its own seed: generating new terrain against a
     /// different seed than the one the saved chunks were built from would
     /// leave a visible seam wherever old meets new.
-    pub fn open(saves: &Path, name: &str, seed: u64) -> Result<Self, SaveError> {
+    pub fn open(
+        saves: &Path,
+        name: &str,
+        seed: u64,
+        generator_version: u32,
+    ) -> Result<Self, SaveError> {
         if !is_safe_world_name(name) {
             return Err(SaveError::UnsafeWorldName(name.to_string()));
         }
@@ -152,6 +170,7 @@ impl WorldStore {
                 let meta = WorldMeta {
                     seed,
                     name: name.to_string(),
+                    generator_version,
                 };
                 std::fs::create_dir_all(&root).map_err(|source| SaveError::Io {
                     path: root.clone(),
@@ -165,6 +184,19 @@ impl WorldStore {
             }
             Err(source) => return Err(SaveError::Io { path: level, source }),
         };
+
+        if meta.generator_version != generator_version {
+            // Not fatal: the saved buildings are all still there. But the
+            // ground between them will not match, and silence would leave
+            // that looking like corruption.
+            log::warn!(
+                "world {:?} was shaped by terrain version {}, this build makes {}; \
+                 unmodified ground will regenerate differently",
+                name,
+                meta.generator_version,
+                generator_version
+            );
+        }
 
         Ok(WorldStore {
             root,
@@ -298,6 +330,7 @@ impl WorldStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vx_world::gen::GENERATOR_VERSION;
     use vx_core::{BlockDef, LocalPos};
     use vx_world::World;
 
@@ -343,14 +376,14 @@ mod tests {
     #[test]
     fn opening_a_new_world_writes_metadata_that_reads_back() {
         let dir = TempDir::new("meta");
-        let store = WorldStore::open(dir.path(), "testworld", 4242).unwrap();
+        let store = WorldStore::open(dir.path(), "testworld", 4242, GENERATOR_VERSION).unwrap();
 
         assert_eq!(store.seed(), 4242);
         assert!(store.root().join(LEVEL_FILE).is_file());
 
         // Reopening with a different seed keeps the original: generating new
         // terrain against a different seed would seam against the saved parts.
-        let reopened = WorldStore::open(dir.path(), "testworld", 999).unwrap();
+        let reopened = WorldStore::open(dir.path(), "testworld", 999, GENERATOR_VERSION).unwrap();
         assert_eq!(reopened.seed(), 4242);
         assert_eq!(reopened.meta().name, "testworld");
     }
@@ -359,7 +392,7 @@ mod tests {
     fn a_chunk_survives_being_written_and_read_back() {
         let dir = TempDir::new("roundtrip");
         let registry = registry();
-        let mut store = WorldStore::open(dir.path(), "w", 1).unwrap();
+        let mut store = WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).unwrap();
 
         let pos = ChunkPos::new(5, -9);
         let mut chunk = Chunk::empty(pos);
@@ -369,7 +402,7 @@ mod tests {
         assert_eq!(store.flush().unwrap(), 1);
 
         // A fresh store, so nothing can come from the in-memory cache.
-        let mut reopened = WorldStore::open(dir.path(), "w", 1).unwrap();
+        let mut reopened = WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).unwrap();
         let loaded = reopened.load_chunk(pos, &registry).unwrap().unwrap();
 
         assert_eq!(loaded.pos(), pos);
@@ -385,7 +418,7 @@ mod tests {
         // this orphans every existing save.
         let dir = TempDir::new("layout");
         let registry = registry();
-        let mut store = WorldStore::open(dir.path(), "shape", 1).unwrap();
+        let mut store = WorldStore::open(dir.path(), "shape", 1, GENERATOR_VERSION).unwrap();
 
         let mut chunk = Chunk::empty(ChunkPos::new(0, 0));
         chunk.set(local(0, 0, 0), registry.id_of("engine:stone").unwrap());
@@ -418,7 +451,7 @@ mod tests {
     #[test]
     fn a_position_never_saved_reads_as_absent() {
         let dir = TempDir::new("absent");
-        let mut store = WorldStore::open(dir.path(), "w", 1).unwrap();
+        let mut store = WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).unwrap();
         assert!(store
             .load_chunk(ChunkPos::new(70, 70), &registry())
             .unwrap()
@@ -429,7 +462,7 @@ mod tests {
     fn chunks_in_different_regions_land_in_different_files() {
         let dir = TempDir::new("regions");
         let registry = registry();
-        let mut store = WorldStore::open(dir.path(), "w", 1).unwrap();
+        let mut store = WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).unwrap();
 
         for pos in [ChunkPos::new(0, 0), ChunkPos::new(40, 0), ChunkPos::new(0, -40)] {
             let mut chunk = Chunk::empty(pos);
@@ -439,7 +472,7 @@ mod tests {
 
         assert_eq!(store.flush().unwrap(), 3, "expected three region files");
 
-        let mut reopened = WorldStore::open(dir.path(), "w", 1).unwrap();
+        let mut reopened = WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).unwrap();
         for pos in [ChunkPos::new(0, 0), ChunkPos::new(40, 0), ChunkPos::new(0, -40)] {
             assert!(
                 reopened.load_chunk(pos, &registry).unwrap().is_some(),
@@ -451,7 +484,7 @@ mod tests {
     #[test]
     fn flushing_with_nothing_pending_writes_nothing() {
         let dir = TempDir::new("noop");
-        let mut store = WorldStore::open(dir.path(), "w", 1).unwrap();
+        let mut store = WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).unwrap();
         assert_eq!(store.flush().unwrap(), 0);
     }
 
@@ -479,7 +512,7 @@ mod tests {
             );
             assert!(
                 matches!(
-                    WorldStore::open(dir.path(), hostile, 1),
+                    WorldStore::open(dir.path(), hostile, 1, GENERATOR_VERSION),
                     Err(SaveError::UnsafeWorldName(_))
                 ),
                 "{hostile:?} opened a store"
@@ -498,21 +531,21 @@ mod tests {
     #[test]
     fn a_corrupt_level_file_is_reported_rather_than_ignored() {
         let dir = TempDir::new("corrupt");
-        WorldStore::open(dir.path(), "w", 1).unwrap();
+        WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).unwrap();
 
         let level = dir.path().join("w").join(LEVEL_FILE);
         std::fs::write(&level, b"garbage!").unwrap();
 
         // Silently recreating it would reset the seed and regenerate the world
         // around the player's saved buildings.
-        assert!(WorldStore::open(dir.path(), "w", 1).is_err());
+        assert!(WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).is_err());
     }
 
     #[test]
     fn a_corrupt_chunk_payload_fails_that_chunk_only() {
         let dir = TempDir::new("badchunk");
         let registry = registry();
-        let mut store = WorldStore::open(dir.path(), "w", 1).unwrap();
+        let mut store = WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).unwrap();
 
         let good = ChunkPos::new(1, 1);
         let bad = ChunkPos::new(2, 2);
@@ -530,7 +563,7 @@ mod tests {
         bytes[length - 4..].copy_from_slice(b"junk");
         std::fs::write(&region_path, &bytes).unwrap();
 
-        let mut reopened = WorldStore::open(dir.path(), "w", 1).unwrap();
+        let mut reopened = WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).unwrap();
         let results = [
             reopened.load_chunk(good, &registry),
             reopened.load_chunk(bad, &registry),
@@ -558,7 +591,7 @@ mod tests {
     fn clean_regions_are_evicted_but_pending_ones_are_kept() {
         let dir = TempDir::new("evict");
         let registry = registry();
-        let mut store = WorldStore::open(dir.path(), "w", 1).unwrap();
+        let mut store = WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).unwrap();
 
         let mut chunk = Chunk::empty(ChunkPos::new(0, 0));
         chunk.set(local(0, 0, 0), registry.id_of("engine:stone").unwrap());

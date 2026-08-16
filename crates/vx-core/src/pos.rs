@@ -93,16 +93,26 @@ impl ChunkPos {
     }
 
     /// World position of this chunk's (0, 0, 0) corner.
+    ///
+    /// Saturating, because chunk coordinates arrive from disk: a region file
+    /// naming a chunk near `i32::MAX` would overflow this multiply, which is a
+    /// panic in debug and silently wrapped terrain in release. Nothing that
+    /// far out is reachable in play — it is 2 billion blocks from spawn — so
+    /// clamping there is strictly better than wrapping.
     pub const fn origin(self) -> BlockPos {
-        BlockPos::new(self.x * CHUNK_SIZE, 0, self.z * CHUNK_SIZE)
+        BlockPos::new(
+            self.x.saturating_mul(CHUNK_SIZE),
+            0,
+            self.z.saturating_mul(CHUNK_SIZE),
+        )
     }
 
     /// Absolute position of a local offset within this chunk.
     pub const fn block(self, local: LocalPos) -> BlockPos {
         BlockPos::new(
-            self.x * CHUNK_SIZE + local.x as i32,
+            self.x.saturating_mul(CHUNK_SIZE).saturating_add(local.x as i32),
             local.y as i32,
-            self.z * CHUNK_SIZE + local.z as i32,
+            self.z.saturating_mul(CHUNK_SIZE).saturating_add(local.z as i32),
         )
     }
 
@@ -269,6 +279,31 @@ mod tests {
         assert_eq!(ChunkPos::new(0, 0).origin(), BlockPos::new(0, 0, 0));
         assert_eq!(ChunkPos::new(2, 3).origin(), BlockPos::new(32, 0, 48));
         assert_eq!(ChunkPos::new(-1, -1).origin(), BlockPos::new(-16, 0, -16));
+    }
+
+    #[test]
+    fn extreme_chunk_coordinates_saturate_rather_than_overflowing() {
+        // Chunk coordinates come out of region files, so they are untrusted.
+        // Multiplying by the chunk size overflows well before `i32::MAX`,
+        // which panics in debug and wraps terrain in release.
+        for chunk in [
+            ChunkPos::new(i32::MAX, i32::MAX),
+            ChunkPos::new(i32::MIN, i32::MIN),
+            ChunkPos::new(i32::MAX, i32::MIN),
+            ChunkPos::new(i32::MAX / 8, i32::MIN / 8),
+        ] {
+            // Reaching these at all is the test: an overflowing multiply
+            // panics here in debug rather than returning anything.
+            let origin = chunk.origin();
+            let corner = chunk.block(LocalPos::new(15, 0, 15).unwrap());
+
+            // Clamped to the extreme, and the corner stays anchored to it.
+            assert!(origin.x.saturating_sub(corner.x).abs() <= CHUNK_SIZE);
+            assert!(origin.z.saturating_sub(corner.z).abs() <= CHUNK_SIZE);
+        }
+
+        // Ordinary coordinates are unaffected by the saturation.
+        assert_eq!(ChunkPos::new(2, 3).origin(), BlockPos::new(32, 0, 48));
     }
 
     #[test]

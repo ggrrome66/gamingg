@@ -247,37 +247,47 @@ fn nearer_geometry_occludes_farther_geometry() {
 }
 
 #[test]
-fn solid_terrain_has_no_interior_faces() {
-    // Interior faces are culled during meshing, so the inside of the rock is
-    // genuinely empty geometry — and the shell's back faces are culled by the
-    // rasteriser. A camera buried in stone therefore sees sky, not stone.
+fn a_solid_volume_emits_no_geometry_at_all() {
+    // Interior faces are culled during meshing, so the inside of a solid mass
+    // is genuinely empty geometry. That is what keeps triangle counts sane,
+    // and it is surprising enough to pin down: a camera buried in rock sees
+    // sky, because nothing was ever drawn.
     //
-    // This is by design and is what keeps triangle counts sane, but it is
-    // surprising enough to be worth pinning down: if a future change starts
-    // emitting interior faces, this test fails and says why.
+    // Tested against a synthetic solid volume rather than generated terrain.
+    // Terrain has caves in it now, and their walls are real faces that would
+    // be visible from inside the rock through the culled shell — which would
+    // make this fail for a reason that is not the one it is checking.
     let Some(context) = context() else { return };
     let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
-    let world = scene(&context, &mut renderer, 2);
 
-    let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
+    struct Solid(vx_core::BlockId);
+    impl vx_world::BlockView for Solid {
+        fn block_at(&self, _x: i32, _y: i32, _z: i32) -> vx_core::BlockId {
+            self.0
+        }
+    }
+
+    let world = World::new(2024);
+    let stone = world.registry().id_of("engine:stone").unwrap();
+    let mesh = build_mesh(&Solid(stone), world.registry(), [0, 0, 0]);
+
+    assert!(
+        mesh.is_empty(),
+        "meshing a solid volume emitted {} triangles; interior faces are no          longer being culled",
+        mesh.triangle_count()
+    );
+
+    // And the same end to end: uploading it and looking at it shows sky.
+    renderer.set_chunk_mesh(&context.device, ChunkPos::new(0, 0), &mesh);
     let camera = Camera {
-        position: glam::Vec3::new(0.0, surface as f32 - 8.0, 0.0),
-        pitch: 0.0,
+        position: glam::Vec3::new(8.0, 128.0, 8.0),
         aspect: WIDTH as f32 / HEIGHT as f32,
         ..Camera::default()
     };
     renderer.update_camera(&context.queue, &camera);
 
     let capture = capture_frame(&context, &renderer, WIDTH, HEIGHT);
-    save(&capture, "underground.ppm");
-
-    let covered = capture.fraction_differing_from(sky_rgb());
-    assert!(
-        covered < 0.10,
-        "{:.1}% of the frame is geometry from inside solid rock; \
-         interior faces are no longer being culled",
-        covered * 100.0
-    );
+    assert_eq!(capture.distinct_colours(), 1, "something was drawn");
 }
 
 #[test]
@@ -579,4 +589,122 @@ fn a_lamp_lights_the_room_it_is_placed_in() {
     );
     assert!(lit > total / 50, "the lamp lit almost nothing: {lit} pixels");
     assert!(dark > total / 50, "nothing is in shadow: {dark} pixels");
+}
+
+#[test]
+fn generated_caves_are_dark_until_something_lights_them() {
+    // Caves are why lighting matters: the first place in a generated world
+    // that daylight cannot reach. This finds a real cave rather than carving
+    // one, so it fails if generation stops producing them.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, DEMO_WIDTH, DEMO_HEIGHT);
+
+    let mut world = World::new(2024);
+    // A square rather than `load_around`'s disc: underground the camera looks
+    // sideways into neighbouring chunks, and a corner the disc leaves out
+    // renders as open sky in the middle of solid rock.
+    let positions: Vec<ChunkPos> = (-3..=3)
+        .flat_map(|x| (-3..=3).map(move |z| ChunkPos::new(x, z)))
+        .collect();
+    for pos in &positions {
+        world.load_chunk(*pos);
+    }
+
+    // Pick the roomiest pocket rather than the first one: a one-block gap puts
+    // the camera inside the rock face and shows nothing.
+    let openness = |world: &World, at: BlockPos| {
+        let mut open = 0;
+        for dx in -3..=3 {
+            for dy in -2..=2 {
+                for dz in -3..=3 {
+                    if world.block(at.offset([dx, dy, dz])).is_air() {
+                        open += 1;
+                    }
+                }
+            }
+        }
+        open
+    };
+
+    let mut best: Option<(i32, BlockPos)> = None;
+    // Kept well inside the loaded square, so every wall the camera can see is
+    // backed by a resident chunk.
+    for x in -16..16 {
+        for z in -16..16 {
+            let Some(surface) = world.surface_y(x, z) else {
+                continue;
+            };
+            for y in 10..(surface - 8).max(11) {
+                let at = BlockPos::new(x, y, z);
+                if !world.block(at).is_air() || !world.is_solid(at.offset([0, -1, 0])) {
+                    continue;
+                }
+                let score = openness(&world, at);
+                if best.is_none_or(|(current, _)| score > current) {
+                    best = Some((score, at));
+                }
+            }
+        }
+    }
+    let (score, cave) = best.expect("terrain generation produced no caves at all");
+    eprintln!("cave pocket at {cave:?}, {score} open blocks nearby");
+    assert!(score > 40, "the roomiest cave found is barely a crack");
+
+    let render = |world: &mut World, renderer: &mut Renderer| {
+        for pos in &positions {
+            world.relight_chunk(*pos);
+        }
+        for pos in &positions {
+            let origin = pos.origin();
+            let mesh = build_mesh(&*world, world.registry(), [origin.x, 0, origin.z]);
+            renderer.set_chunk_mesh(&context.device, *pos, &mesh);
+        }
+        let camera = Camera {
+            position: glam::Vec3::new(
+                cave.x as f32 + 0.5,
+                cave.y as f32 + 0.6,
+                cave.z as f32 + 0.5,
+            ),
+            yaw: 0.8,
+            pitch: -0.1,
+            aspect: DEMO_WIDTH as f32 / DEMO_HEIGHT as f32,
+            ..Camera::default()
+        };
+        renderer.update_camera(&context.queue, &camera);
+        capture_frame(&context, renderer, DEMO_WIDTH, DEMO_HEIGHT)
+    };
+
+    let brightness = |texel: &[u8]| texel[0] as u32 + texel[1] as u32 + texel[2] as u32;
+    let count_lit = |capture: &Capture| {
+        capture
+            .pixels
+            .chunks_exact(4)
+            .filter(|texel| brightness(texel) > 120)
+            .count()
+    };
+
+    // Unlit: daylight cannot get here, so the cave is black.
+    let unlit = render(&mut world, &mut renderer);
+    save(&unlit, "cave-dark.ppm");
+    let total = (DEMO_WIDTH * DEMO_HEIGHT) as usize;
+    assert!(
+        count_lit(&unlit) < total / 50,
+        "an unlit cave is showing {} lit pixels; daylight is leaking underground",
+        count_lit(&unlit)
+    );
+
+    // Lit: a lamp on the floor is the only source, and it is enough to see by.
+    let lamp = world.registry().id_of("engine:lamp").unwrap();
+    world
+        .place_block(cave.offset([1, 0, 1]), lamp)
+        .expect("the pocket has room for a lamp");
+    let lit = render(&mut world, &mut renderer);
+    save(&lit, "cave.ppm");
+
+    assert!(
+        count_lit(&lit) > count_lit(&unlit) * 4,
+        "the lamp barely changed the cave: {} lit before, {} after",
+        count_lit(&unlit),
+        count_lit(&lit)
+    );
 }
