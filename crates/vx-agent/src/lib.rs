@@ -1,0 +1,37 @@
+//! Drone swarms: what needs digging, how to reach it, and who is doing it.
+//!
+//! This crate depends on `vx-world` and `vx-core` and **nothing to do with
+//! rendering**. That is deliberate and enforced by the manifest rather than by
+//! discipline: the swarm has to be testable headlessly and at speed, and the
+//! reliable way to keep it that way is to make the alternative unavailable.
+//!
+//! The pieces, in the order they matter:
+//!
+//! - [`aabb`] — integer boxes, the unit every job and excavation is described in.
+//! - [`flow`] — what a machine that *drives* can and cannot get to. One
+//!   breadth-first sweep serves any number of drones.
+//! - [`mine`] — adit, decline or open pit: how to open a mine on a body, which
+//!   for a ground drone is the same question as how to reach it.
+//! - [`job`] — the shared board. Drones take work from it rather than each
+//!   planning their own.
+//! - [`drone`] — one machine's position, cargo and reach.
+//! - [`operation`] — the tick that turns a plan into a hole in the ground.
+//! - [`stockpile`] — what came back, keyed by block name.
+
+pub mod aabb;
+pub mod drone;
+#[cfg(test)]
+mod fixture;
+pub mod flow;
+pub mod job;
+pub mod mine;
+pub mod operation;
+pub mod stockpile;
+
+pub use aabb::VoxelAabb;
+pub use drone::{Drone, DroneState, DEFAULT_CAPACITY, DEFAULT_GRADE};
+pub use flow::{is_standable, settle, FlowField, STEP, UNREACHABLE};
+pub use job::{DroneId, Job, JobBoard, JobId, JobKind};
+pub use mine::{options, plan, propose, MineMethod, MinePlan, PIT_MAX_DEPTH};
+pub use operation::{Operation, RunOutcome, TickReport};
+pub use stockpile::Stockpile;

@@ -5,6 +5,7 @@ members = [
     "crates/vx-world",
     "crates/vx-mesh",
     "crates/vx-render",
+    "crates/vx-agent",
     "crates/vx-platform",
     "crates/vx-app",
 ]
@@ -20,6 +21,7 @@ vx-core = { path = "crates/vx-core" }
 vx-world = { path = "crates/vx-world" }
 vx-mesh = { path = "crates/vx-mesh" }
 vx-render = { path = "crates/vx-render" }
+vx-agent = { path = "crates/vx-agent" }
 vx-platform = { path = "crates/vx-platform" }
 
 glam = "0.33"
@@ -46,4 +48,9 @@ opt-level = 3
 opt-level = 2
 
 [profile.dev.package.vx-mesh]
+opt-level = 2
+
+# Swarm tests run whole excavations block by block; unoptimised they take
+# minutes rather than seconds.
+[profile.dev.package.vx-agent]
 opt-level = 2

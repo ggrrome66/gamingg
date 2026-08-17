@@ -8,10 +8,11 @@
 //! Where no adapter exists at all the tests skip rather than fail, so a
 //! contributor without Vulkan installed is not blocked.
 
+use glam::Vec3;
 use vx_core::{ChunkPos, CHUNK_SIZE};
 use vx_mesh::build_mesh;
 use vx_render::headless::{capture_frame, Capture, CAPTURE_FORMAT};
-use vx_render::{Camera, GpuContext, Renderer, SKY_COLOUR};
+use vx_render::{Camera, GpuContext, Object, Renderer, SKY_COLOUR};
 use vx_world::World;
 
 const WIDTH: u32 = 320;
@@ -488,6 +489,188 @@ fn breaking_a_block_changes_what_is_drawn() {
         triangles_before,
         renderer.triangle_count(),
         "triangle count unchanged after carving into solid terrain"
+    );
+}
+
+/// A camera on the surface at the origin, looking level along -Z.
+fn surface_camera(world: &World, height: f32, pitch: f32) -> Camera {
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
+    Camera {
+        position: Vec3::new(0.5, surface as f32 + height, 0.5),
+        yaw: 0.0,
+        pitch,
+        aspect: WIDTH as f32 / HEIGHT as f32,
+        ..Camera::default()
+    }
+}
+
+#[test]
+fn an_object_appears_where_it_is_placed_and_moves_with_its_transform() {
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 2);
+
+    let camera = surface_camera(&world, 3.0, -0.15);
+    renderer.update_camera(&context.queue, &camera);
+
+    renderer.set_objects(&context.device, &context.queue, &[]);
+    let empty = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    assert_eq!(renderer.visible_object_count(), 0);
+
+    // A cube a few blocks ahead, floating clear of the ground so terrain
+    // cannot be what changed.
+    let ahead = Vec3::new(camera.position.x, camera.position.y, camera.position.z - 6.0);
+    let object = Object::standing(ahead, 1.5, vx_render::tiles::slot::COPPER_ORE);
+    renderer.set_objects(&context.device, &context.queue, &[object]);
+    assert_eq!(renderer.visible_object_count(), 1);
+
+    let placed = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    save(&placed, "object.ppm");
+    assert_ne!(
+        empty.pixels, placed.pixels,
+        "adding an object changed nothing on screen"
+    );
+
+    // Slide it well off to one side. Same object, different matrix, so a
+    // different image — this is what proves the instance transform is being
+    // applied rather than ignored.
+    let aside = Object::standing(ahead + Vec3::new(4.0, 0.0, 0.0), 1.5, vx_render::tiles::slot::COPPER_ORE);
+    renderer.set_objects(&context.device, &context.queue, &[aside]);
+    let moved = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+
+    assert_ne!(
+        placed.pixels, moved.pixels,
+        "moving the object did not move what is drawn; the model matrix is being ignored"
+    );
+}
+
+#[test]
+fn terrain_hides_an_object_buried_behind_it() {
+    // The reason objects share the terrain pass and its depth buffer. A drone
+    // underground must be hidden by the rock above it, and one above ground
+    // must not be. Drawing objects into a separate pass, or after a depth
+    // clear, would show both.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 2);
+
+    // Straight down at the ground, so anything below the surface is behind it.
+    let camera = surface_camera(&world, 10.0, -std::f32::consts::FRAC_PI_2 + 0.05);
+    renderer.update_camera(&context.queue, &camera);
+
+    renderer.set_objects(&context.device, &context.queue, &[]);
+    let nothing = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded") as f32;
+    let below = Object::standing(Vec3::new(0.5, surface - 20.0, 0.5), 3.0, 0);
+    renderer.set_objects(&context.device, &context.queue, &[below]);
+    // It is inside the frustum — culling is not what hides it.
+    assert_eq!(renderer.visible_object_count(), 1);
+    let buried = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+
+    assert_eq!(
+        nothing.pixels, buried.pixels,
+        "an object 20 blocks underground is showing through the rock"
+    );
+
+    let above = Object::standing(Vec3::new(0.5, surface + 1.0, 0.5), 3.0, 0);
+    renderer.set_objects(&context.device, &context.queue, &[above]);
+    let visible = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+
+    assert_ne!(
+        nothing.pixels, visible.pixels,
+        "an object sitting on the surface is not being drawn at all"
+    );
+}
+
+#[test]
+fn culling_stays_pixel_identical_with_objects_present() {
+    // The M2.5 guarantee, re-checked now a second draw path shares the frustum.
+    // Objects are culled on the CPU as they are uploaded, so a mistake in the
+    // bounds would drop one the camera can actually see.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 3);
+
+    let camera = surface_camera(&world, 6.0, -0.2);
+    renderer.update_camera(&context.queue, &camera);
+
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded") as f32;
+    // A ring of cubes all the way round the camera: some ahead and visible,
+    // most behind or beside it and cullable.
+    let objects: Vec<Object> = (0..24)
+        .map(|step| {
+            let angle = step as f32 * std::f32::consts::TAU / 24.0;
+            let centre = Vec3::new(
+                camera.position.x + angle.cos() * 12.0,
+                surface + 1.0,
+                camera.position.z + angle.sin() * 12.0,
+            );
+            Object::standing(centre, 1.2, vx_render::tiles::slot::SAND)
+        })
+        .collect();
+
+    // Objects are culled at upload, so each configuration needs its own upload.
+    renderer.set_culling_enabled(false);
+    renderer.set_objects(&context.device, &context.queue, &objects);
+    let uncalled = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    let drawn_without = renderer.visible_object_count();
+
+    renderer.set_culling_enabled(true);
+    renderer.set_objects(&context.device, &context.queue, &objects);
+    let culled = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    let drawn_with = renderer.visible_object_count();
+    save(&culled, "objects_culled.ppm");
+
+    assert_eq!(
+        uncalled.pixels, culled.pixels,
+        "culling with objects present changed the image: a visible object was dropped"
+    );
+    assert_eq!(drawn_without, objects.len() as u32);
+    assert!(
+        drawn_with < drawn_without,
+        "object culling skipped nothing: {drawn_with} of {drawn_without} drawn"
+    );
+    eprintln!("objects: drew {drawn_with} of {drawn_without}");
+}
+
+#[test]
+fn a_swarm_of_objects_draws_in_one_call() {
+    // Instancing exists so a swarm costs one draw. Uploading far more objects
+    // than the batch's initial capacity also exercises the buffer growth path,
+    // which would otherwise only be hit once the game had a real swarm.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 2);
+
+    let camera = surface_camera(&world, 20.0, -0.9);
+    renderer.update_camera(&context.queue, &camera);
+
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded") as f32;
+    let swarm: Vec<Object> = (0..200)
+        .map(|index| {
+            let x = (index % 20) as f32 - 10.0;
+            let z = -(index / 20) as f32 - 2.0;
+            Object::standing(
+                Vec3::new(camera.position.x + x, surface + 6.0, camera.position.z + z),
+                0.8,
+                vx_render::tiles::slot::BEDROCK,
+            )
+        })
+        .collect();
+
+    renderer.set_objects(&context.device, &context.queue, &swarm);
+    assert!(
+        renderer.visible_object_count() > 50,
+        "only {} of 200 objects survived culling; the swarm is not in view",
+        renderer.visible_object_count()
+    );
+
+    let capture = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    save(&capture, "swarm.ppm");
+    assert!(
+        capture.fraction_differing_from(sky_rgb()) > 0.1,
+        "the swarm covers almost nothing; instances may not be drawing"
     );
 }
 

@@ -15,6 +15,7 @@ vx-core.workspace = true
 vx-world.workspace = true
 vx-mesh.workspace = true
 vx-render.workspace = true
+vx-agent.workspace = true
 vx-platform.workspace = true
 glam.workspace = true
 rayon.workspace = true

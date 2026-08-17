@@ -42,6 +42,43 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+// Per-instance data for objects — drones, markers, anything that is not
+// terrain. A mat4x4 cannot be a single vertex attribute, so it arrives as four
+// vec4 columns.
+struct InstanceInput {
+    @location(4) model_0: vec4<f32>,
+    @location(5) model_1: vec4<f32>,
+    @location(6) model_2: vec4<f32>,
+    @location(7) model_3: vec4<f32>,
+    @location(8) tile: u32,
+};
+
+// Objects deliberately emit the same VertexOutput as terrain and share fs_main
+// below. An object lit by different code from the ground beneath it would drift
+// out of step the first time the lighting changed.
+@vertex
+fn vs_object(in: VertexInput, instance: InstanceInput) -> VertexOutput {
+    let model = mat4x4<f32>(
+        instance.model_0,
+        instance.model_1,
+        instance.model_2,
+        instance.model_3,
+    );
+    let world = model * vec4<f32>(in.position, 1.0);
+
+    var out: VertexOutput;
+    out.clip_position = camera.view_projection * world;
+    // Objects are translated and uniformly scaled, so the model matrix's upper
+    // 3x3 rotates the normal correctly without a separate normal matrix.
+    out.normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);
+    out.uv = in.uv;
+    // The instance's tile wins; the cube's per-vertex tile is unused padding
+    // inherited from sharing the terrain vertex layout.
+    out.tile = instance.tile;
+    out.world_position = world.xyz;
+    return out;
+}
+
 // Direction the key light arrives from.
 const LIGHT_DIRECTION: vec3<f32> = vec3<f32>(0.42, 0.86, 0.29);
 const AMBIENT: f32 = 0.42;

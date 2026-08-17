@@ -9,18 +9,21 @@
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
 mod controller;
+mod mining;
 mod streaming;
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use controller::{FlyController, MovementMode, WalkController};
+use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
 use vx_core::{BlockId, EventBus};
 use vx_platform::InputState;
 use vx_render::headless::{capture_frame, CAPTURE_FORMAT};
 use vx_render::{Camera, GpuContext, Renderer, WindowSurface};
+use vx_agent::{MineMethod, Operation, VoxelAabb};
 use vx_world::{break_block, place_block, raycast_solid, PlayerBody, World, WorldSave};
 
 use winit::application::ApplicationHandler;
@@ -41,6 +44,18 @@ struct Options {
     world: String,
     /// World position to place the camera for a screenshot.
     at: (i32, i32),
+    /// Find an ore body near `at`, mine it, and screenshot the result.
+    dig: Option<Dig>,
+    /// Drone ticks to run before capturing, when digging.
+    ticks: u64,
+}
+
+/// Which method a `--dig` run should use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dig {
+    /// Whatever the ranking recommends.
+    Proposed,
+    Forced(MineMethod),
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -51,6 +66,8 @@ fn parse_args() -> Result<Options, String> {
         height: 720,
         world: "world".to_string(),
         at: (0, 0),
+        dig: None,
+        ticks: 20_000,
     };
 
     let mut args = std::env::args().skip(1);
@@ -77,6 +94,26 @@ fn parse_args() -> Result<Options, String> {
                     z.trim().parse().map_err(|_| "--at Z must be a number".to_string())?,
                 );
             }
+            "--dig" => {
+                options.dig = Some(match value()?.as_str() {
+                    // `auto` takes whatever the game would propose, which is
+                    // the interesting default: it shows the ranking's answer.
+                    "auto" => Dig::Proposed,
+                    "adit" => Dig::Forced(MineMethod::Adit),
+                    "decline" => Dig::Forced(MineMethod::Decline),
+                    "pit" => Dig::Forced(MineMethod::Pit),
+                    other => {
+                        return Err(format!(
+                            "--dig wants auto, adit, decline or pit (got {other})"
+                        ))
+                    }
+                });
+            }
+            "--ticks" => {
+                options.ticks = value()?
+                    .parse()
+                    .map_err(|_| "--ticks must be a number".to_string())?
+            }
             "--width" => {
                 options.width = value()?
                     .parse()
@@ -95,6 +132,9 @@ fn parse_args() -> Result<Options, String> {
                      --world <name>      save directory name (default \"world\")\n  \
                      --screenshot <path> render one frame to a PPM file and exit\n  \
                      --at <x,z>          world position to view from (screenshot)\n  \
+                     --dig <method>      find ore near --at and mine it before capturing\n  \
+                                         (auto, adit, decline or pit)\n  \
+                     --ticks <n>         drone ticks to run when digging\n  \
                      --width <n>         window or image width\n  \
                      --height <n>        window or image height"
                 );
@@ -157,6 +197,96 @@ fn build_scene(
     (world, camera)
 }
 
+/// The ore body nearest to `(x, z)`, as a marked area.
+///
+/// Sweeps outward over surface columns looking for exposed ore — an outcrop —
+/// then takes the connected run of ore blocks under it. This is the same thing
+/// a player does by eye, which is the point: it exercises the real path rather
+/// than a hand-placed body.
+fn find_body(world: &World, at: (i32, i32), radius: i32) -> Option<VoxelAabb> {
+    let is_ore = |pos: vx_core::BlockPos| {
+        world
+            .registry()
+            .get(world.block(pos))
+            .is_some_and(|def| def.name.ends_with("_ore"))
+    };
+
+    let mut best: Option<(i64, vx_core::BlockPos)> = None;
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            let (x, z) = (at.0 + dx, at.1 + dz);
+            let Some(clear) = world.surface_y(x, z) else {
+                continue;
+            };
+            let top = vx_core::BlockPos::new(x, clear - 1, z);
+            if !is_ore(top) {
+                continue;
+            }
+            let distance = (dx as i64) * (dx as i64) + (dz as i64) * (dz as i64);
+            if best.is_none_or(|(nearest, _)| distance < nearest) {
+                best = Some((distance, top));
+            }
+        }
+    }
+
+    // Grow a box around the outcrop over the ore actually present beneath it.
+    let (_, seed) = best?;
+    let mut body: Option<VoxelAabb> = None;
+    let search = VoxelAabb::new(
+        seed.offset([-8, -16, -8]),
+        seed.offset([8, 1, 8]),
+    )
+    .clamped_to_world();
+    for pos in search.blocks() {
+        if is_ore(pos) {
+            body = Some(match body {
+                Some(box_) => box_.union(VoxelAabb::single(pos)),
+                None => VoxelAabb::single(pos),
+            });
+        }
+    }
+    body
+}
+
+/// Mine the nearest body and report what happened.
+fn dig_nearby(
+    world: &mut World,
+    at: (i32, i32),
+    choice: Dig,
+    ticks: u64,
+) -> Result<(Operation, MineMethod, vx_core::BlockPos, VoxelAabb), String> {
+    let body = find_body(world, at, 48)
+        .ok_or_else(|| format!("no ore outcrop within 48 blocks of {at:?}"))?;
+
+    let plan = match choice {
+        Dig::Proposed => vx_agent::propose(world, body, vx_agent::DEFAULT_GRADE),
+        Dig::Forced(method) => vx_agent::plan(world, body, vx_agent::DEFAULT_GRADE, method),
+    }
+    .ok_or_else(|| format!("{choice:?} does not apply to the body at {body:?}"))?;
+
+    let start = vx_agent::settle(world, plan.portal);
+    let mut operation = Operation::new(start);
+    operation.add_drone(start);
+    operation.post_plan(&plan);
+
+    let events = EventBus::new();
+    let (outcome, used) = operation.run(world, &events, ticks);
+    println!(
+        "{}: {outcome:?} after {used} ticks, {} blocks hauled ({} ore)",
+        plan.method.name(),
+        operation.stockpile.total(),
+        operation.stockpile.count("engine:copper_ore"),
+    );
+    let workings = plan
+        .access
+        .iter()
+        .chain(&plan.extraction)
+        .copied()
+        .reduce(VoxelAabb::union)
+        .unwrap_or(body);
+    Ok((operation, plan.method, start, workings))
+}
+
 fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     let context = GpuContext::headless_blocking()
         .map_err(|error| format!("no graphics device for offscreen rendering: {error}"))?;
@@ -164,9 +294,49 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     let (width, height) = (options.width, options.height);
     let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, width, height);
 
-    let (_world, mut camera) = build_scene(&context, &mut renderer, options.seed, 6, options.at);
+    let (mut world, mut camera) = build_scene(&context, &mut renderer, options.seed, 6, options.at);
     camera.aspect = width as f32 / height as f32;
-    renderer.update_camera(&context.queue, &camera);
+
+    // Optionally run a whole excavation before capturing, so the frame shows a
+    // real mine on real generated terrain rather than a hand-built fixture.
+    if let Some(choice) = options.dig {
+        let (operation, _, portal, workings) =
+            dig_nearby(&mut world, options.at, choice, options.ticks)?;
+
+        // Frame the whole excavation: stand off from its centre and look at it.
+        let centre = glam::Vec3::new(
+            workings.centre().x as f32,
+            workings.max.y as f32,
+            workings.centre().z as f32,
+        );
+        let span = workings.size();
+        let stand_off = (span[0].max(span[2]) as f32 * 1.4).max(24.0);
+        camera.position = centre
+            + glam::Vec3::new(stand_off * 0.7, stand_off * 0.8, stand_off * 0.7);
+        look_at(&mut camera, centre);
+        let _ = portal;
+
+        remesh_all(&context, &mut renderer, &mut world);
+        renderer.update_camera(&context.queue, &camera);
+        let objects: Vec<vx_render::Object> = operation
+            .drones
+            .iter()
+            .map(|drone| {
+                vx_render::Object::standing(
+                    glam::Vec3::new(
+                        drone.position.x as f32 + 0.5,
+                        drone.position.y as f32,
+                        drone.position.z as f32 + 0.5,
+                    ),
+                    0.8,
+                    vx_render::tiles::slot::BEDROCK,
+                )
+            })
+            .collect();
+        renderer.set_objects(&context.device, &context.queue, &objects);
+    } else {
+        renderer.update_camera(&context.queue, &camera);
+    }
 
     let capture = capture_frame(&context, &renderer, width, height);
     capture
@@ -180,6 +350,29 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         renderer.triangle_count()
     );
     Ok(())
+}
+
+/// Point `camera` at `target` from where it stands.
+///
+/// Derived from the same yaw/pitch convention `Camera::forward` uses, so a
+/// framing that looks right here looks the same in the window.
+fn look_at(camera: &mut Camera, target: glam::Vec3) {
+    let to = target - camera.position;
+    camera.yaw = to.x.atan2(-to.z);
+    camera.pitch = to.y.atan2((to.x * to.x + to.z * to.z).sqrt());
+    camera.clamp_pitch();
+}
+
+/// Rebuild every loaded chunk's mesh. Used after a headless excavation, where
+/// there is no streamer running to pick up the dirty chunks.
+fn remesh_all(context: &GpuContext, renderer: &mut Renderer, world: &mut World) {
+    let loaded: Vec<vx_core::ChunkPos> = world.loaded_chunks().collect();
+    for pos in loaded {
+        let origin = pos.origin();
+        let mesh = vx_mesh::build_mesh(world, world.registry(), [origin.x, 0, origin.z]);
+        renderer.set_chunk_mesh(&context.device, pos, &mesh);
+        world.clear_dirty(pos);
+    }
 }
 
 fn run_windowed(options: &Options) -> Result<(), String> {
@@ -222,6 +415,8 @@ struct Active {
     /// Blocks the player can place, and which one is selected.
     palette: Vec<BlockId>,
     selected: usize,
+    /// Marking a body and running a drone on it.
+    mining: Mining,
 }
 
 struct App {
@@ -313,6 +508,14 @@ impl App {
             }
         }
 
+        // Drones dig before streaming, so the chunks their edits dirty get
+        // re-meshed in the same frame rather than the next one.
+        active.mining.update(
+            &mut active.world,
+            &active.events,
+            std::time::Duration::from_secs_f32(dt),
+        );
+
         // Keep chunks in step with where the camera is.
         let centre = chunk_at(active.camera.position);
         active.streamer.update(
@@ -326,6 +529,12 @@ impl App {
         active
             .renderer
             .update_camera(&active.context.queue, &active.camera);
+        // After the camera, because objects are culled against the frustum it
+        // just refreshed.
+        let objects = active.mining.objects();
+        active
+            .renderer
+            .set_objects(&active.context.device, &active.context.queue, &objects);
 
         use wgpu::CurrentSurfaceTexture as Acquired;
 
@@ -442,6 +651,22 @@ impl App {
                 }
             }
             KeyCode::F5 => self.save_world(),
+            KeyCode::KeyM => self.mark_target(),
+            KeyCode::Tab => {
+                if let Some(active) = &mut self.active {
+                    active.mining.cycle_method();
+                    if let Some(status) = active.mining.status() {
+                        log::info!("{status}");
+                    }
+                }
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter => self.start_mining(),
+            KeyCode::Backspace => {
+                if let Some(active) = &mut self.active {
+                    active.mining.cancel();
+                    log::info!("mining plan cancelled");
+                }
+            }
             // Number keys pick a block to build with.
             KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 => {
                 if let Some(active) = &mut self.active {
@@ -459,6 +684,37 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Mark a corner of a body on whatever the player is looking at.
+    fn mark_target(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let Some(hit) = raycast_solid(
+            &active.world,
+            active.world.registry(),
+            active.camera.position,
+            active.camera.forward(),
+            Self::REACH,
+        ) else {
+            return;
+        };
+        active.mining.mark(&active.world, hit.block);
+        match active.mining.status() {
+            Some(status) => log::info!("{status}"),
+            None => log::info!("marked {:?}; mark a second corner", hit.block),
+        }
+    }
+
+    /// Put a drone on the selected plan.
+    fn start_mining(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if active.mining.is_running() {
+            return;
+        }
+        match active.mining.start(&active.world) {
+            Some(method) => log::info!("digging: {}", method.name()),
+            None => log::info!("nothing marked to dig"),
         }
     }
 
@@ -609,6 +865,7 @@ impl ApplicationHandler for App {
             save,
             palette,
             selected: 0,
+            mining: Mining::default(),
         });
 
         self.last_frame = Instant::now();

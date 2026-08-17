@@ -10,6 +10,7 @@ pub mod frustum;
 pub mod gpu;
 pub mod headless;
 pub mod mesh_buffer;
+pub mod object;
 pub mod tiles;
 
 use std::collections::HashMap;
@@ -22,6 +23,7 @@ pub use camera::{Camera, CameraUniform};
 pub use frustum::Frustum;
 pub use gpu::{GpuContext, GpuError, WindowSurface, DEPTH_FORMAT};
 pub use mesh_buffer::{ChunkMesh, VERTEX_LAYOUT};
+pub use object::{Object, ObjectBatch, ObjectInstance, INSTANCE_LAYOUT};
 pub use tiles::TileTextures;
 
 /// Sky colour, used to clear each frame.
@@ -40,6 +42,10 @@ pub struct Renderer {
     tiles: TileTextures,
     depth_view: wgpu::TextureView,
     chunks: HashMap<ChunkPos, ChunkMesh>,
+    /// Second pipeline for instanced objects. Shares the camera bind group,
+    /// the tile textures and the depth buffer with the terrain pass.
+    object_pipeline: wgpu::RenderPipeline,
+    objects: ObjectBatch,
     /// Refreshed whenever the camera moves. `None` until the first update, so
     /// a frame drawn before any camera is set shows everything rather than
     /// culling against a meaningless volume.
@@ -103,50 +109,66 @@ impl Renderer {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("terrain pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[VERTEX_LAYOUT],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                // The mesher winds quads counter-clockwise seen from outside.
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    // Straight alpha blending. Water is the only translucent
-                    // block so far and is rarely seen through another water
-                    // surface; proper sorted transparency can wait until it
-                    // actually matters.
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        // Terrain and objects differ only in their vertex stage and buffers.
+        // Sharing everything else — winding, depth state, blending, colour
+        // target — is what keeps an object from shading or z-fighting
+        // differently from the ground it stands on.
+        let build_pipeline = |label: &str,
+                              vertex_entry: &str,
+                              buffers: &[wgpu::VertexBufferLayout<'_>]| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(vertex_entry),
+                    compilation_options: Default::default(),
+                    buffers,
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    // The mesher winds quads counter-clockwise seen from
+                    // outside, and `object::unit_cube` matches it.
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        // Straight alpha blending. Water is the only translucent
+                        // block so far and is rarely seen through another water
+                        // surface; proper sorted transparency can wait until it
+                        // actually matters.
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        let pipeline = build_pipeline("terrain pipeline", "vs_main", &[VERTEX_LAYOUT]);
+        let object_pipeline = build_pipeline(
+            "object pipeline",
+            "vs_object",
+            &[VERTEX_LAYOUT, INSTANCE_LAYOUT],
+        );
 
         let depth_view = context.create_depth_view(width, height);
 
@@ -157,6 +179,8 @@ impl Renderer {
             tiles,
             depth_view,
             chunks: HashMap::new(),
+            object_pipeline,
+            objects: ObjectBatch::new(device),
             frustum: None,
             culling_enabled: true,
             width,
@@ -235,6 +259,27 @@ impl Renderer {
         self.chunks.remove(&pos);
     }
 
+    /// Replace the objects drawn this frame.
+    ///
+    /// Call it *after* [`Renderer::update_camera`]: objects are culled against
+    /// the current frustum as they are uploaded, because a single instanced
+    /// draw cannot skip an instance once it is in the buffer. The whole list is
+    /// rebuilt each frame, which is what a moving swarm needs anyway.
+    pub fn set_objects(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        objects: &[Object],
+    ) {
+        let cull = self.culling_enabled.then_some(self.frustum).flatten();
+        self.objects.upload(device, queue, objects, cull);
+    }
+
+    /// Object instances that survived culling and will be drawn.
+    pub fn visible_object_count(&self) -> u32 {
+        self.objects.live_count()
+    }
+
     pub fn loaded_chunk_count(&self) -> usize {
         self.chunks.len()
     }
@@ -294,6 +339,14 @@ impl Renderer {
             mesh.draw(&mut pass);
             drawn += 1;
         }
+
+        // Objects last, in the same pass so they share the depth buffer the
+        // terrain just wrote. A separate pass would have to load that depth
+        // back, and any mismatch would show as drones floating over hills they
+        // are standing behind.
+        pass.set_pipeline(&self.object_pipeline);
+        self.objects.draw(&mut pass);
+
         drawn
     }
 }

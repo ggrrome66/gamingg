@@ -1,0 +1,15 @@
+[package]
+name = "vx-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Drone job board, flow fields, mine planning and swarm logic."
+
+# Deliberately no vx-render and no wgpu. The whole swarm has to be testable
+# headlessly and at speed, and the only way to keep that true is to make
+# rendering unavailable rather than merely unused.
+[dependencies]
+vx-core.workspace = true
+vx-world.workspace = true
+log.workspace = true

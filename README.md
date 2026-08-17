@@ -17,20 +17,22 @@ art exists.
 
 ## Status
 
-M2.5 is complete and M3 is under way. The world has real relief, meshes across
-all cores, draws only what the camera can see, and now hides copper ore in the
-rock with occasional outcrops breaking the surface. You can walk on it, build in
-it, and it survives quitting.
+M3 is under way. The world has real relief, meshes across all cores, draws only
+what the camera can see, and hides copper ore in the rock with occasional
+outcrops breaking the surface. Mark a body and the game works out how to mine
+it — a level adit into a hillside, a diagonal decline, or a benched open pit —
+and a drone cuts the excavation, drives in, digs the ore out and hauls it home.
+You can walk on it, build in it, and it survives quitting.
 
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
 | `vx-world` | Chunk storage, worldgen, ore, raycast, physics, editing, saves | Done |
 | `vx-mesh` | Greedy meshing | Done |
-| `vx-render` | wgpu renderer, camera, frustum culling, offscreen capture | Done |
+| `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
 | `vx-app` | Window, walk/fly controls, streaming, `gamingg` binary | Done |
-| `vx-agent` | Drone job board, flow fields, swarm logic | M3 (next) |
+| `vx-agent` | Job board, flow fields, mine planning, one drone | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
 
@@ -47,6 +49,17 @@ it, and it survives quitting.
   the blocks actually present would cull more.
 - Ore uses one tile for every block, so a large exposed body shows a visibly
   repeating pattern. Real art or per-block texture variation fixes it.
+- Drones are drawn as plain cubes, and the mining readout goes to the log rather
+  than the screen. Text rendering is a later milestone.
+- A drone's grade shapes the ramps it cuts but is not yet a limit on what it can
+  drive: the flow field allows one block of climb per step, so a 1:1 staircase is
+  traversable by anything. Making grade a real constraint needs a field that
+  tracks how far a drone has run since it last climbed.
+- Only one drone. The job board is built for a swarm and nothing exercises it
+  yet.
+- A running excavation is not saved. The hole is — block edits go through the
+  same path a player's do — but quitting mid-dig loses the drone and the job
+  board, and the marked plan has to be set up again.
 - No inventory, no UI, no audio, and no gamepad support.
 
 ## Design notes
@@ -85,6 +98,43 @@ function of the seed and the ones near a chunk can be gathered without a global
 list. Ore only ever replaces stone or overburden, which is what stops it hanging
 in mid-air.
 
+**For a machine that drives, the mining method is the access problem.** A ground
+drone can change height by one block per step, so how an excavation is shaped
+decides whether the ore can be reached and hauled out at all — the same question
+real operations answer when they choose between an adit, a decline and a pit. An
+adit is a level tunnel into a hillside and only works where the body meets a
+slope, which is exactly what the outcrop rule produces; a decline is the
+general-purpose ramp; a pit's benches are its own haul road but its volume grows
+with the cube of depth. A vertical shaft is deliberately absent: nothing that
+drives can climb out of one, so it belongs to the flying drone as a later unlock.
+
+**Methods are ranked on cost, not on dug blocks.** Ranking on volume alone would
+never choose an adit — a decline can always start part-way down a slope and cut a
+shorter tunnel. But the excavation is dug once and the haul is made on every load
+forever, so a plan is charged for the height its loaded drone has to climb. On
+the reference body that puts the adit ahead at 2160 against the decline's 2355,
+even though the decline moves 66 fewer blocks of rock. The player can override.
+
+**A body is mined in benches, not as a box.** Clearing a box layer by layer
+leaves vertical walls, and a drone that has worked to the floor of one cannot
+climb four blocks back out — it ends up standing on its own ore with a full load
+and nowhere to take it. Each layer of the stope reaches one block further toward
+the access than the layer beneath, which leaves a staircase down one wall. The
+bottom bench is the body's true footprint, so all the ore still comes out; the
+extra is waste cut to make the ramp.
+
+**A drone cuts level with itself and above, never diagonally below.** Cutting
+down-and-across looks like the obvious way to descend and is what strands it: it
+carves a full-height notch and destroys the floor of every cell in it, including
+the ones needed to advance. Descending is by undermining — cutting the block
+directly underfoot, allowed only when there is solid ground under *that*, so the
+drop is one block and the step back up exists. Every hole it makes for itself, it
+can climb out of.
+
+**Tunnels are two blocks tall for the same reason.** Two is the tallest a drone
+can cut standing on its own floor. A three-block corridor needs somebody a block
+off the ground to cut the roof, and on a level tunnel there is nowhere to stand.
+
 **Every visible outcrop has ore continuing beneath it.** A surface block only
 shows ore when the body also fills the blocks below it. Without that rule a body
 could graze the surface and leave a single speck leading nowhere, players would
@@ -113,6 +163,13 @@ to veto or alter an edit without any call site changing.
 data with no interior mutability, so parallel reads need no locking — the shared
 borrow the mesher was already written against was all that was required. A test
 asserts the parallel result is byte-identical to the serial one.
+
+**Objects are instanced from the start and share the terrain's fragment shader.**
+The design calls for swarms, so there is one cube mesh, one instance buffer and
+one draw call however many drones exist; per-object draws would be rewritten at
+the first swarm. They share the terrain pass's depth buffer so drones and hills
+occlude each other, and the *same* fragment entry point, so a drone can never
+drift out of step with the light on the ground it is standing on.
 
 **Frustum culling is derived from the same view-projection matrix the GPU uses**,
 so it can never disagree with what actually gets clipped. A chunk's bounding box
@@ -143,6 +200,10 @@ Controls:
 | Click | Capture the mouse; once captured, break a block |
 | Right click | Place the selected block |
 | `1`–`4` | Choose stone, dirt, grass or sand |
+| `M` | Mark a corner of an ore body (two marks make an area) |
+| `Tab` | Cycle the proposed mining method |
+| `Enter` | Send a drone to dig it |
+| `Backspace` | Cancel the marked plan |
 | `F` | Toggle walking and flying |
 | `F5` | Save |
 | `Escape` | Release the mouse |
@@ -164,7 +225,15 @@ cargo run --release -p vx-app -- --screenshot frame.ppm --width 640 --height 360
 
 # look at a specific place, which is how ore outcrops get eyeballed
 cargo run --release -p vx-app -- --screenshot ore.ppm --at 146,30
+
+# find the nearest outcrop, mine it out, and photograph the workings
+cargo run --release -p vx-app -- --screenshot mine.ppm --at 146,30 --dig auto
+cargo run --release -p vx-app -- --screenshot pit.ppm --at 146,30 --dig pit
 ```
+
+`--dig` runs a whole excavation headlessly against generated terrain, so it is
+both a screenshot tool and the fastest way to see whether a change to the
+planners still produces a mine a drone can drive.
 
 The render tests do the same thing and assert on the pixels. Both run against a
 software Vulkan driver, so no GPU is required:
