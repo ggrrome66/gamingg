@@ -7,7 +7,7 @@
 use vx_core::{BlockPos, ChunkPos};
 use vx_mesh::build_mesh;
 use vx_render::Renderer;
-use vx_world::World;
+use vx_world::{World, WorldSave};
 
 /// Chunk-streaming settings.
 #[derive(Debug, Clone, Copy)]
@@ -83,20 +83,35 @@ impl ChunkStreamer {
         renderer: &mut Renderer,
         device: &wgpu::Device,
         centre: ChunkPos,
+        save: Option<&WorldSave>,
     ) -> usize {
         let radius = self.config.render_distance;
         let wanted = chunks_in_range(centre, radius);
 
-        // Generate a few of the nearest missing chunks.
+        // Bring in a few of the nearest missing chunks. A chunk that was saved
+        // takes precedence over generating it afresh, or every edit would be
+        // undone the moment you walked away and back.
         let mut generated = 0;
         for pos in &wanted {
             if generated >= self.config.generate_budget {
                 break;
             }
-            if !world.is_loaded(*pos) {
-                world.load_chunk(*pos);
-                generated += 1;
+            if world.is_loaded(*pos) {
+                continue;
             }
+            match save.map(|save| save.load_chunk(*pos, world.registry())) {
+                Some(Ok(Some(chunk))) => world.insert_chunk(chunk),
+                Some(Err(error)) => {
+                    // A damaged region should not take the game down; fall
+                    // back to generated terrain and say so once.
+                    log::error!("could not load chunk {pos:?}: {error}");
+                    world.load_chunk(*pos);
+                }
+                _ => {
+                    world.load_chunk(*pos);
+                }
+            }
+            generated += 1;
         }
 
         // Drop anything that has drifted out of range, with a margin so a

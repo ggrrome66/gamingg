@@ -17,17 +17,17 @@ art exists.
 
 ## Status
 
-Milestone 1 is complete: the world generates, meshes, streams and renders, and
-there is a binary you can fly around in.
+Milestone 2 is complete: the world generates, meshes, streams and renders, you
+can walk on it, build in it, and it survives quitting.
 
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
-| `vx-world` | Paletted chunk storage, terrain generation, world state | Done |
+| `vx-world` | Chunk storage, worldgen, raycast, physics, editing, saves | Done |
 | `vx-mesh` | Greedy meshing | Done |
 | `vx-render` | wgpu renderer, camera, tile textures, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
-| `vx-app` | Window, fly controls, chunk streaming, `gamingg` binary | Done |
+| `vx-app` | Window, walk/fly controls, streaming, `gamingg` binary | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | M3 |
 | `vx-steam` | Steam Workshop mod source | M4 |
 
@@ -37,9 +37,13 @@ there is a binary you can fly around in.
   so relief is only ~22 blocks spread over a wide area. Needs shaping work.
 - Water is alpha-blended without depth sorting. Fine while water is the only
   translucent block; looks wrong the moment two transparent surfaces overlap.
-- Chunks are edited and meshed on the main thread. Meshing is throttled per
-  frame to hide it, but it belongs on a worker pool.
-- No block placement or breaking yet, and nothing persists to disk.
+- Chunks are meshed on the main thread. Meshing is throttled per frame to hide
+  it, but it belongs on a worker pool — `rayon` is already a dependency.
+- **No frustum culling.** Every loaded chunk is drawn every frame, even the
+  two-thirds behind the camera. The cheapest large performance win available.
+- Saving happens on quit and on demand, not periodically. A crash loses the
+  session.
+- No inventory, no UI, no audio, and no gamepad support.
 
 ## Design notes
 
@@ -63,7 +67,20 @@ chunk-local. Mixing the two makes geometry silently vanish.
 **Worldgen is a pure function of `(seed, position)`.** It uses an integer hash
 rather than a seeded RNG, so there is no sequence state to desynchronise:
 chunks can generate in parallel in any order, and a saved world regenerates
-identically.
+identically. This is also why saves only store chunks a player has *changed* —
+everything else comes back from the seed for free.
+
+**Saves key blocks by namespaced name, never by numeric id.** Ids are assigned
+in registration order, so installing one mod shifts all of them; a save keyed on
+numbers would silently reload as the wrong blocks entirely.
+
+**Collision resolves one axis at a time.** Resolving all three together and
+pushing out along the shallowest overlap is the usual shortcut, and it is what
+makes sliding along a wall snag on every block seam.
+
+**Block edits are announced on the event bus before they happen**, through
+`emit_cancellable`. Nothing listens yet — the point is that M3 mods will be able
+to veto or alter an edit without any call site changing.
 
 ## Building and running
 
@@ -76,8 +93,24 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run --release -p vx-app          # opens a window
 ```
 
-Controls: `WASD` to move, `Space`/`Left Shift` for up and down, `Left Ctrl` to
-sprint, click to capture the mouse for looking around, `Escape` to release it.
+Controls:
+
+| Input | Action |
+|---|---|
+| `WASD` | Move |
+| `Space` | Jump (walk) / rise (fly) |
+| `Left Shift` | Descend (fly) |
+| `Left Ctrl` | Sprint |
+| Click | Capture the mouse; once captured, break a block |
+| Right click | Place the selected block |
+| `1`–`4` | Choose stone, dirt, grass or sand |
+| `F` | Toggle walking and flying |
+| `F5` | Save |
+| `Escape` | Release the mouse |
+
+Worlds are saved on quit to `$XDG_DATA_HOME/gamingg/saves/world`, selectable
+with `--world <name>`. Reloading an existing world uses its stored seed, so
+`--seed` only applies when creating a new one.
 
 Running windowed needs a Vulkan loader and drivers plus X11 and/or Wayland
 client libraries.

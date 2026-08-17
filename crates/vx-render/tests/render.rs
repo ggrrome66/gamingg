@@ -321,6 +321,61 @@ fn resizing_rebuilds_the_depth_buffer_and_still_renders() {
 }
 
 #[test]
+fn breaking_a_block_changes_what_is_drawn() {
+    // The end-to-end check for M2: an edit must reach the screen. It touches
+    // every link in the chain — raycast picks the block, the edit clears it and
+    // dirties the chunk, the mesher rebuilds, and the frame comes back visibly
+    // different.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let mut world = scene(&context, &mut renderer, 1);
+
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
+    let camera = Camera {
+        // Directly above the target, looking straight down at it.
+        position: glam::Vec3::new(0.5, surface as f32 + 4.0, 0.5),
+        pitch: -std::f32::consts::FRAC_PI_2 + 0.05,
+        aspect: WIDTH as f32 / HEIGHT as f32,
+        ..Camera::default()
+    };
+    renderer.update_camera(&context.queue, &camera);
+    let before = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    let triangles_before = renderer.triangle_count();
+
+    // Dig a shaft straight down, so the change is unmistakable from above.
+    let events = vx_core::EventBus::new();
+    for depth in 1..=6 {
+        let target = vx_core::BlockPos::new(0, surface - depth, 0);
+        vx_world::break_block(&mut world, &events, target)
+            .unwrap_or_else(|error| panic!("could not break {target:?}: {error}"));
+    }
+
+    // Re-mesh whatever the edit dirtied and re-upload it.
+    let dirty: Vec<vx_core::ChunkPos> = world.dirty_chunks().collect();
+    assert!(!dirty.is_empty(), "editing did not mark any chunk for remeshing");
+    for pos in dirty {
+        let origin = pos.origin();
+        let mesh = build_mesh(&world, world.registry(), [origin.x, 0, origin.z]);
+        renderer.set_chunk_mesh(&context.device, pos, &mesh);
+        world.clear_dirty(pos);
+    }
+
+    let after = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    save(&after, "edited.ppm");
+
+    assert_ne!(
+        before.pixels, after.pixels,
+        "the frame is identical after digging a shaft; the edit never reached the screen"
+    );
+    // Exposing the shaft walls adds geometry that interior culling had removed.
+    assert_ne!(
+        triangles_before,
+        renderer.triangle_count(),
+        "triangle count unchanged after carving into solid terrain"
+    );
+}
+
+#[test]
 fn greedy_meshing_keeps_the_triangle_count_modest() {
     // A sanity bound on the mesher at real scale: 25 chunks of terrain should
     // be tens of thousands of triangles, not millions.

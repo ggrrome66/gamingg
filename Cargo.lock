@@ -2052,6 +2052,7 @@ name = "vx-world"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "log",
  "thiserror 2.0.20",
  "vx-core",
 ]

@@ -6,6 +6,42 @@
 use glam::Vec3;
 use vx_platform::InputState;
 use vx_render::Camera;
+use vx_world::{PlayerBody, World};
+
+/// How the player moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovementMode {
+    /// Free flight, ignoring terrain. Useful for building and debugging.
+    Fly,
+    /// Walking, subject to gravity and collision.
+    Walk,
+}
+
+impl MovementMode {
+    pub fn toggled(self) -> Self {
+        match self {
+            MovementMode::Fly => MovementMode::Walk,
+            MovementMode::Walk => MovementMode::Fly,
+        }
+    }
+}
+
+/// Apply accumulated mouse movement to the camera's orientation.
+///
+/// Shared by both controllers so look behaviour cannot drift between them. The
+/// delta is consumed even when the mouse is not captured, so motion that
+/// arrived while the pointer was free is discarded rather than replayed as a
+/// snap the moment capture resumes.
+pub fn apply_mouse_look(camera: &mut Camera, input: &mut InputState, sensitivity: f32) {
+    let (dx, dy) = input.take_mouse_delta();
+    if !input.mouse_captured {
+        return;
+    }
+    camera.yaw += dx * sensitivity;
+    // Screen y grows downward, so pushing the mouse down looks down.
+    camera.pitch -= dy * sensitivity;
+    camera.clamp_pitch();
+}
 
 /// Free-flying camera controls.
 #[derive(Debug, Clone, Copy)]
@@ -31,16 +67,7 @@ impl Default for FlyController {
 impl FlyController {
     /// Advance the camera by `dt` seconds of input.
     pub fn apply(&self, camera: &mut Camera, input: &mut InputState, dt: f32) {
-        // Mouse look is consumed even when not captured, so that queued motion
-        // does not snap the view the instant capture is enabled.
-        let (dx, dy) = input.take_mouse_delta();
-        if input.mouse_captured {
-            camera.yaw += dx * self.sensitivity;
-            // Screen y grows downward, so moving the mouse down should pitch
-            // the view down.
-            camera.pitch -= dy * self.sensitivity;
-            camera.clamp_pitch();
-        }
+        apply_mouse_look(camera, input, self.sensitivity);
 
         let axes = input.movement_axes();
         if axes == Vec3::ZERO {
@@ -57,6 +84,60 @@ impl FlyController {
         // flying should not sink because you glanced down.
         let motion = camera.right() * axes.x + Vec3::Y * axes.y + camera.forward_level() * axes.z;
         camera.position += motion * speed * dt;
+    }
+}
+
+/// Walking controls: input drives a physical body, and the camera rides its
+/// eyes rather than being positioned directly.
+#[derive(Debug, Clone, Copy)]
+pub struct WalkController {
+    /// Blocks per second on the ground.
+    pub speed: f32,
+    pub sprint_multiplier: f32,
+    pub sensitivity: f32,
+}
+
+impl Default for WalkController {
+    fn default() -> Self {
+        WalkController {
+            speed: 4.8,
+            sprint_multiplier: 1.9,
+            sensitivity: 0.0022,
+        }
+    }
+}
+
+impl WalkController {
+    /// Advance the body by `dt` seconds of input, then move the camera to its
+    /// eyes.
+    pub fn apply(
+        &self,
+        camera: &mut Camera,
+        player: &mut PlayerBody,
+        world: &World,
+        input: &mut InputState,
+        dt: f32,
+    ) {
+        apply_mouse_look(camera, input, self.sensitivity);
+
+        let axes = input.movement_axes();
+        let speed = if input.is_sprinting() {
+            self.speed * self.sprint_multiplier
+        } else {
+            self.speed
+        };
+
+        // Walking follows the camera's heading but stays level, so looking up
+        // does not slow you down or launch you.
+        let wish = (camera.right() * axes.x + camera.forward_level() * axes.z) * speed;
+
+        // Space jumps rather than flying upward.
+        if axes.y > 0.0 {
+            player.jump();
+        }
+
+        player.step(world, wish, dt);
+        camera.position = player.eye_position();
     }
 }
 
@@ -212,6 +293,132 @@ mod tests {
         }
         assert!(camera.pitch < std::f32::consts::FRAC_PI_2);
         assert!(camera.forward().is_finite());
+    }
+
+    fn walk_world() -> World {
+        let mut world = World::new(2024);
+        world.load_around(vx_core::ChunkPos::new(0, 0), 1);
+        world
+    }
+
+    /// A body standing on the terrain at the origin, already settled.
+    fn standing(world: &World) -> PlayerBody {
+        let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
+        let mut player = PlayerBody {
+            position: Vec3::new(0.5, surface as f32, 0.5),
+            ..PlayerBody::default()
+        };
+        for _ in 0..60 {
+            player.step(world, Vec3::ZERO, 1.0 / 60.0);
+        }
+        player
+    }
+
+    #[test]
+    fn movement_mode_toggles_between_the_two_states() {
+        assert_eq!(MovementMode::Fly.toggled(), MovementMode::Walk);
+        assert_eq!(MovementMode::Walk.toggled(), MovementMode::Fly);
+        assert_eq!(MovementMode::Fly.toggled().toggled(), MovementMode::Fly);
+    }
+
+    #[test]
+    fn walking_moves_the_body_and_carries_the_camera_along() {
+        let world = walk_world();
+        let mut player = standing(&world);
+        let mut camera = Camera { yaw: 0.0, pitch: 0.0, ..Camera::default() };
+        let mut input = InputState::new();
+        let controller = WalkController::default();
+
+        input.press(KeyCode::KeyW);
+        let start = player.position;
+        for _ in 0..60 {
+            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
+        }
+
+        assert!(player.position.z < start.z - 1.0, "did not walk forward");
+        // The camera rides the body's eyes, not its feet.
+        assert_eq!(camera.position, player.eye_position());
+        assert!(camera.position.y > player.position.y);
+    }
+
+    #[test]
+    fn walking_does_not_sink_into_the_ground() {
+        let world = walk_world();
+        let mut player = standing(&world);
+        let mut camera = Camera::default();
+        let mut input = InputState::new();
+        let controller = WalkController::default();
+        input.press(KeyCode::KeyD);
+
+        for _ in 0..180 {
+            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
+            assert!(
+                !vx_world::collides(&world, &player.aabb()),
+                "walked into geometry at {:?}",
+                player.position
+            );
+        }
+        assert!(player.on_ground, "lost contact with the ground while walking");
+    }
+
+    #[test]
+    fn space_jumps_rather_than_flying_upward() {
+        let world = walk_world();
+        let mut player = standing(&world);
+        let mut camera = Camera::default();
+        let mut input = InputState::new();
+        let controller = WalkController::default();
+
+        let ground = player.position.y;
+        input.press(KeyCode::Space);
+        controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
+        assert!(player.velocity.y > 0.0, "space did not jump");
+
+        // Holding space must not levitate. It does hop repeatedly — each
+        // landing allows the next jump, which is the usual behaviour — so the
+        // check is that height stays bounded, not that the body is grounded at
+        // any particular tick.
+        let mut peak: f32 = ground;
+        for _ in 0..300 {
+            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
+            peak = peak.max(player.position.y);
+        }
+        assert!(peak < ground + 3.0, "held space climbed {} blocks", peak - ground);
+
+        // Releasing it settles back onto the ground.
+        input.release(KeyCode::Space);
+        for _ in 0..180 {
+            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
+        }
+        assert!(player.on_ground, "never landed after releasing jump");
+        assert!((player.position.y - ground).abs() < 0.05);
+    }
+
+    #[test]
+    fn sprinting_covers_more_ground_than_walking() {
+        let world = walk_world();
+        let controller = WalkController::default();
+        let mut camera = Camera { yaw: 0.0, pitch: 0.0, ..Camera::default() };
+
+        let distance = |sprint: bool| {
+            let mut player = standing(&world);
+            let mut input = InputState::new();
+            input.press(KeyCode::KeyW);
+            if sprint {
+                input.press(KeyCode::ControlLeft);
+            }
+            let start = player.position;
+            let mut camera = camera;
+            for _ in 0..60 {
+                controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
+            }
+            (player.position - start).length()
+        };
+
+        let walked = distance(false);
+        let sprinted = distance(true);
+        assert!(sprinted > walked * 1.5, "walk {walked}, sprint {sprinted}");
+        let _ = &mut camera;
     }
 
     #[test]

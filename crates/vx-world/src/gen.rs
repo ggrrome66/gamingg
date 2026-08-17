@@ -141,6 +141,9 @@ impl TerrainGenerator {
         // Generation touches the palette heavily; compact before it is cached.
         chunk.optimise();
         chunk.clear_dirty();
+        // Freshly generated terrain matches the seed, so there is nothing to
+        // save until a player changes it.
+        chunk.clear_modified();
         chunk
     }
 

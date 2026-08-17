@@ -18,6 +18,25 @@ use vx_core::{BlockId, CHUNK_VOLUME};
 /// direct representation would be, so packing stops paying for itself.
 const MAX_BITS: u32 = 16;
 
+/// Why storage could not be rebuilt from stored parts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum StorageError {
+    #[error("a palette must name at least one block")]
+    EmptyPalette,
+    #[error("index width {0} exceeds the {MAX_BITS}-bit maximum")]
+    BitWidth(u32),
+    #[error("index width {bits} does not match a {palette}-entry palette (expected {expected})")]
+    BitsPaletteMismatch {
+        bits: u32,
+        palette: usize,
+        expected: u32,
+    },
+    #[error("packed data holds {found} words, expected {expected}")]
+    DataLength { found: usize, expected: usize },
+    #[error("the index at {at} refers to a palette entry that does not exist")]
+    IndexOutOfPalette { at: usize },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PalettedStorage {
     palette: Vec<BlockId>,
@@ -75,6 +94,76 @@ impl PalettedStorage {
     /// negligible.
     pub fn data_bytes(&self) -> usize {
         self.data.len() * std::mem::size_of::<u64>()
+    }
+
+    /// The distinct blocks held, in palette-index order.
+    ///
+    /// Exposed so a chunk can be written to disk in its packed form rather
+    /// than expanded to one id per block.
+    pub fn palette(&self) -> &[BlockId] {
+        &self.palette
+    }
+
+    /// The packed index buffer. Empty when the storage is uniform.
+    pub fn packed_data(&self) -> &[u64] {
+        &self.data
+    }
+
+    /// Rebuild storage from parts previously read back out of it.
+    ///
+    /// Validates rather than trusting the caller: this is the path that loads
+    /// data off disk, where a truncated or hand-edited file would otherwise
+    /// produce out-of-bounds reads later.
+    pub fn from_parts(
+        palette: Vec<BlockId>,
+        bits: u32,
+        data: Vec<u64>,
+        len: usize,
+    ) -> Result<Self, StorageError> {
+        if palette.is_empty() {
+            return Err(StorageError::EmptyPalette);
+        }
+        if bits > MAX_BITS {
+            return Err(StorageError::BitWidth(bits));
+        }
+        // The width must be able to index the palette, and must be the
+        // narrowest such width, or reads would disagree with how it was packed.
+        let expected_bits = Self::bits_for(palette.len());
+        if bits != expected_bits {
+            return Err(StorageError::BitsPaletteMismatch {
+                bits,
+                palette: palette.len(),
+                expected: expected_bits,
+            });
+        }
+        let expected_words = if bits == 0 {
+            0
+        } else {
+            Self::words_needed(len, bits)
+        };
+        if data.len() != expected_words {
+            return Err(StorageError::DataLength {
+                found: data.len(),
+                expected: expected_words,
+            });
+        }
+
+        let storage = PalettedStorage {
+            palette,
+            bits,
+            data,
+            len,
+        };
+
+        // Every packed index must actually name a palette entry.
+        if bits > 0 {
+            for at in 0..len {
+                if storage.get_index(at) >= storage.palette.len() {
+                    return Err(StorageError::IndexOutOfPalette { at });
+                }
+            }
+        }
+        Ok(storage)
     }
 
     #[inline]

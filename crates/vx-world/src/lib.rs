@@ -5,13 +5,21 @@
 //! a dedicated server later.
 
 pub mod chunk;
+pub mod edit;
 pub mod gen;
 pub mod noise;
+pub mod physics;
+pub mod raycast;
+pub mod save;
 pub mod storage;
 pub mod world;
 
 pub use chunk::{BlockView, Chunk, SoloChunkView};
+pub use edit::{break_block, place_block, BlockBreakEvent, BlockPlaceEvent, EditError};
 pub use gen::{TerrainBlocks, TerrainGenerator, SEA_LEVEL};
 pub use noise::Fbm;
-pub use storage::PalettedStorage;
+pub use physics::{collides, Aabb, PlayerBody};
+pub use raycast::{raycast, raycast_solid, RayHit};
+pub use save::{SaveError, WorldSave};
+pub use storage::{PalettedStorage, StorageError};
 pub use world::World;

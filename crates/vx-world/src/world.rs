@@ -54,8 +54,20 @@ impl World {
         self.chunks.get_mut(&pos)
     }
 
+    /// Every chunk currently resident, in unspecified order.
+    pub fn loaded_chunks(&self) -> impl Iterator<Item = ChunkPos> + '_ {
+        self.chunks.keys().copied()
+    }
+
     pub fn is_loaded(&self, pos: ChunkPos) -> bool {
         self.chunks.contains_key(&pos)
+    }
+
+    /// Insert an already-built chunk, replacing anything at its position.
+    ///
+    /// Used to bring a chunk in from disk rather than generating it.
+    pub fn insert_chunk(&mut self, chunk: Chunk) {
+        self.chunks.insert(chunk.pos(), chunk);
     }
 
     /// Load `pos`, generating it if it is not already resident.
@@ -84,13 +96,17 @@ impl World {
         generated
     }
 
-    /// Drop chunks further than `radius` from `centre`. Returns how many were
-    /// unloaded. Edits are lost until saving lands in M2.
+    /// Drop chunks further than `radius` from `centre`, returning how many
+    /// were unloaded.
+    ///
+    /// Chunks still carrying unsaved edits are kept, so walking away from
+    /// something you built cannot discard it before it reaches disk.
     pub fn unload_beyond(&mut self, centre: ChunkPos, radius: i32) -> usize {
         let limit = (radius as i64) * (radius as i64);
         let before = self.chunks.len();
-        self.chunks
-            .retain(|pos, _| pos.distance_squared(centre) <= limit);
+        self.chunks.retain(|pos, chunk| {
+            pos.distance_squared(centre) <= limit || chunk.is_modified()
+        });
         before - self.chunks.len()
     }
 

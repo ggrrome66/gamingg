@@ -11,6 +11,13 @@ pub struct Chunk {
     blocks: PalettedStorage,
     /// Set when the contents change, cleared once a mesh has been rebuilt.
     dirty: bool,
+    /// Set when the chunk no longer matches what generation would produce, and
+    /// cleared once it has been written to disk.
+    ///
+    /// Distinct from `dirty`, which the mesher clears every time it rebuilds.
+    /// Saving needs to know "has a player touched this?", which survives any
+    /// number of remeshes.
+    modified: bool,
 }
 
 impl Chunk {
@@ -20,6 +27,18 @@ impl Chunk {
             pos,
             blocks: PalettedStorage::empty_chunk(),
             dirty: false,
+            modified: false,
+        }
+    }
+
+    /// Rebuild a chunk around storage loaded from disk.
+    pub fn from_storage(pos: ChunkPos, blocks: PalettedStorage) -> Self {
+        Chunk {
+            pos,
+            blocks,
+            dirty: true,
+            // Loaded chunks came from disk, so they are already saved.
+            modified: false,
         }
     }
 
@@ -38,6 +57,7 @@ impl Chunk {
         if previous != block {
             self.blocks.set(index, block);
             self.dirty = true;
+            self.modified = true;
         }
         previous
     }
@@ -57,6 +77,21 @@ impl Chunk {
 
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
+    }
+
+    /// True when this chunk differs from freshly generated terrain and so
+    /// needs writing to disk.
+    pub fn is_modified(&self) -> bool {
+        self.modified
+    }
+
+    pub fn mark_modified(&mut self) {
+        self.modified = true;
+    }
+
+    /// Called once the chunk has been written out.
+    pub fn clear_modified(&mut self) {
+        self.modified = false;
     }
 
     pub fn storage(&self) -> &PalettedStorage {

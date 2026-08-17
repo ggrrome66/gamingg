@@ -14,13 +14,14 @@ mod streaming;
 use std::sync::Arc;
 use std::time::Instant;
 
-use controller::FlyController;
+use controller::{FlyController, MovementMode, WalkController};
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
+use vx_core::{BlockId, EventBus};
 use vx_platform::InputState;
 use vx_render::headless::{capture_frame, CAPTURE_FORMAT};
 use vx_render::{Camera, GpuContext, Renderer, WindowSurface};
-use vx_world::World;
+use vx_world::{break_block, place_block, raycast_solid, PlayerBody, World, WorldSave};
 
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
@@ -36,6 +37,8 @@ struct Options {
     screenshot: Option<String>,
     width: u32,
     height: u32,
+    /// Save directory name, under the platform data directory.
+    world: String,
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -44,6 +47,7 @@ fn parse_args() -> Result<Options, String> {
         screenshot: None,
         width: 1280,
         height: 720,
+        world: "world".to_string(),
     };
 
     let mut args = std::env::args().skip(1);
@@ -59,6 +63,7 @@ fn parse_args() -> Result<Options, String> {
                     .map_err(|_| "--seed must be a number".to_string())?
             }
             "--screenshot" => options.screenshot = Some(value()?),
+            "--world" => options.world = value()?,
             "--width" => {
                 options.width = value()?
                     .parse()
@@ -74,6 +79,7 @@ fn parse_args() -> Result<Options, String> {
                     "gamingg\n\n\
                      Options:\n  \
                      --seed <n>          world seed (default {DEFAULT_SEED})\n  \
+                     --world <name>      save directory name (default \"world\")\n  \
                      --screenshot <path> render one frame to a PPM file and exit\n  \
                      --width <n>         window or image width\n  \
                      --height <n>        window or image height"
@@ -125,7 +131,7 @@ fn build_scene(
 
     let centre = vx_core::ChunkPos::new(0, 0);
     world.load_around(centre, radius);
-    streamer.update(&mut world, renderer, &context.device, centre);
+    streamer.update(&mut world, renderer, &context.device, centre, None);
 
     let surface = world.surface_y(0, 0).unwrap_or(80);
     let camera = Camera {
@@ -170,7 +176,12 @@ fn run_windowed(options: &Options) -> Result<(), String> {
     })?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::new(options.seed, options.width, options.height);
+    let mut app = App::new(
+        options.seed,
+        options.width,
+        options.height,
+        options.world.clone(),
+    );
     event_loop
         .run_app(&mut app)
         .map_err(|error| format!("event loop failed: {error}"))
@@ -185,14 +196,26 @@ struct Active {
     world: World,
     streamer: ChunkStreamer,
     camera: Camera,
+    /// The physical body. Only drives the camera in walk mode; in fly mode the
+    /// camera moves freely and the body is carried along behind it.
+    player: PlayerBody,
+    mode: MovementMode,
+    /// Carries block edits to any listeners. Mods hook in here in M3.
+    events: EventBus,
+    save: Option<WorldSave>,
+    /// Blocks the player can place, and which one is selected.
+    palette: Vec<BlockId>,
+    selected: usize,
 }
 
 struct App {
     seed: u64,
     width: u32,
     height: u32,
+    world_name: String,
     active: Option<Active>,
-    controller: FlyController,
+    fly: FlyController,
+    walk: WalkController,
     input: InputState,
     last_frame: Instant,
     // Frame timing for the title bar readout.
@@ -201,13 +224,15 @@ struct App {
 }
 
 impl App {
-    fn new(seed: u64, width: u32, height: u32) -> Self {
+    fn new(seed: u64, width: u32, height: u32, world_name: String) -> Self {
         App {
             seed,
             width,
             height,
+            world_name,
             active: None,
-            controller: FlyController::default(),
+            fly: FlyController::default(),
+            walk: WalkController::default(),
             input: InputState::new(),
             last_frame: Instant::now(),
             frames: 0,
@@ -245,11 +270,32 @@ impl App {
         let dt = (now - self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
 
-        // Disjoint field borrows: the controller and input are separate fields
-        // from `active`, so this is fine and lets the camera be mutated in
-        // place rather than through a copy.
+        // Disjoint field borrows: the controllers and input are separate
+        // fields from `active`, so this is fine and lets the camera be mutated
+        // in place rather than through a copy.
         let Some(active) = &mut self.active else { return };
-        self.controller.apply(&mut active.camera, &mut self.input, dt);
+
+        match active.mode {
+            MovementMode::Fly => {
+                self.fly.apply(&mut active.camera, &mut self.input, dt);
+                // Keep the body under the camera so switching to walk mode
+                // drops the player where they are looking from, not wherever
+                // they last stood.
+                active.player.position =
+                    active.camera.position - glam::Vec3::Y * active.player.eye_height;
+                active.player.velocity = glam::Vec3::ZERO;
+                active.player.on_ground = false;
+            }
+            MovementMode::Walk => {
+                self.walk.apply(
+                    &mut active.camera,
+                    &mut active.player,
+                    &active.world,
+                    &mut self.input,
+                    dt,
+                );
+            }
+        }
 
         // Keep chunks in step with where the camera is.
         let centre = chunk_at(active.camera.position);
@@ -258,6 +304,7 @@ impl App {
             &mut active.renderer,
             &active.context.device,
             centre,
+            active.save.as_ref(),
         );
 
         active
@@ -315,6 +362,103 @@ impl App {
         self.report_framerate();
     }
 
+    /// How far the player can reach to break or place, in blocks.
+    const REACH: f32 = 6.0;
+
+    /// Break whatever the player is looking at.
+    fn break_target(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let Some(hit) = raycast_solid(
+            &active.world,
+            active.world.registry(),
+            active.camera.position,
+            active.camera.forward(),
+            Self::REACH,
+        ) else {
+            return;
+        };
+        if let Err(error) = break_block(&mut active.world, &active.events, hit.block) {
+            log::debug!("could not break {:?}: {error}", hit.block);
+        }
+    }
+
+    /// Place the selected block against whatever the player is looking at.
+    fn place_at_target(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let Some(&block) = active.palette.get(active.selected) else {
+            return;
+        };
+        let Some(hit) = raycast_solid(
+            &active.world,
+            active.world.registry(),
+            active.camera.position,
+            active.camera.forward(),
+            Self::REACH,
+        ) else {
+            return;
+        };
+
+        // The player's own box must not be built into, or you seal yourself in.
+        let body = active.player.aabb();
+        let result = place_block(
+            &mut active.world,
+            &active.events,
+            &hit,
+            block,
+            |position| body.contains_block(position),
+        );
+        if let Err(error) = result {
+            log::debug!("could not place at {:?}: {error}", hit.placement());
+        }
+    }
+
+    /// React to a key going down, ignoring auto-repeat.
+    fn handle_press(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Escape => self.set_capture(false),
+            KeyCode::KeyF => {
+                if let Some(active) = &mut self.active {
+                    active.mode = active.mode.toggled();
+                    // Entering walk mode drops the player from wherever the
+                    // camera was, so clear any stale fall speed.
+                    active.player.velocity = glam::Vec3::ZERO;
+                    log::info!("movement mode: {:?}", active.mode);
+                }
+            }
+            KeyCode::F5 => self.save_world(),
+            // Number keys pick a block to build with.
+            KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 => {
+                if let Some(active) = &mut self.active {
+                    let slot = match code {
+                        KeyCode::Digit1 => 0,
+                        KeyCode::Digit2 => 1,
+                        KeyCode::Digit3 => 2,
+                        _ => 3,
+                    };
+                    if slot < active.palette.len() {
+                        active.selected = slot;
+                        let name = &active.world.registry().get_or_air(active.palette[slot]).name;
+                        log::info!("selected {name}");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Write the world to disk, reporting how it went.
+    fn save_world(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let Some(save) = active.save.as_ref() else {
+            return;
+        };
+        match save.save_world(&mut active.world) {
+            Ok(0) => log::info!("nothing to save"),
+            Ok(count) => log::info!("saved {count} chunks to {}", save.root().display()),
+            Err(error) => log::error!("could not save the world: {error}"),
+        }
+    }
+
     fn report_framerate(&mut self) {
         self.frames += 1;
         let elapsed = self.last_report.elapsed();
@@ -325,7 +469,11 @@ impl App {
         if let Some(active) = &self.active {
             let fps = self.frames as f32 / elapsed.as_secs_f32();
             active.window.set_title(&format!(
-                "gamingg - {fps:.0} fps - {}/{} chunks - {} tris",
+                "gamingg - {fps:.0} fps - {} - {}/{} chunks - {} tris",
+                match active.mode {
+                    MovementMode::Fly => "fly",
+                    MovementMode::Walk => "walk",
+                },
                 active.renderer.loaded_chunk_count(),
                 active.streamer.meshed_count(),
                 active.renderer.triangle_count()
@@ -368,10 +516,64 @@ impl ApplicationHandler for App {
 
         let renderer = Renderer::new(&context, surface.format(), size.width, size.height);
 
-        let world = World::new(self.seed);
+        // Open the save directory. A failure here is not fatal — the world is
+        // still playable, it just will not persist — so it is reported and
+        // play continues.
+        let save_root = vx_platform::paths::saves_dir().join(&self.world_name);
+        let save = match WorldSave::create(&save_root) {
+            Ok(save) => Some(save),
+            Err(error) => {
+                log::error!(
+                    "could not open {}: {error}; this session will not be saved",
+                    save_root.display()
+                );
+                None
+            }
+        };
+
+        // An existing world keeps its own seed, so reloading gives back the
+        // same terrain regardless of what --seed says.
+        let seed = save
+            .as_ref()
+            .filter(|save| save.exists())
+            .and_then(|save| match save.read_meta() {
+                Ok(seed) => {
+                    log::info!("loading existing world (seed {seed})");
+                    Some(seed)
+                }
+                Err(error) => {
+                    log::error!("could not read the world metadata: {error}");
+                    None
+                }
+            })
+            .unwrap_or(self.seed);
+
+        let mut world = World::new(seed);
         let streamer = ChunkStreamer::new(StreamingConfig::default());
+
+        // Blocks the player can build with, resolved by name so this survives
+        // any future id changes.
+        let palette: Vec<BlockId> = [
+            "engine:stone",
+            "engine:dirt",
+            "engine:grass",
+            "engine:sand",
+        ]
+        .iter()
+        .filter_map(|name| world.registry().id_of(name))
+        .collect();
+
+        // Stand the player on the terrain rather than at a fixed height that
+        // might be inside a hill.
+        world.load_chunk(vx_core::ChunkPos::new(0, 0));
+        let ground = world.surface_y(0, 0).unwrap_or(90);
+        let player = PlayerBody {
+            position: glam::Vec3::new(0.5, ground as f32, 0.5),
+            ..PlayerBody::default()
+        };
+
         let camera = Camera {
-            position: glam::Vec3::new(0.0, 90.0, 0.0),
+            position: player.eye_position(),
             aspect: size.width as f32 / size.height.max(1) as f32,
             ..Camera::default()
         };
@@ -385,17 +587,13 @@ impl ApplicationHandler for App {
             world,
             streamer,
             camera,
+            player,
+            mode: MovementMode::Walk,
+            events: EventBus::new(),
+            save,
+            palette,
+            selected: 0,
         });
-
-        // Drop the player onto the terrain rather than leaving them at a fixed
-        // height that might be inside a hill.
-        if let Some(active) = &mut self.active {
-            let centre = vx_core::ChunkPos::new(0, 0);
-            active.world.load_chunk(centre);
-            if let Some(surface_y) = active.world.surface_y(0, 0) {
-                active.camera.position.y = surface_y as f32 + 2.0;
-            }
-        }
 
         self.last_frame = Instant::now();
         self.last_report = Instant::now();
@@ -408,7 +606,12 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // Save before tearing down, or everything built this session
+                // is lost on quit.
+                self.save_world();
+                event_loop.exit();
+            }
 
             WindowEvent::Resized(size) => {
                 if let Some(active) = &mut self.active {
@@ -437,8 +640,10 @@ impl ApplicationHandler for App {
                 };
                 match event.state {
                     ElementState::Pressed => {
-                        if code == KeyCode::Escape {
-                            self.set_capture(false);
+                        // Key repeat re-fires this, so anything that toggles
+                        // state must ignore repeats or it flickers.
+                        if !event.repeat {
+                            self.handle_press(code);
                         }
                         self.input.press(code);
                     }
@@ -448,9 +653,24 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
-                button: MouseButton::Left,
+                button,
                 ..
-            } => self.set_capture(true),
+            } => {
+                // The first click captures the pointer; once captured, clicks
+                // edit the world. Without that, the click that focuses the
+                // window would also punch a hole in the terrain.
+                if !self.input.mouse_captured {
+                    if button == MouseButton::Left {
+                        self.set_capture(true);
+                    }
+                    return;
+                }
+                match button {
+                    MouseButton::Left => self.break_target(),
+                    MouseButton::Right => self.place_at_target(),
+                    _ => {}
+                }
+            }
 
             WindowEvent::RedrawRequested => self.frame(),
 
