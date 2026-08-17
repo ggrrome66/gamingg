@@ -159,7 +159,8 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         .map_err(|error| format!("could not write {path}: {error}"))?;
 
     println!(
-        "wrote {path} ({width}x{height}, {} chunks, {} triangles)",
+        "wrote {path} ({width}x{height}, {} of {} chunks drawn, {} triangles)",
+        renderer.visible_chunk_count(),
         renderer.loaded_chunk_count(),
         renderer.triangle_count()
     );
@@ -469,13 +470,13 @@ impl App {
         if let Some(active) = &self.active {
             let fps = self.frames as f32 / elapsed.as_secs_f32();
             active.window.set_title(&format!(
-                "gamingg - {fps:.0} fps - {} - {}/{} chunks - {} tris",
+                "gamingg - {fps:.0} fps - {} - {}/{} chunks drawn - {} tris",
                 match active.mode {
                     MovementMode::Fly => "fly",
                     MovementMode::Walk => "walk",
                 },
+                active.renderer.visible_chunk_count(),
                 active.renderer.loaded_chunk_count(),
-                active.streamer.meshed_count(),
                 active.renderer.triangle_count()
             ));
         }
@@ -514,7 +515,7 @@ impl ApplicationHandler for App {
                 }
             };
 
-        let renderer = Renderer::new(&context, surface.format(), size.width, size.height);
+        let mut renderer = Renderer::new(&context, surface.format(), size.width, size.height);
 
         // Open the save directory. A failure here is not fatal — the world is
         // still playable, it just will not persist — so it is reported and

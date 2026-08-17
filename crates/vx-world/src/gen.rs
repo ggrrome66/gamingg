@@ -7,10 +7,17 @@
 use vx_core::{BlockDef, BlockId, BlockRegistry, ChunkPos, LocalPos, CHUNK_HEIGHT, CHUNK_SIZE};
 
 use crate::chunk::Chunk;
-use crate::noise::Fbm;
+use crate::noise::{warp_2d, Fbm, Ridged, Spline};
 
 /// Sea level. Terrain below this floods.
 pub const SEA_LEVEL: i32 = 62;
+
+/// Per-field seed offsets. Each noise field must be decorrelated from the
+/// others, or "erosion" and "peaks" would be the same landscape twice and the
+/// three-field split would buy nothing.
+const SEED_EROSION: u64 = 0x00e5_0510_a17f_2b64;
+const SEED_PEAKS: u64 = 0x0bea_c521_37d9_11e5;
+const SEED_RIDGES: u64 = 0x0d1d_9e17_c40a_88f3;
 
 /// The block ids terrain generation needs, resolved once against the registry
 /// so generation never does string lookups per block.
@@ -66,18 +73,40 @@ impl TerrainBlocks {
 }
 
 /// Turns a seed into terrain.
+///
+/// Height comes from three independent low-frequency fields, each mapped through
+/// its own [`Spline`], plus ridged detail gated to inland areas.
+///
+/// The three-field split is what buys separable control: continentalness decides
+/// how high the land sits, erosion decides how rugged it is allowed to be, and
+/// peaks/valleys supplies the local variation that erosion then scales. Summing
+/// octaves into a single number cannot express "high but flat" or "low but
+/// jagged"; three fields can.
 #[derive(Debug, Clone)]
 pub struct TerrainGenerator {
     seed: u64,
     blocks: TerrainBlocks,
-    /// Broad landmass shape.
+
+    /// Where landmasses are. Lowest frequency of the three.
     continent: Fbm,
-    /// Local roughness, layered on top.
-    detail: Fbm,
-    /// Lowest terrain height, at continent noise 0.
-    base_height: i32,
-    /// Height range added by the noise stack.
-    height_range: i32,
+    /// How worn down the land is. High erosion flattens.
+    erosion: Fbm,
+    /// Local rise and fall, scaled by erosion.
+    peaks: Fbm,
+    /// Mountain ridgelines, only inland.
+    ridges: Ridged,
+
+    /// Continentalness to a base height.
+    continent_curve: Spline,
+    /// Erosion to a ruggedness factor in `[0, 1]`.
+    erosion_curve: Spline,
+    /// Peaks/valleys to a signed height offset.
+    peaks_curve: Spline,
+    /// Continentalness to how much ridged mountain height applies.
+    ridge_gate: Spline,
+
+    warp_frequency: f32,
+    warp_strength: f32,
 }
 
 impl TerrainGenerator {
@@ -85,20 +114,81 @@ impl TerrainGenerator {
         TerrainGenerator {
             seed,
             blocks,
+
             continent: Fbm {
                 octaves: 4,
                 persistence: 0.5,
                 lacunarity: 2.0,
-                frequency: 1.0 / 220.0,
+                frequency: 1.0 / 380.0,
             },
-            detail: Fbm {
+            erosion: Fbm {
                 octaves: 3,
-                persistence: 0.45,
-                lacunarity: 2.3,
-                frequency: 1.0 / 48.0,
+                persistence: 0.5,
+                lacunarity: 2.0,
+                frequency: 1.0 / 240.0,
             },
-            base_height: 48,
-            height_range: 40,
+            peaks: Fbm {
+                octaves: 4,
+                persistence: 0.5,
+                lacunarity: 2.2,
+                frequency: 1.0 / 85.0,
+            },
+            ridges: Ridged {
+                octaves: 4,
+                persistence: 0.5,
+                lacunarity: 2.1,
+                frequency: 1.0 / 120.0,
+            },
+
+            // Summed octaves cluster hard around 0.5, so the curve spends its
+            // detail where the samples actually land. The steep run from 0.42
+            // to 0.58 is the coastline-to-upland transition; almost every
+            // sample falls in that window, and it is what replaces the old flat
+            // terraces with real relief.
+            continent_curve: Spline::new(vec![
+                (0.00, 24.0),
+                (0.32, 38.0),
+                (0.42, 52.0),  // continental shelf
+                (0.48, 63.0),  // coastline, just above sea level
+                (0.56, 84.0),  // lowland rising
+                (0.66, 116.0), // uplands
+                (0.80, 152.0),
+                (1.00, 178.0),
+            ]),
+
+            // High erosion means worn flat. Deliberately non-linear: most of
+            // the world is moderately eroded and calm, with rugged country
+            // confined to the low-erosion tail.
+            erosion_curve: Spline::new(vec![
+                (0.00, 1.00),
+                (0.35, 0.72),
+                (0.50, 0.38),
+                (0.65, 0.16),
+                (1.00, 0.05),
+            ]),
+
+            // Signed: below the midpoint carves valleys, above raises peaks.
+            peaks_curve: Spline::new(vec![
+                (0.00, -34.0),
+                (0.35, -12.0),
+                (0.50, 0.0),
+                (0.65, 18.0),
+                (1.00, 52.0),
+            ]),
+
+            // Ridges only inland, ramping in past the coast so mountains never
+            // erupt straight out of the sea.
+            ridge_gate: Spline::new(vec![
+                (0.00, 0.0),
+                (0.55, 0.0),
+                (0.70, 0.55),
+                (1.00, 1.0),
+            ]),
+
+            // Bends the coordinate space so coastlines and ridges wander
+            // instead of following the sample lattice.
+            warp_frequency: 1.0 / 150.0,
+            warp_strength: 45.0,
         }
     }
 
@@ -111,16 +201,39 @@ impl TerrainGenerator {
     }
 
     /// Surface height at a world column: the y of its topmost solid block.
+    ///
+    /// Pure in `(seed, x, z)` — no state, no ordering, so columns can be
+    /// evaluated in any order and on any thread.
     pub fn height_at(&self, world_x: i32, world_z: i32) -> i32 {
-        let (x, z) = (world_x as f32, world_z as f32);
+        // Warp first, so every field downstream samples the bent space and the
+        // lattice alignment never shows through.
+        let (x, z) = warp_2d(
+            self.seed,
+            world_x as f32,
+            world_z as f32,
+            self.warp_frequency,
+            self.warp_strength,
+        );
 
-        let continent = self.continent.sample(self.seed, x, z);
-        // Detail is weighted by the continent value so lowlands stay flat and
-        // highlands get rugged, instead of uniform noise everywhere.
-        let detail = self.detail.sample(self.seed ^ 0xa5a5, x, z);
-        let combined = (continent * 0.75 + detail * 0.25 * continent).clamp(0.0, 1.0);
+        // Independent seed offsets, or the three fields would be identical.
+        let continentalness = self.continent.sample(self.seed, x, z);
+        let erosion = self.erosion.sample(self.seed ^ SEED_EROSION, x, z);
+        let peaks_valleys = self.peaks.sample(self.seed ^ SEED_PEAKS, x, z);
 
-        let height = self.base_height as f32 + combined * self.height_range as f32;
+        let base = self.continent_curve.sample(continentalness);
+        let ruggedness = self.erosion_curve.sample(erosion);
+        let local = self.peaks_curve.sample(peaks_valleys) * ruggedness;
+
+        // Ridges: inland only, and flattened out by erosion like everything
+        // else, so a worn-down highland is a plateau rather than a saw blade.
+        let gate = self.ridge_gate.sample(continentalness);
+        let ridge = if gate > 0.0 {
+            self.ridges.sample(self.seed ^ SEED_RIDGES, x, z) * gate * ruggedness * 46.0
+        } else {
+            0.0
+        };
+
+        let height = base + local + ridge;
         (height as i32).clamp(1, CHUNK_HEIGHT - 1)
     }
 
@@ -356,6 +469,86 @@ mod tests {
     }
 
     #[test]
+    fn terrain_has_real_relief_rather_than_flat_terraces() {
+        // The regression this milestone exists to prevent, stated numerically.
+        // Summed octaves alone gave ~22 blocks of spread and read as a paved
+        // car park; the spline stack should give well over 60.
+        let (_, generator) = generator(2024);
+
+        let mut heights: Vec<i32> = Vec::new();
+        for x in (-3000..3000).step_by(29) {
+            for z in (-3000..3000).step_by(29) {
+                heights.push(generator.height_at(x, z));
+            }
+        }
+        heights.sort_unstable();
+
+        let n = heights.len();
+        let p05 = heights[n * 5 / 100];
+        let p95 = heights[n * 95 / 100];
+        let spread = p95 - p05;
+
+        assert!(
+            spread > 60,
+            "only {spread} blocks between the 5th and 95th percentile ({p05}..{p95}); \
+             terrain has flattened back out"
+        );
+        // And it should use the vertical space without slamming into the roof.
+        assert!(heights[0] < SEA_LEVEL, "no terrain below sea level at all");
+        assert!(
+            heights[n - 1] < CHUNK_HEIGHT - 20,
+            "terrain is pressed against the world ceiling at {}",
+            heights[n - 1]
+        );
+    }
+
+    #[test]
+    fn terrain_is_walkable_rather_than_a_staircase_of_cliffs() {
+        // Relief is worthless if every column is a sheer wall. Adjacent columns
+        // should mostly differ by a step the player can walk up.
+        let (_, generator) = generator(99);
+
+        let mut steep = 0;
+        let mut total = 0;
+        for x in -1500..1500 {
+            let delta = (generator.height_at(x + 1, 7) - generator.height_at(x, 7)).abs();
+            if delta > 2 {
+                steep += 1;
+            }
+            total += 1;
+        }
+
+        let steep_fraction = steep as f32 / total as f32;
+        assert!(
+            steep_fraction < 0.05,
+            "{:.1}% of columns are unclimbable steps",
+            steep_fraction * 100.0
+        );
+    }
+
+    #[test]
+    fn domain_warping_breaks_axis_alignment() {
+        // Without warping, terrain features line up with the sample lattice and
+        // the world reads as a grid. Compare variation along an axis against
+        // variation along a diagonal: neither should be conspicuously flatter.
+        let (_, generator) = generator(404);
+
+        let variation = |step: (i32, i32)| -> f64 {
+            let samples: Vec<f64> = (0..600)
+                .map(|i| generator.height_at(i * step.0, i * step.1) as f64)
+                .collect();
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            (samples.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / samples.len() as f64).sqrt()
+        };
+
+        let along_axis = variation((1, 0));
+        let along_diagonal = variation((1, 1));
+
+        assert!(along_axis > 5.0, "terrain barely varies along an axis");
+        assert!(along_diagonal > 5.0, "terrain barely varies diagonally");
+    }
+
+    #[test]
     fn generated_chunks_come_back_clean_and_compacted() {
         let (_, generator) = generator(4);
         let chunk = generator.generate(ChunkPos::new(0, 0));
@@ -369,4 +562,6 @@ mod tests {
         );
     }
 }
+
+
 

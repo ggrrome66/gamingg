@@ -201,6 +201,14 @@ fn nearer_geometry_occludes_farther_geometry() {
     let Some(context) = context() else { return };
     let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
 
+    // Frustum culling derives a chunk's bounding box from its `ChunkPos` key,
+    // which is correct for real meshes — the mesher never emits geometry
+    // outside the chunk it was asked for. These synthetic quads deliberately
+    // break that: they sit at the origin under keys that place them elsewhere,
+    // so culling would (rightly) discard them. Turn it off; this test is about
+    // the depth buffer, not visibility.
+    renderer.set_culling_enabled(false);
+
     // Camera at the origin looking down -Z, which is the default orientation.
     let camera = Camera {
         position: glam::Vec3::ZERO,
@@ -318,6 +326,114 @@ fn resizing_rebuilds_the_depth_buffer_and_still_renders() {
     let capture = capture_frame(&context, &renderer, wide, tall);
     assert_eq!(capture.width, wide);
     assert_eq!(capture.pixels.len(), (wide * tall * 4) as usize);
+}
+
+#[test]
+fn frustum_culling_does_not_change_the_image() {
+    // The decisive test. Culling is only ever allowed to skip geometry the
+    // camera cannot see, so a culled frame and an unculled one must be
+    // byte-for-byte identical. Any mistake in the plane maths shows up here
+    // immediately as chunks missing at the edges of the view.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 3);
+
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
+    let camera = Camera {
+        position: glam::Vec3::new(0.0, surface as f32 + 8.0, 0.0),
+        yaw: 0.7,
+        pitch: -0.2,
+        aspect: WIDTH as f32 / HEIGHT as f32,
+        ..Camera::default()
+    };
+    renderer.update_camera(&context.queue, &camera);
+
+    renderer.set_culling_enabled(false);
+    let uncalled = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    let drawn_without = renderer.visible_chunk_count();
+
+    renderer.set_culling_enabled(true);
+    let culled = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    let drawn_with = renderer.visible_chunk_count();
+    save(&culled, "culled.ppm");
+
+    assert_eq!(
+        uncalled.pixels, culled.pixels,
+        "culling changed what is on screen: it dropped geometry the camera can see"
+    );
+
+    // And it has to actually be skipping something, or the check above passes
+    // for the boring reason.
+    assert!(
+        drawn_with < drawn_without,
+        "culling skipped nothing: {drawn_with} of {drawn_without} chunks drawn"
+    );
+    eprintln!(
+        "culling drew {drawn_with} of {drawn_without} chunks ({:.0}% skipped)",
+        100.0 * (1.0 - drawn_with as f32 / drawn_without as f32)
+    );
+}
+
+#[test]
+fn culling_holds_up_from_several_directions() {
+    // One camera angle could get lucky. Sweep the yaw all the way round and
+    // check the invariant survives every orientation, including looking up and
+    // down where the near and far planes do the work.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 2);
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
+
+    for step in 0..8 {
+        let camera = Camera {
+            position: glam::Vec3::new(4.0, surface as f32 + 6.0, 4.0),
+            yaw: step as f32 * std::f32::consts::FRAC_PI_4,
+            pitch: if step % 3 == 0 { -0.6 } else { 0.3 },
+            aspect: WIDTH as f32 / HEIGHT as f32,
+            ..Camera::default()
+        };
+        renderer.update_camera(&context.queue, &camera);
+
+        renderer.set_culling_enabled(false);
+        let plain = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+
+        renderer.set_culling_enabled(true);
+        let culled = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+
+        assert_eq!(
+            plain.pixels, culled.pixels,
+            "culling changed the image at yaw step {step}"
+        );
+    }
+}
+
+#[test]
+fn culling_skips_most_of_the_world_when_looking_one_way() {
+    // The point of the exercise: with a 70-degree view, most of a loaded disc
+    // of chunks is behind or beside the camera and should never be submitted.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 4);
+
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
+    let camera = Camera {
+        position: glam::Vec3::new(0.0, surface as f32 + 4.0, 0.0),
+        yaw: 0.0,
+        pitch: 0.0,
+        aspect: WIDTH as f32 / HEIGHT as f32,
+        ..Camera::default()
+    };
+    renderer.update_camera(&context.queue, &camera);
+
+    let loaded = renderer.loaded_chunk_count();
+    let drawn = renderer.visible_chunk_count();
+
+    assert!(loaded > 20, "not enough chunks loaded to be a fair test");
+    assert!(
+        drawn * 2 < loaded,
+        "drew {drawn} of {loaded} chunks; culling is barely helping"
+    );
+    assert!(drawn > 0, "culled the entire world");
 }
 
 #[test]

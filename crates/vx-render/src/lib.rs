@@ -6,6 +6,7 @@
 //! a window and to an offscreen image in tests.
 
 pub mod camera;
+pub mod frustum;
 pub mod gpu;
 pub mod headless;
 pub mod mesh_buffer;
@@ -13,10 +14,12 @@ pub mod tiles;
 
 use std::collections::HashMap;
 
-use vx_core::ChunkPos;
+use glam::Vec3;
+use vx_core::{ChunkPos, CHUNK_HEIGHT, CHUNK_SIZE};
 use vx_mesh::Mesh;
 
 pub use camera::{Camera, CameraUniform};
+pub use frustum::Frustum;
 pub use gpu::{GpuContext, GpuError, WindowSurface, DEPTH_FORMAT};
 pub use mesh_buffer::{ChunkMesh, VERTEX_LAYOUT};
 pub use tiles::TileTextures;
@@ -37,6 +40,13 @@ pub struct Renderer {
     tiles: TileTextures,
     depth_view: wgpu::TextureView,
     chunks: HashMap<ChunkPos, ChunkMesh>,
+    /// Refreshed whenever the camera moves. `None` until the first update, so
+    /// a frame drawn before any camera is set shows everything rather than
+    /// culling against a meaningless volume.
+    frustum: Option<Frustum>,
+    /// Off only for tests, which compare a culled frame against an unculled one
+    /// to prove culling changes nothing visible.
+    culling_enabled: bool,
     width: u32,
     height: u32,
 }
@@ -147,8 +157,42 @@ impl Renderer {
             tiles,
             depth_view,
             chunks: HashMap::new(),
+            frustum: None,
+            culling_enabled: true,
             width,
             height,
+        }
+    }
+
+    /// Turn frustum culling off. Only useful for proving it is invisible.
+    pub fn set_culling_enabled(&mut self, enabled: bool) {
+        self.culling_enabled = enabled;
+    }
+
+    /// The world-space bounding box of a chunk column.
+    ///
+    /// Spans the full world height. A tighter bound from each chunk's actual
+    /// filled range would cull more, but needs the mesher to report it and is
+    /// not where the win is.
+    fn chunk_bounds(pos: ChunkPos) -> (Vec3, Vec3) {
+        let origin = pos.origin();
+        let min = Vec3::new(origin.x as f32, 0.0, origin.z as f32);
+        let max = min + Vec3::new(CHUNK_SIZE as f32, CHUNK_HEIGHT as f32, CHUNK_SIZE as f32);
+        (min, max)
+    }
+
+    /// Chunks that would be drawn this frame.
+    pub fn visible_chunk_count(&self) -> usize {
+        match (self.culling_enabled, self.frustum) {
+            (true, Some(frustum)) => self
+                .chunks
+                .keys()
+                .filter(|pos| {
+                    let (min, max) = Self::chunk_bounds(**pos);
+                    frustum.intersects_aabb(min, max)
+                })
+                .count(),
+            _ => self.chunks.len(),
         }
     }
 
@@ -166,9 +210,13 @@ impl Renderer {
         (self.width, self.height)
     }
 
-    /// Push the camera's current transform to the GPU.
-    pub fn update_camera(&self, queue: &wgpu::Queue, camera: &Camera) {
+    /// Push the camera's current transform to the GPU and refresh the frustum.
+    ///
+    /// Deriving the frustum from the very matrix that was just uploaded is what
+    /// keeps culling and rasterisation from ever disagreeing.
+    pub fn update_camera(&mut self, queue: &wgpu::Queue, camera: &Camera) {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera.uniform()));
+        self.frustum = Some(Frustum::from_view_projection(camera.view_projection()));
     }
 
     /// Upload (or replace) one chunk's geometry. An empty mesh drops it.
@@ -197,7 +245,14 @@ impl Renderer {
     }
 
     /// Record a full frame into `encoder`, drawing into `target`.
-    pub fn render(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+    ///
+    /// Returns how many chunks were actually drawn, so callers can report the
+    /// culling win rather than assume it.
+    pub fn render(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+    ) -> usize {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("terrain pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -226,8 +281,19 @@ impl Renderer {
         pass.set_bind_group(0, &self.camera_bind_group, &[]);
         pass.set_bind_group(1, &self.tiles.bind_group, &[]);
 
-        for mesh in self.chunks.values() {
+        let cull = self.culling_enabled.then_some(self.frustum).flatten();
+
+        let mut drawn = 0;
+        for (pos, mesh) in &self.chunks {
+            if let Some(frustum) = cull {
+                let (min, max) = Self::chunk_bounds(*pos);
+                if !frustum.intersects_aabb(min, max) {
+                    continue;
+                }
+            }
             mesh.draw(&mut pass);
+            drawn += 1;
         }
+        drawn
     }
 }

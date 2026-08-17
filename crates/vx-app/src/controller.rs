@@ -358,7 +358,27 @@ mod tests {
                 player.position
             );
         }
-        assert!(player.on_ground, "lost contact with the ground while walking");
+
+        // Terrain has real slopes now, so the walk may well end mid-stride down
+        // a hillside — being airborne at an arbitrary tick is correct, not a
+        // bug. Let go of the controls and let the body settle before checking
+        // it found ground again.
+        input.release(KeyCode::KeyD);
+        for _ in 0..240 {
+            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
+        }
+
+        assert!(player.on_ground, "never landed after walking");
+        assert!(
+            !vx_world::collides(&world, &player.aabb()),
+            "settled inside geometry at {:?}",
+            player.position
+        );
+        assert!(
+            player.position.y > 1.0,
+            "sank through the world to y={}",
+            player.position.y
+        );
     }
 
     #[test]

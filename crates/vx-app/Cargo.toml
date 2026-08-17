@@ -17,6 +17,7 @@ vx-mesh.workspace = true
 vx-render.workspace = true
 vx-platform.workspace = true
 glam.workspace = true
+rayon.workspace = true
 winit.workspace = true
 wgpu.workspace = true
 pollster.workspace = true

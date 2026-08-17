@@ -17,15 +17,16 @@ art exists.
 
 ## Status
 
-Milestone 2 is complete: the world generates, meshes, streams and renders, you
-can walk on it, build in it, and it survives quitting.
+Milestone 2.5 is complete: the world has real relief, meshes across all cores,
+and only draws what the camera can actually see. You can walk on it, build in
+it, and it survives quitting.
 
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
 | `vx-world` | Chunk storage, worldgen, raycast, physics, editing, saves | Done |
 | `vx-mesh` | Greedy meshing | Done |
-| `vx-render` | wgpu renderer, camera, tile textures, offscreen capture | Done |
+| `vx-render` | wgpu renderer, camera, frustum culling, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
 | `vx-app` | Window, walk/fly controls, streaming, `gamingg` binary | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | M3 |
@@ -33,16 +34,15 @@ can walk on it, build in it, and it survives quitting.
 
 ### Known rough edges
 
-- Terrain reads as broad flat terraces. The noise stack clusters near its mean,
-  so relief is only ~22 blocks spread over a wide area. Needs shaping work.
+- Saves store a full chunk snapshot per modified chunk — about 24 KiB whether
+  one block changed or ten thousand. An edit journal would cost bytes instead.
+  Harmless until worlds get large.
 - Water is alpha-blended without depth sorting. Fine while water is the only
   translucent block; looks wrong the moment two transparent surfaces overlap.
-- Chunks are meshed on the main thread. Meshing is throttled per frame to hide
-  it, but it belongs on a worker pool — `rayon` is already a dependency.
-- **No frustum culling.** Every loaded chunk is drawn every frame, even the
-  two-thirds behind the camera. The cheapest large performance win available.
 - Saving happens on quit and on demand, not periodically. A crash loses the
   session.
+- Chunk culling uses each chunk's full 256-block height. A tighter bound around
+  the blocks actually present would cull more.
 - No inventory, no UI, no audio, and no gamepad support.
 
 ## Design notes
@@ -64,6 +64,15 @@ namespaced string name (`engine:stone`), never the numeric id.
 **All `BlockView` coordinates are absolute world coordinates**, never
 chunk-local. Mixing the two makes geometry silently vanish.
 
+**Terrain height comes from three fields through splines, not summed octaves.**
+Summing octaves drives the result toward its mean, so everything lands mid-range
+and the world reads as flat terraces — the old version had ~22 blocks of relief.
+Continentalness, erosion and peaks/valleys are sampled independently and each
+mapped through a piecewise-linear curve, which can spend a wide output range on
+a narrow input band. A cliff is a steep segment; a plain is a flat one, flat
+because it was authored that way. Domain warping bends the sample space so
+nothing lines up with the lattice. Relief is now ~100 blocks.
+
 **Worldgen is a pure function of `(seed, position)`.** It uses an integer hash
 rather than a seeded RNG, so there is no sequence state to desynchronise:
 chunks can generate in parallel in any order, and a saved world regenerates
@@ -81,6 +90,18 @@ makes sliding along a wall snag on every block seam.
 **Block edits are announced on the event bus before they happen**, through
 `emit_cancellable`. Nothing listens yet — the point is that M3 mods will be able
 to veto or alter an edit without any call site changing.
+
+**Meshing runs on a worker pool, reading the world immutably.** `World` is plain
+data with no interior mutability, so parallel reads need no locking — the shared
+borrow the mesher was already written against was all that was required. A test
+asserts the parallel result is byte-identical to the serial one.
+
+**Frustum culling is derived from the same view-projection matrix the GPU uses**,
+so it can never disagree with what actually gets clipped. A chunk's bounding box
+comes from its `ChunkPos`, which relies on the mesher never emitting geometry
+outside the chunk it was asked for. The test that matters renders a frame with
+culling on and off and asserts the pixels are identical: skipping something
+visible would show up immediately.
 
 ## Building and running
 
