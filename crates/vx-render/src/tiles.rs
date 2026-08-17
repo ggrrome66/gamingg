@@ -23,8 +23,9 @@ pub mod slot {
     pub const SAND: u32 = 4;
     pub const WATER: u32 = 5;
     pub const BEDROCK: u32 = 6;
+    pub const COPPER_ORE: u32 = 7;
     /// Total generated tiles.
-    pub const COUNT: u32 = 7;
+    pub const COUNT: u32 = 8;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -78,6 +79,18 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                     texel
                 }
                 slot::BEDROCK => shade([0.18, 0.18, 0.20], noise * 0.22),
+                slot::COPPER_ORE => {
+                    // Veins of metal through host rock. The metal has to carry
+                    // most of the tile: an outcrop is only useful if a player
+                    // can pick it out of a hillside at distance, and a few
+                    // flecks on grey read as plain stone from more than a
+                    // dozen blocks away.
+                    if jitter(tile ^ 0x51, x / 2, y / 2) > -0.12 {
+                        shade([0.78, 0.40, 0.16], noise * 0.16)
+                    } else {
+                        shade([0.44, 0.44, 0.47], noise * 0.10)
+                    }
+                }
                 // Unknown slots get magenta, the universal "missing texture".
                 _ => [255, 0, 255, 255],
             };

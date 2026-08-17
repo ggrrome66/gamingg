@@ -39,6 +39,8 @@ struct Options {
     height: u32,
     /// Save directory name, under the platform data directory.
     world: String,
+    /// World position to place the camera for a screenshot.
+    at: (i32, i32),
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -48,6 +50,7 @@ fn parse_args() -> Result<Options, String> {
         width: 1280,
         height: 720,
         world: "world".to_string(),
+        at: (0, 0),
     };
 
     let mut args = std::env::args().skip(1);
@@ -64,6 +67,16 @@ fn parse_args() -> Result<Options, String> {
             }
             "--screenshot" => options.screenshot = Some(value()?),
             "--world" => options.world = value()?,
+            "--at" => {
+                let text = value()?;
+                let (x, z) = text
+                    .split_once(',')
+                    .ok_or_else(|| "--at wants X,Z".to_string())?;
+                options.at = (
+                    x.trim().parse().map_err(|_| "--at X must be a number".to_string())?,
+                    z.trim().parse().map_err(|_| "--at Z must be a number".to_string())?,
+                );
+            }
             "--width" => {
                 options.width = value()?
                     .parse()
@@ -81,6 +94,7 @@ fn parse_args() -> Result<Options, String> {
                      --seed <n>          world seed (default {DEFAULT_SEED})\n  \
                      --world <name>      save directory name (default \"world\")\n  \
                      --screenshot <path> render one frame to a PPM file and exit\n  \
+                     --at <x,z>          world position to view from (screenshot)\n  \
                      --width <n>         window or image width\n  \
                      --height <n>        window or image height"
                 );
@@ -120,6 +134,7 @@ fn build_scene(
     renderer: &mut Renderer,
     seed: u64,
     radius: i32,
+    at: (i32, i32),
 ) -> (World, Camera) {
     let mut world = World::new(seed);
     let mut streamer = ChunkStreamer::new(StreamingConfig {
@@ -129,13 +144,13 @@ fn build_scene(
         mesh_budget: usize::MAX,
     });
 
-    let centre = vx_core::ChunkPos::new(0, 0);
+    let centre = vx_core::BlockPos::new(at.0, 0, at.1).chunk();
     world.load_around(centre, radius);
     streamer.update(&mut world, renderer, &context.device, centre, None);
 
-    let surface = world.surface_y(0, 0).unwrap_or(80);
+    let surface = world.surface_y(at.0, at.1).unwrap_or(80);
     let camera = Camera {
-        position: glam::Vec3::new(0.0, surface as f32 + 10.0, 20.0),
+        position: glam::Vec3::new(at.0 as f32, surface as f32 + 10.0, at.1 as f32 + 20.0),
         pitch: -0.35,
         ..Camera::default()
     };
@@ -149,7 +164,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     let (width, height) = (options.width, options.height);
     let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, width, height);
 
-    let (_world, mut camera) = build_scene(&context, &mut renderer, options.seed, 6);
+    let (_world, mut camera) = build_scene(&context, &mut renderer, options.seed, 6, options.at);
     camera.aspect = width as f32 / height as f32;
     renderer.update_camera(&context.queue, &camera);
 

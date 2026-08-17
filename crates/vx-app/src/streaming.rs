@@ -79,11 +79,6 @@ impl ChunkStreamer {
         }
     }
 
-    /// Chunks currently uploaded to the renderer.
-    pub fn meshed_count(&self) -> usize {
-        self.meshed.len()
-    }
-
     /// Do one frame's worth of generating, meshing and unloading.
     ///
     /// Returns how many chunk meshes were uploaded.

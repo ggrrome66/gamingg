@@ -17,19 +17,21 @@ art exists.
 
 ## Status
 
-Milestone 2.5 is complete: the world has real relief, meshes across all cores,
-and only draws what the camera can actually see. You can walk on it, build in
+M2.5 is complete and M3 is under way. The world has real relief, meshes across
+all cores, draws only what the camera can see, and now hides copper ore in the
+rock with occasional outcrops breaking the surface. You can walk on it, build in
 it, and it survives quitting.
 
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
-| `vx-world` | Chunk storage, worldgen, raycast, physics, editing, saves | Done |
+| `vx-world` | Chunk storage, worldgen, ore, raycast, physics, editing, saves | Done |
 | `vx-mesh` | Greedy meshing | Done |
 | `vx-render` | wgpu renderer, camera, frustum culling, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
 | `vx-app` | Window, walk/fly controls, streaming, `gamingg` binary | Done |
-| `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | M3 |
+| `vx-agent` | Drone job board, flow fields, swarm logic | M3 (next) |
+| `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
 
 ### Known rough edges
@@ -43,6 +45,8 @@ it, and it survives quitting.
   session.
 - Chunk culling uses each chunk's full 256-block height. A tighter bound around
   the blocks actually present would cull more.
+- Ore uses one tile for every block, so a large exposed body shows a visibly
+  repeating pattern. Real art or per-block texture variation fixes it.
 - No inventory, no UI, no audio, and no gamepad support.
 
 ## Design notes
@@ -72,6 +76,20 @@ mapped through a piecewise-linear curve, which can spend a wide output range on
 a narrow input band. A cliff is a steep segment; a plain is a flat one, flat
 because it was authored that way. Domain warping bends the sample space so
 nothing lines up with the lattice. Relief is now ~100 blocks.
+
+**Outcrops are a consequence, not a feature.** Ore deposits are irregular blobs
+buried at depth. Most never reach the top of the rock. A few sit high enough that
+the blob pushes up through the soil, and that is an outcrop — nothing generates
+them directly. Deposit centres come from a jittered lattice, so they are a pure
+function of the seed and the ones near a chunk can be gathered without a global
+list. Ore only ever replaces stone or overburden, which is what stops it hanging
+in mid-air.
+
+**Every visible outcrop has ore continuing beneath it.** A surface block only
+shows ore when the body also fills the blocks below it. Without that rule a body
+could graze the surface and leave a single speck leading nowhere, players would
+learn that outcrops mean nothing, and the prospecting loop would die with them.
+A test pins it.
 
 **Worldgen is a pure function of `(seed, position)`.** It uses an integer hash
 rather than a seeded RNG, so there is no sequence state to desynchronise:
@@ -143,6 +161,9 @@ in CI:
 
 ```sh
 cargo run --release -p vx-app -- --screenshot frame.ppm --width 640 --height 360
+
+# look at a specific place, which is how ore outcrops get eyeballed
+cargo run --release -p vx-app -- --screenshot ore.ppm --at 146,30
 ```
 
 The render tests do the same thing and assert on the pixels. Both run against a

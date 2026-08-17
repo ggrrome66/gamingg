@@ -4,10 +4,13 @@
 //! shared state, so chunks can be generated on a worker pool in any order and
 //! a saved world regenerates identically.
 
-use vx_core::{BlockDef, BlockId, BlockRegistry, ChunkPos, LocalPos, CHUNK_HEIGHT, CHUNK_SIZE};
+use vx_core::{
+    BlockDef, BlockId, BlockPos, BlockRegistry, ChunkPos, LocalPos, CHUNK_HEIGHT, CHUNK_SIZE,
+};
 
 use crate::chunk::Chunk;
 use crate::noise::{warp_2d, Fbm, Ridged, Spline};
+use crate::ore::{breaks_surface, deposits_overlapping, ore_at, Deposit};
 
 /// Sea level. Terrain below this floods.
 pub const SEA_LEVEL: i32 = 62;
@@ -29,6 +32,7 @@ pub struct TerrainBlocks {
     pub sand: BlockId,
     pub water: BlockId,
     pub bedrock: BlockId,
+    pub copper_ore: BlockId,
 }
 
 impl TerrainBlocks {
@@ -55,6 +59,10 @@ impl TerrainBlocks {
                     .with_hardness(None),
             ),
             bedrock: register(BlockDef::uniform("engine:bedrock", 6).with_hardness(None)),
+            // Harder than the stone it sits in, so mining ore is a commitment.
+            copper_ore: register(
+                BlockDef::uniform("engine:copper_ore", 7).with_hardness(Some(2.5)),
+            ),
         }
     }
 
@@ -68,6 +76,7 @@ impl TerrainBlocks {
             sand: registry.id_of("engine:sand")?,
             water: registry.id_of("engine:water")?,
             bedrock: registry.id_of("engine:bedrock")?,
+            copper_ore: registry.id_of("engine:copper_ore")?,
         })
     }
 }
@@ -242,12 +251,26 @@ impl TerrainGenerator {
         let mut chunk = Chunk::empty(pos);
         let origin = pos.origin();
 
+        // Gather the ore bodies reaching this chunk once. Hashing the deposit
+        // lattice per block would cost far more than the terrain itself.
+        let deposits = deposits_overlapping(
+            self.seed,
+            origin,
+            BlockPos::new(origin.x + CHUNK_SIZE, CHUNK_HEIGHT, origin.z + CHUNK_SIZE),
+        );
+
         for local_z in 0..CHUNK_SIZE {
             for local_x in 0..CHUNK_SIZE {
                 let world_x = origin.x + local_x;
                 let world_z = origin.z + local_z;
                 let surface = self.height_at(world_x, world_z);
-                self.fill_column(&mut chunk, local_x, local_z, surface);
+                self.fill_column(
+                    &mut chunk,
+                    [local_x, local_z],
+                    [world_x, world_z],
+                    surface,
+                    &deposits,
+                );
             }
         }
 
@@ -261,8 +284,20 @@ impl TerrainGenerator {
     }
 
     /// Lay down the vertical stack for one column.
-    fn fill_column(&self, chunk: &mut Chunk, x: i32, z: i32, surface: i32) {
+    ///
+    /// `local` is the position within the chunk, `world` the same column in
+    /// world coordinates — ore lookup needs the latter.
+    fn fill_column(
+        &self,
+        chunk: &mut Chunk,
+        local: [i32; 2],
+        world: [i32; 2],
+        surface: i32,
+        deposits: &[Deposit],
+    ) {
         let blocks = self.blocks;
+        let [x, z] = local;
+        let [world_x, world_z] = world;
 
         // Beaches: columns near sea level get sand instead of grass.
         let coastal = surface <= SEA_LEVEL + 1;
@@ -273,12 +308,32 @@ impl TerrainGenerator {
 
         let soil_depth = 4;
         let stone_top = (surface - soil_depth).max(1);
-        chunk.fill_column(x, z, 1, stone_top, blocks.stone);
-        chunk.fill_column(x, z, stone_top, surface, subsoil);
 
-        if let Some(local) = LocalPos::new(x, surface, z) {
-            chunk.set(local, top);
+        let place = |chunk: &mut Chunk, y: i32, block: BlockId| {
+            if let Some(cell) = LocalPos::new(x, y, z) {
+                chunk.set(cell, block);
+            }
+        };
+
+        // Rock, with ore wherever a body reaches. Restricting ore to what would
+        // otherwise be stone or soil is what guarantees it never hangs in air.
+        for y in 1..stone_top {
+            let has_ore = ore_at(deposits, BlockPos::new(world_x, y, world_z)).is_some();
+            place(chunk, y, if has_ore { blocks.copper_ore } else { blocks.stone });
         }
+
+        // Overburden. A body reaching up through here is on its way to becoming
+        // a visible outcrop.
+        for y in stone_top.max(1)..surface {
+            let has_ore = ore_at(deposits, BlockPos::new(world_x, y, world_z)).is_some();
+            place(chunk, y, if has_ore { blocks.copper_ore } else { subsoil });
+        }
+
+        // The surface block itself only shows ore when the body also fills the
+        // blocks beneath it, so every outcrop a player can see leads somewhere.
+        let surface_pos = BlockPos::new(world_x, surface, world_z);
+        let outcrop = breaks_surface(deposits, surface_pos);
+        place(chunk, surface, if outcrop { blocks.copper_ore } else { top });
 
         // Flood anything below sea level.
         if surface < SEA_LEVEL {
@@ -549,6 +604,204 @@ mod tests {
     }
 
     #[test]
+    fn ore_never_hangs_in_the_air_or_sits_above_the_surface() {
+        // Ore only ever replaces rock or overburden, so it can never be found
+        // floating or perched on top of the ground.
+        let (_, generator) = generator(2024);
+
+        for cx in -3..3 {
+            for cz in -3..3 {
+                let pos = ChunkPos::new(cx, cz);
+                let chunk = generator.generate(pos);
+                let origin = pos.origin();
+
+                for (local, block) in chunk.iter_blocks() {
+                    if block != generator.blocks().copper_ore {
+                        continue;
+                    }
+                    let surface = generator.height_at(
+                        origin.x + local.x(),
+                        origin.z + local.z(),
+                    );
+                    assert!(
+                        local.y() <= surface,
+                        "ore at y={} sits above the surface at {surface}",
+                        local.y()
+                    );
+                    assert!(local.y() >= 1, "ore replaced the bedrock floor");
+                }
+            }
+        }
+    }
+
+    /// Scan a block of chunks and report (outcrop columns, total columns, ore blocks, total blocks).
+    fn survey_ore(generator: &TerrainGenerator, radius: i32) -> (usize, usize, usize, usize) {
+        let ore = generator.blocks().copper_ore;
+        let (mut outcrops, mut columns, mut ore_blocks, mut blocks) = (0, 0, 0, 0);
+
+        for cx in -radius..radius {
+            for cz in -radius..radius {
+                let pos = ChunkPos::new(cx, cz);
+                let chunk = generator.generate(pos);
+                let origin = pos.origin();
+
+                for x in 0..CHUNK_SIZE {
+                    for z in 0..CHUNK_SIZE {
+                        columns += 1;
+                        let surface = generator.height_at(origin.x + x, origin.z + z);
+                        if let Some(cell) = LocalPos::new(x, surface, z) {
+                            if chunk.get(cell) == ore {
+                                outcrops += 1;
+                            }
+                        }
+                    }
+                }
+                for (_, block) in chunk.iter_blocks() {
+                    blocks += 1;
+                    if block == ore {
+                        ore_blocks += 1;
+                    }
+                }
+            }
+        }
+        (outcrops, columns, ore_blocks, blocks)
+    }
+
+    /// Columns whose surface would show ore, found without generating chunks.
+    ///
+    /// Outcrops **cluster** around the few deposits that happen to breach, so a
+    /// small sample is worse than useless — a 128-block patch usually contains
+    /// none at all even though the world-wide rate is healthy. This sweeps wide
+    /// and sparsely instead.
+    fn outcrop_columns(generator: &TerrainGenerator, reach: i32, step: usize) -> (usize, usize) {
+        use crate::ore::{breaks_surface, deposits_overlapping};
+
+        let (mut outcrops, mut columns) = (0, 0);
+        for x in (-reach..reach).step_by(step) {
+            for z in (-reach..reach).step_by(step) {
+                let surface = generator.height_at(x, z);
+                let nearby = deposits_overlapping(
+                    generator.seed(),
+                    BlockPos::new(x, surface - crate::ore::OUTCROP_MIN_DEPTH, z),
+                    BlockPos::new(x, surface, z),
+                );
+                columns += 1;
+                if breaks_surface(&nearby, BlockPos::new(x, surface, z)) {
+                    outcrops += 1;
+                }
+            }
+        }
+        (outcrops, columns)
+    }
+
+    #[test]
+    fn outcrops_are_rare_but_do_occur() {
+        // Too common and they stop being a find; absent and the prospecting
+        // loop has no entry point at all.
+        let (_, generator) = generator(2024);
+        let (outcrops, columns) = outcrop_columns(&generator, 1500, 7);
+
+        let rate = outcrops as f32 / columns as f32;
+        assert!(outcrops > 0, "no outcrop anywhere in a 3000-block sweep");
+        assert!(
+            rate < 0.02,
+            "{:.3}% of the surface is ore; outcrops should be a find, not scenery",
+            rate * 100.0
+        );
+        assert!(
+            rate > 0.0002,
+            "{:.4}% outcrop rate is so low a player would never stumble on one",
+            rate * 100.0
+        );
+    }
+
+    #[test]
+    fn every_visible_outcrop_has_ore_continuing_beneath_it() {
+        // The invariant the mechanic rests on. An outcrop that led nowhere
+        // would teach players to ignore outcrops, and the scanner with them.
+        //
+        // Finds real outcrops cheaply first, then generates only those chunks
+        // and checks the blocks actually placed.
+        let (_, generator) = generator(2024);
+        let ore = generator.blocks().copper_ore;
+
+        let mut checked = 0;
+        'sweep: for x in (-1500..1500).step_by(11) {
+            for z in (-1500..1500).step_by(11) {
+                let surface = generator.height_at(x, z);
+                let nearby = crate::ore::deposits_overlapping(
+                    generator.seed(),
+                    BlockPos::new(x, surface - crate::ore::OUTCROP_MIN_DEPTH, z),
+                    BlockPos::new(x, surface, z),
+                );
+                if !crate::ore::breaks_surface(&nearby, BlockPos::new(x, surface, z)) {
+                    continue;
+                }
+
+                let pos = BlockPos::new(x, surface, z).chunk();
+                let chunk = generator.generate(pos);
+                let local = BlockPos::new(x, surface, z)
+                    .local()
+                    .expect("a surface block is inside the world");
+                assert_eq!(chunk.get(local), ore, "expected an outcrop at ({x}, {surface}, {z})");
+
+                for depth in 1..crate::ore::OUTCROP_MIN_DEPTH {
+                    let below = LocalPos::new(local.x(), surface - depth, local.z())
+                        .expect("an outcrop always has blocks beneath it");
+                    assert_eq!(
+                        chunk.get(below),
+                        ore,
+                        "outcrop at ({x}, {surface}, {z}) runs only {depth} deep"
+                    );
+                }
+
+                checked += 1;
+                if checked >= 12 {
+                    break 'sweep;
+                }
+            }
+        }
+        assert!(checked > 0, "found no outcrops to check");
+    }
+
+    #[test]
+    fn ore_is_scarce_enough_to_be_worth_hunting() {
+        let (_, generator) = generator(31337);
+        let (_, _, ore_blocks, blocks) = survey_ore(&generator, 3);
+
+        let share = ore_blocks as f64 / blocks as f64;
+        assert!(ore_blocks > 0, "no ore generated at all");
+        assert!(
+            share < 0.02,
+            "ore is {:.3}% of the world; far too common",
+            share * 100.0
+        );
+    }
+
+    #[test]
+    fn most_ore_is_buried_where_only_a_scanner_would_find_it() {
+        // If every body broke the surface there would be nothing for the flying
+        // drone to do in stage 4.
+        let (_, generator) = generator(2024);
+        let (surfacing, columns) = outcrop_columns(&generator, 1500, 7);
+        let (_, _, ore_blocks, _) = survey_ore(&generator, 3);
+
+        assert!(ore_blocks > 0, "no ore generated at all");
+        assert!(
+            surfacing * 20 < columns,
+            "{surfacing} of {columns} columns surface ore; almost nothing is hidden"
+        );
+    }
+
+    #[test]
+    fn ore_placement_is_deterministic_across_regenerations() {
+        let (_, a) = generator(555);
+        let (_, b) = generator(555);
+        let pos = ChunkPos::new(2, -3);
+        assert_eq!(a.generate(pos), b.generate(pos));
+    }
+
+    #[test]
     fn generated_chunks_come_back_clean_and_compacted() {
         let (_, generator) = generator(4);
         let chunk = generator.generate(ChunkPos::new(0, 0));
@@ -562,6 +815,8 @@ mod tests {
         );
     }
 }
+
+
 
 
 
