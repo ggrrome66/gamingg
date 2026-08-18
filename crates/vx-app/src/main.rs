@@ -9,6 +9,9 @@
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
 mod awareness;
+mod beacon;
+mod board;
+mod clock;
 mod controller;
 mod device;
 mod hud;
@@ -30,15 +33,17 @@ use map::MapState;
 use rig::Rig;
 use skills::Skills;
 use view::ViewMode;
+use clock::TimeOfDay;
 use villagers::Villagers;
 use wallet::Wallet;
 
-/// Overlay slot assignments: the minimap, the HUD and the shop panel.
+/// Overlay slot assignments: the minimap, the HUD, and the modal panels.
 const MAP_SLOT: usize = 0;
 const HUD_SLOT: usize = 1;
 const SHOP_SLOT: usize = 2;
 const DEVICE_SLOT: usize = 3;
 const FEED_SLOT: usize = 4;
+const BOARD_SLOT: usize = 5;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -56,6 +61,16 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 const DEFAULT_SEED: u64 = 2024;
+
+/// How far a town's mast can hear other towns, in blocks. Sets how far away a
+/// posting can send you, and costs nothing to widen — the towns inside it are
+/// derived, not loaded.
+const RADIO_RANGE: i32 = 2_000;
+
+/// Re-run town discovery once the player has moved this far since the last
+/// check. The lattice is cheap, but not free, and nobody discovers a town by
+/// standing still.
+const DISCOVERY_STEP: i32 = 8;
 
 /// Command line options.
 struct Options {
@@ -75,10 +90,14 @@ struct Options {
     close: bool,
     /// Draw the supply shop panel open over the capture, stocked for show.
     shop: bool,
+    /// Draw the beacon console open over the capture, with work posted.
+    board: bool,
     /// Frame the capture over the player's shoulder, body in shot.
     third_person: bool,
     /// Draw the handheld's fleet roster over the capture.
     device: bool,
+    /// Hour of the in-game day to light the capture by, 0..1.
+    time: f32,
 }
 
 /// Which method a `--dig` run should use.
@@ -101,8 +120,10 @@ fn parse_args() -> Result<Options, String> {
         ticks: 20_000,
         close: false,
         shop: false,
+        board: false,
         third_person: false,
         device: false,
+        time: TimeOfDay::START.fraction(),
     };
 
     let mut args = std::env::args().skip(1);
@@ -146,8 +167,18 @@ fn parse_args() -> Result<Options, String> {
             }
             "--close" => options.close = true,
             "--shop" => options.shop = true,
+            "--board" => options.board = true,
             "--third-person" => options.third_person = true,
             "--device" => options.device = true,
+            "--night" => options.time = TimeOfDay::MIDNIGHT.fraction(),
+            "--dawn" => options.time = TimeOfDay::DAWN.fraction(),
+            "--noon" => options.time = TimeOfDay::NOON.fraction(),
+            "--dusk" => options.time = TimeOfDay::DUSK.fraction(),
+            "--time" => {
+                options.time = value()?
+                    .parse()
+                    .map_err(|_| "--time wants a fraction of a day, 0..1".to_string())?
+            }
             "--ticks" => {
                 options.ticks = value()?
                     .parse()
@@ -175,8 +206,13 @@ fn parse_args() -> Result<Options, String> {
                                          (auto, adit, decline or pit)\n  \
                      --close             frame the first drone up close (with --dig)\n  \
                      --shop              draw the supply shop panel over the capture\n  \
+                     --board             draw the beacon console over the capture\n  \
                      --third-person      frame over the player's shoulder, body in shot\n  \
                      --device            draw the handheld fleet roster over the capture\n  \
+                     --time <0..1>       hour of the day to light the capture by\n  \
+                     --night             shorthand for --time 0\n  \
+                     --dawn --noon --dusk\n  \
+                                         the other named hours\n  \
                      --ticks <n>         drone ticks to run when digging\n  \
                      --width <n>         window or image width\n  \
                      --height <n>        window or image height"
@@ -423,6 +459,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         hud_skills.add_xp(skills::MINING, 40);
         let hud_pixels = hud::render_hud(&hud::HudContent {
             skills: &hud_skills,
+            time: TimeOfDay::new(options.time),
             status: Some(format!("MINING {} JOBS LEFT", operation.board.len())),
             drilling: Some(0.64),
             level_up: None,
@@ -500,7 +537,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // strolls: `Surroundings::empty()` is "clear air, and alone".
         let alone = awareness::Surroundings::empty();
         for _ in 0..900 {
-            town.update(1.0 / 60.0, &alone);
+            town.update(1.0 / 60.0, TimeOfDay::new(options.time), &alone);
         }
         let rigs = Villagers::rigs();
         renderer.set_objects(&context.device, &context.queue, &town.objects(&rigs));
@@ -519,7 +556,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         let mut town = Villagers::new();
         let alone = awareness::Surroundings::empty();
         for _ in 0..900 {
-            town.update(1.0 / 60.0, &alone);
+            town.update(1.0 / 60.0, TimeOfDay::new(options.time), &alone);
         }
         objects.extend(town.objects(&Villagers::rigs()));
         camera.position = placed;
@@ -606,6 +643,47 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             },
         );
     }
+
+    if options.board {
+        // A console at the hometown mast, one contract already taken so both
+        // states show: work on offer, and work in hand pointing somewhere the
+        // player has never been.
+        let here = vx_world::town::home_site();
+        let neighbours = world.generator().towns_near(here.centre, RADIO_RANGE);
+        let postings = beacon::postings_for(&here, &neighbours);
+        let mut ledger = beacon::Ledger::new();
+        ledger.visit(here.centre);
+        if let Some(first) = postings.first() {
+            ledger.accept(first);
+        }
+        let mut walletbook = Wallet::new();
+        walletbook.earn(1_240);
+        let mut panel = board::Board::new();
+        panel.open_at_beacon();
+        let pixels = board::render_board(&panel, &here, &postings, &ledger, &walletbook);
+        let panel_width = board::BOARD_WIDTH as f32 * board::BOARD_SCALE;
+        let panel_height = board::BOARD_HEIGHT as f32 * board::BOARD_SCALE;
+        renderer.set_overlay(
+            BOARD_SLOT,
+            &context.device,
+            &context.queue,
+            (board::BOARD_WIDTH, board::BOARD_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
+    // The capture is lit by an explicit hour, never by a wall clock — which
+    // is what keeps two runs of the same command byte-identical.
+    renderer.set_sun(
+        &context.queue,
+        clock::sun_uniform(clock::sky_at(TimeOfDay::new(options.time))),
+    );
 
     let capture = capture_frame(&context, &renderer, width, height);
     capture
@@ -694,6 +772,8 @@ struct Active {
     digging: Option<(vx_core::BlockPos, f32)>,
     /// A recent level-up, shown on the HUD for a moment.
     level_up: Option<(String, u32, Instant)>,
+    /// The hour of the in-game day.
+    clock: TimeOfDay,
     /// Whose eyes the player is looking through.
     view: ViewMode,
     /// The handheld, and whatever feed it has open.
@@ -719,6 +799,15 @@ struct Active {
     wallet: Wallet,
     /// The supply shop's panel state.
     shop: shop::Shop,
+    /// The beacon console's panel state.
+    board: board::Board,
+    /// Contracts taken, settled, and towns actually stood in.
+    ledger: beacon::Ledger,
+    /// The town whose beacon is open, and the work it is broadcasting.
+    /// Derived when the console opens, not stored in the world.
+    console: Option<(vx_world::town::TownSite, Vec<beacon::Posting>)>,
+    /// The column discovery last ran at.
+    last_scan: (i32, i32),
 }
 
 struct App {
@@ -793,11 +882,15 @@ impl App {
 
         // Trading suspends walking and drilling: the shop owns the input
         // while it is open, and drifting away mid-deal would be silly.
+        // The day rolls on. The dt above is already clamped, so a stalled
+        // frame cannot lurch the clock forward by an hour.
+        active.clock = active.clock.advance(dt);
+
         // The body stands still whenever the player's attention is elsewhere:
         // haggling at a counter, or staring at a handheld. For the feed that
         // is also the fiction — you are standing there looking at a screen.
         let feed = active.device.feed();
-        let busy = active.shop.open || active.device.open || feed.is_some();
+        let busy = active.shop.open || active.board.open || active.device.open || feed.is_some();
         if busy || active.resuming {
             active.player.velocity = glam::Vec3::ZERO;
         }
@@ -903,7 +996,7 @@ impl App {
             player: Some(active.player.position),
             machines: &machines,
         };
-        active.villagers.update(dt, &around);
+        active.villagers.update(dt, active.clock, &around);
         if let Some(line) = active.villagers.greeting_for() {
             active.greeting = Some((line.to_string(), Instant::now()));
         }
@@ -976,12 +1069,56 @@ impl App {
                 active.map.explore(chunk);
             }
         }
+
+        // Walking near a town finds it, and finding it is permanent: the
+        // ledger is the only thing that says a town exists as far as the map
+        // is concerned. Like exploration, it is earned in person — a drone
+        // wandering into a settlement does not put it on your map.
+        if feed.is_none() {
+            let column = (
+                active.player.position.x.floor() as i32,
+                active.player.position.z.floor() as i32,
+            );
+            let moved = (column.0 - active.last_scan.0).saturating_abs()
+                + (column.1 - active.last_scan.1).saturating_abs();
+            if moved >= DISCOVERY_STEP {
+                active.last_scan = column;
+                let near = active
+                    .world
+                    .generator()
+                    .towns_near(column, beacon::DISCOVERY_RANGE);
+                for site in &near {
+                    if active.ledger.visit(site.centre) {
+                        log::info!(
+                            "found {} ({}) at {} {}",
+                            site.name,
+                            site.speciality.name(),
+                            site.centre.0,
+                            site.centre.1
+                        );
+                    }
+                }
+                // Only the town you are standing in has people in it. Distant
+                // towns are architecture until you arrive, which is what keeps
+                // the frame budget flat however many of them exist.
+                if let Some(site) = near.first() {
+                    if site.centre != active.villagers.site().centre {
+                        active.villagers = Villagers::for_site(site);
+                    }
+                }
+            }
+        }
+
         self.refresh_minimap();
         let Some(active) = &mut self.active else { return };
 
         active
             .renderer
             .update_camera(&active.context.queue, &active.camera);
+        active.renderer.set_sun(
+            &active.context.queue,
+            clock::sun_uniform(clock::sky_at(active.clock)),
+        );
         // After the camera, because objects are culled against the frustum it
         // just refreshed.
         let mut objects = active.mining.objects();
@@ -1025,6 +1162,7 @@ impl App {
             .set_objects(&active.context.device, &active.context.queue, &objects);
         self.refresh_hud();
         self.refresh_shop();
+        self.refresh_board();
         self.refresh_device();
         self.refresh_feed();
         let Some(active) = &mut self.active else { return };
@@ -1260,6 +1398,52 @@ impl App {
             return;
         }
 
+        // The beacon console, while open, owns the keyboard for the same
+        // reason the shop does.
+        if self.active.as_ref().is_some_and(|active| active.board.open) {
+            let Some(active) = &mut self.active else { return };
+            // Taken out and put back so the console's own data can be lent to
+            // `confirm` alongside a mutable borrow of the ledger beside it.
+            let Some((here, postings)) = active.console.take() else {
+                active.board.close();
+                return;
+            };
+            match code {
+                KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                    let rows = board::Board::rows(here.centre, &postings, &active.ledger).len();
+                    let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
+                    active.board.move_cursor(delta, rows);
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => {
+                    // Snapshot the sweep record first: the closure and the
+                    // base pile both live inside the fleet.
+                    let swept: std::collections::HashSet<vx_agent::Sector> =
+                        active.mining.fleet.surveyed_sectors().collect();
+                    let pile = active
+                        .mining
+                        .fleet
+                        .base
+                        .as_mut()
+                        .map(|base| &mut base.stockpile);
+                    active.board.confirm(
+                        &here,
+                        &postings,
+                        &mut active.ledger,
+                        pile,
+                        &mut active.wallet,
+                        &|at| swept.contains(&vx_agent::Sector::containing(at.0, at.1)),
+                    );
+                }
+                KeyCode::KeyE | KeyCode::Escape => {
+                    active.board.close();
+                    active.renderer.clear_overlay(BOARD_SLOT);
+                }
+                _ => {}
+            }
+            active.console = Some((here, postings));
+            return;
+        }
+
         // The shop, while open, owns the keyboard: Enter must trade, never
         // fall through to `start_mining`.
         if self.active.as_ref().is_some_and(|active| active.shop.open) {
@@ -1296,7 +1480,7 @@ impl App {
 
         match code {
             KeyCode::Escape => self.set_capture(false),
-            KeyCode::KeyE => self.open_shop_at_counter(),
+            KeyCode::KeyE => self.interact(),
             KeyCode::KeyF => {
                 if let Some(active) = &mut self.active {
                     active.mode = active.mode.toggled();
@@ -1423,8 +1607,14 @@ impl App {
         }
     }
 
-    /// Open the shop if the player is looking at the counter within reach.
-    fn open_shop_at_counter(&mut self) {
+    /// Press E at a piece of town furniture: the counter opens the shop, the
+    /// console at the foot of the mast opens the beacon board.
+    ///
+    /// The town behind a console is *derived* from where the console is, not
+    /// stored with it — the same lattice the world was generated from answers
+    /// "which town is this", which is why a beacon works in a town that was
+    /// built on the spot two seconds ago.
+    fn interact(&mut self) {
         let Some(active) = &mut self.active else { return };
         let Some(hit) = raycast_solid(
             &active.world,
@@ -1435,8 +1625,27 @@ impl App {
         ) else {
             return;
         };
-        if active.world.registry().get_or_air(hit.id).name == "engine:counter" {
-            active.shop.open_at_counter();
+        match active.world.registry().get_or_air(hit.id).name.as_str() {
+            "engine:counter" => active.shop.open_at_counter(),
+            "engine:beacon" => {
+                let column = (hit.block.x, hit.block.z);
+                let Some(site) = active
+                    .world
+                    .generator()
+                    .towns_near(column, vx_world::town::REACH)
+                    .into_iter()
+                    .next()
+                else {
+                    log::warn!("a beacon at {column:?} with no town behind it");
+                    return;
+                };
+                let neighbours = active.world.generator().towns_near(site.centre, RADIO_RANGE);
+                let postings = beacon::postings_for(&site, &neighbours);
+                active.ledger.visit(site.centre);
+                active.console = Some((site, postings));
+                active.board.open_at_beacon();
+            }
+            _ => {}
         }
     }
 
@@ -1630,6 +1839,40 @@ impl App {
         );
     }
 
+    /// Rebuild and upload the beacon board while it is open.
+    fn refresh_board(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.board.open {
+            return;
+        }
+        let Some((here, postings)) = &active.console else {
+            return;
+        };
+        let pixels = board::render_board(
+            &active.board,
+            here,
+            postings,
+            &active.ledger,
+            &active.wallet,
+        );
+        let (width, height) = active.renderer.size();
+        let panel_width = board::BOARD_WIDTH as f32 * board::BOARD_SCALE;
+        let panel_height = board::BOARD_HEIGHT as f32 * board::BOARD_SCALE;
+        active.renderer.set_overlay(
+            BOARD_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (board::BOARD_WIDTH, board::BOARD_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     /// Rebuild and upload the HUD panel. Cheap enough to run every frame,
     /// which the fast-moving drill bar wants anyway.
     fn refresh_hud(&mut self) {
@@ -1643,6 +1886,7 @@ impl App {
         });
         let content = hud::HudContent {
             skills: &active.skills,
+            time: active.clock,
             reconnecting: active.resuming,
             status: active.mining.status(),
             drilling: active.digging.map(|(_, progress)| progress),
@@ -1733,6 +1977,24 @@ impl App {
                 radius: 1,
             });
         }
+        for town in active.ledger.visited() {
+            markers.push(map::Marker {
+                x: town.0,
+                z: town.1,
+                colour: map::colour::TOWN,
+                radius: 2,
+            });
+        }
+        // Contract pins draw over the fog on purpose: a posting can name a
+        // town you have never seen, and going to find it is the job.
+        for pin in active.ledger.pins() {
+            markers.push(map::Marker {
+                x: pin.0,
+                z: pin.1,
+                colour: map::colour::CONTRACT,
+                radius: 3,
+            });
+        }
         // The player draws last, so nothing covers you.
         markers.push(map::Marker {
             x: centre.0,
@@ -1780,6 +2042,12 @@ impl App {
         }
         if let Err(error) = active.wallet.save(save.root()) {
             log::error!("could not save the wallet: {error}");
+        }
+        if let Err(error) = clock::save(active.clock, save.root()) {
+            log::error!("could not save the clock: {error}");
+        }
+        if let Err(error) = active.ledger.save(save.root()) {
+            log::error!("could not save the posting ledger: {error}");
         }
     }
 
@@ -1907,10 +2175,14 @@ impl ApplicationHandler for App {
         let mut map = MapState::new();
         let mut skills = Skills::new();
         let mut wallet = Wallet::new();
+        let mut clock = TimeOfDay::default();
+        let mut ledger = beacon::Ledger::new();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
             wallet.load(save.root());
+            clock = clock::load(save.root());
+            ledger.load(save.root());
         }
 
         self.active = Some(Active {
@@ -1936,6 +2208,7 @@ impl ApplicationHandler for App {
             skills,
             digging: None,
             level_up: None,
+            clock,
             view: ViewMode::default(),
             device: device::Device::new(),
             body_yaw: 0.0,
@@ -1949,6 +2222,11 @@ impl ApplicationHandler for App {
             greeting: None,
             wallet,
             shop: shop::Shop::new(),
+            board: board::Board::new(),
+            ledger,
+            console: None,
+            // Deliberately absurd, so the first frame always scans.
+            last_scan: (i32::MAX, i32::MAX),
         });
 
         self.last_frame = Instant::now();

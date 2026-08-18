@@ -17,7 +17,31 @@ art exists.
 
 ## Status
 
-M3 stage 7 is in. Press `C` and the camera swings over your shoulder — there
+M3 stage 8 is in. The sun moves. A day runs twenty real minutes and the light,
+the sky and the fog all turn with it — golden hour, dusk, real dark, dawn —
+with the hour on the HUD and saved beside the world, so you come back to the
+time you left. The townsfolk keep those hours: at sundown they walk home,
+stand down inside for the night, and are back out on the plaza in the morning.
+
+The village became a **frontier**. Towns are built from shipping containers
+and corrugated metal now, rusted and patched, with grated catwalks and a radio
+mast in the middle of each one. And there is more than one of them: towns sit
+on a 512-block lattice across the whole world, each with its own name, size and
+trade — depot, mine or refinery. Your hometown is still pinned at the origin,
+authored, and byte-identical in every seed you ever roll; everything past its
+skirt is derived from the seed.
+
+The mast does something. Press `E` at the console at its foot and the town
+posts work: haul so much stone to Redfork, sweep a sector out at such-and-such.
+Take a job and it pins the target on your map **even if you have never been
+there and the ground around it is still black** — and freight is signed for at
+the far end, so the walk is the job. Nothing about that is pre-generated:
+worldgen is a pure function of the seed, so "which towns are within two
+kilometres" is a few hundred hashes and loads no chunks. A beacon can name a
+town that does not exist as a single block until you walk over and it builds
+itself exactly where the posting said it would.
+
+Before that, stage 7: Press `C` and the camera swings over your shoulder — there
 is a body there now, hi-vis jacket and hard hat, and the camera slides in
 close rather than through the rock when you back into a wall. Press `V` and
 the handheld lists the fleet: pick a machine, look through its eyes while it
@@ -64,11 +88,11 @@ build in it, and it survives quitting — skills included.
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
-| `vx-world` | Chunk storage, worldgen, ore, village, flora, raycast, line of sight, physics, editing, saves | Done |
+| `vx-world` | Chunk storage, worldgen, ore, town lattice, flora, raycast, line of sight, physics, editing, saves | Done |
 | `vx-mesh` | Greedy meshing + crossed-quad plants | Done |
 | `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
-| `vx-app` | Window, walk/fly/third-person camera, streaming, HUD, rigs, skills, villagers, awareness, shop, wallet, handheld, `gamingg` binary | Done |
+| `vx-app` | Window, walk/fly/third-person camera, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, handheld, beacon board, `gamingg` binary | Done |
 | `vx-agent` | Job board, flow fields, mine planning, scanner, flier + fleet, manual piloting | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
@@ -99,8 +123,18 @@ build in it, and it survives quitting — skills included.
   machine cutting rock next to it beyond turning to look.
 - Villagers are not persisted — their deterministic stroll restarts each
   run. Cosmetic only, since nothing about them accumulates yet.
-- The village ignores its surroundings beyond height blending: a plateau can
-  abut open water, and no path leads out of town.
+- A town ignores its surroundings beyond height blending and the sea/slope
+  siting gates: a plateau can still abut open water, and no road leads from one
+  town to the next.
+- Only the town you are standing in has people in it. Distant towns are
+  architecture until you arrive — deliberate, to keep the frame budget flat
+  however many exist, but it means nothing happens in a town you are not in.
+- Towns do not trade with each other yet. The beacon network is the wire; the
+  traffic over it is the next stage.
+- Freight is checked against the base pile and settled at a console — no
+  vehicle actually carries it, and no contract can fail or expire.
+- There is no artificial light. Night is genuinely dark outside, and a lamp
+  block is the obvious next thing the sun uniform wants.
 - Leaves do not decay when a trunk is felled by the player's drill (drones
   fell whole trees; the handheld drill still breaks one block at a time).
   Felled wood has nowhere to go but the pile until stage 9's crafting.
@@ -278,15 +312,56 @@ villager re-casts per update on a round robin keyed to an update counter (not
 wall time, so the bit-identical determinism survives), and between turns they
 face the remembered spot. Three villagers today and thirty later cost the same.
 
-**The village is a drawing, not a dice roll.** Everything about the starting
-town is a pure function of *position only* — no seed enters anywhere, which
-is not a special case but the type signature. The plateau override lives
-inside `height_at` itself, so the minimap, spawn placement and physics agree
-about the town for free; buildings are ASCII layer blueprints stamped during
-generation and never saved (they regenerate); ore is masked from the town's
-footprint. The blending skirt smoothsteps plateau into wilderness over 24
-blocks — wide enough that even a mountain seed meets the town at a walkable
-grade.
+**The hometown is a drawing; the frontier is a dice roll.** `town::home_site()`
+returns before any hashing happens, so the starting town is seed-*independent*
+by construction rather than merely seed-stable — same plot, same name, same
+plan, every world. Every other town comes off a jittered 512-block lattice with
+one splitmix64 stream per property, the same idiom ore deposits and trees
+already use. Buildings are origin-relative ASCII layer blueprints, so one
+static set of plans stamps at any site; they are never saved, because they
+regenerate.
+
+**The height field must not feed itself.** `height_at` used to *be* the village
+override — its last line blended the plateau in. With one town that is fine.
+With a lattice of them, siting town N+1 would measure ground that town N had
+already flattened, and the world would depend on the order towns were
+considered in. So the field is split: `natural_height_at` is the seed's own
+terrain and the only height a siting test may consult, and `height_at` gathers
+the towns that could reach a column and blends their plateaus on top. Sites are
+gathered **once per chunk** and threaded through column filling, flora and
+stamping; a test asserts siting never reads the blended field.
+
+**Town separation falls out of the constants, not out of a rejection pass.**
+Jitter is clamped to the middle half of each 512-block cell, so two neighbouring
+towns are at least 256 blocks apart, against a maximum reach of 58. No
+cross-cell comparison is needed, which is what lets a site be answered from one
+cell's hash alone — and that in turn is what makes enumerating three kilometres
+of frontier arithmetic instead of a search.
+
+**Nothing about the frontier is pre-generated.** Because worldgen is pure in the
+seed, "where are the towns within two kilometres?" is a few hundred hashes and
+loads no chunks, no disk, no memory. A beacon can post a job at a town that does
+not exist as a single block; walk over and it builds itself exactly where the
+posting said. The only thing *stored* is which towns the player has actually
+stood in — player knowledge, in its own tolerant file, not world truth.
+
+**A map marker needs no visibility check, and that is the hook.** Markers are
+stamped in a pass after the terrain, with no test against the explored set, so
+a contract pin draws over blacked-out ground for free. Accepting a delivery
+pins a town you have never seen and the black around it stays black until you
+walk there.
+
+**The sun is pushed, never read.** Time of day is a uniform at
+`@group(2) @binding(0)` holding direction, sky and light, written through
+`Renderer::set_sun` beside `update_camera`. No render path reads a clock, which
+is what keeps headless captures byte-identical and the culling pixel tests
+honest — and it is why `--time`, `--dawn` and `--night` can light a capture
+exactly. The fog colour *is* the sky colour, one value, so the horizon cannot
+disagree with the clear colour the way two matching constants eventually would.
+
+**The clock is an input to the town, not a global.** `Villagers::update` takes
+the hour as an argument, so the bit-identical determinism test still passes a
+fixed noon while sundown genuinely sends everyone indoors.
 
 **Vegetation is not ground, and machines know it.** Trees are solid blocks,
 so the planners had to learn that a canopy is not a hilltop: `ground_height`
@@ -438,6 +513,7 @@ Controls:
 | `R` | Take or release the master override of what you are watching |
 | `Escape` | (on a feed) Hang up and return to your body |
 | `E` | Trade at the shop counter (arrows pick, `Enter` trades, `E` leaves) |
+| `E` | Read the beacon console at the foot of a radio mast — take work, or sign for a delivery (arrows pick, `Enter` acts, `E` leaves) |
 | `M` | Mark a corner of an ore body (two marks make an area) |
 | `Tab` | Cycle the proposed mining method |
 | `Enter` | Send a drone to dig it |
@@ -482,6 +558,12 @@ cargo run --release -p vx-app -- --screenshot shop.ppm --at 0,4 --shop
 
 # over the shoulder, with the player's body in shot
 cargo run --release -p vx-app -- --screenshot third.ppm --at 0,10 --third-person
+
+# the container town at dawn, mast against the sky (--night, --noon, --dusk too)
+cargo run --release -p vx-app -- --screenshot town.ppm --at 0,22 --dawn
+
+# the beacon console, work posted and one contract already taken
+cargo run --release -p vx-app -- --screenshot board.ppm --at 0,4 --board
 
 # the handheld's fleet roster and a live feed banner
 cargo run --release -p vx-app -- --screenshot uplink.ppm --at 0,10 --device

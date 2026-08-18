@@ -159,8 +159,9 @@ pub fn buy(walletbook: &mut Wallet, line: &str) -> bool {
     true
 }
 
-/// `engine:copper_ore` -> `COPPER ORE`, for the shelf labels.
-fn display_name(name: &str) -> String {
+/// `engine:copper_ore` -> `COPPER ORE`, for the shelf labels. Shared with the
+/// beacon board so a sack of ore is named the same wherever it is listed.
+pub fn display_name(name: &str) -> String {
     name.split_once(':')
         .map_or(name, |(_, bare)| bare)
         .replace('_', " ")

@@ -330,6 +330,64 @@ fn resizing_rebuilds_the_depth_buffer_and_still_renders() {
 }
 
 #[test]
+fn a_fresh_renderer_starts_at_the_documented_default_sky() {
+    // Every pixel test in this file derives its expected background from
+    // SKY_COLOUR. A renderer nobody has told the time to must therefore clear
+    // to exactly that, or the day/night cycle silently invalidates them all.
+    let Some(context) = context() else { return };
+    let renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    assert_eq!(renderer.sky(), vx_render::SKY_COLOUR);
+
+    // The uniform carries f32 and the clear colour f64, so compare at f32
+    // precision rather than demanding bit equality across the widening.
+    let default = vx_render::SunUniform::default();
+    for (from_sun, from_const) in [
+        (default.sky[0], vx_render::SKY_COLOUR.r),
+        (default.sky[1], vx_render::SKY_COLOUR.g),
+        (default.sky[2], vx_render::SKY_COLOUR.b),
+    ] {
+        assert!(
+            (from_sun - from_const as f32).abs() < 1.0e-6,
+            "the default sun's sky ({from_sun}) is not SKY_COLOUR ({from_const})"
+        );
+    }
+}
+
+#[test]
+fn a_night_sun_darkens_the_frame_and_takes_the_horizon_with_it() {
+    // The fog and the clear colour come from one value, so a night sky must
+    // move both: a bright horizon under a dark sky is the bug this guards.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 3);
+    let camera = surface_camera(&world, 6.0, -0.15);
+    renderer.update_camera(&context.queue, &camera);
+
+    let day = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    renderer.set_sun(
+        &context.queue,
+        vx_render::SunUniform {
+            direction: [0.42, 0.86, 0.29, 0.0],
+            sky: [0.02, 0.03, 0.06, 1.0],
+            light: [0.05, 0.14, 0.0, 0.0],
+        },
+    );
+    let night = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+
+    assert_ne!(day.pixels, night.pixels, "night looked exactly like day");
+
+    let mean = |pixels: &[u8]| -> f64 {
+        pixels.iter().map(|&channel| channel as f64).sum::<f64>() / pixels.len() as f64
+    };
+    assert!(
+        mean(&night.pixels) < mean(&day.pixels),
+        "night ({}) was not darker than day ({})",
+        mean(&night.pixels),
+        mean(&day.pixels)
+    );
+}
+
+#[test]
 fn frustum_culling_does_not_change_the_image() {
     // The decisive test. Culling is only ever allowed to skip geometry the
     // camera cannot see, so a culled frame and an unculled one must be

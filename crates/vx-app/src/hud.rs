@@ -9,6 +9,7 @@
 
 use vx_render::font::{self, LINE_HEIGHT};
 
+use crate::clock::TimeOfDay;
 use crate::skills::{self, Skills};
 
 /// Panel size in texture pixels. Displayed 2x, so text is comfortably
@@ -24,10 +25,14 @@ const DIM: [u8; 4] = [150, 150, 155, 255];
 const ACCENT: [u8; 4] = [255, 170, 60, 255];
 const BAR_BACK: [u8; 4] = [45, 48, 55, 255];
 const BACKGROUND: [u8; 4] = [12, 14, 18, 165];
+const NIGHT: [u8; 4] = [130, 150, 200, 255];
 
 /// Everything the HUD shows this frame.
 pub struct HudContent<'a> {
     pub skills: &'a Skills,
+    /// The hour, passed in rather than read: the HUD is a pure function of
+    /// its inputs, and a wall-clock read here would make captures wobble.
+    pub time: TimeOfDay,
     /// The one-line activity readout (mining/ferrying/scanning), if any.
     pub status: Option<String>,
     /// Drill progress through the current block, while digging.
@@ -72,6 +77,21 @@ pub fn render_hud(content: &HudContent) -> Vec<u8> {
         content.skills.level(skills::LOGISTICS),
     );
     font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, TEXT, &sheet);
+
+    // The hour, right-aligned on the same line, tinted by whether the town is
+    // open for business.
+    let (hours, minutes) = content.time.hhmm();
+    let clock = format!("{hours:02}:{minutes:02}");
+    let tint = if content.time.is_daylight() { ACCENT } else { NIGHT };
+    font::draw_text(
+        &mut pixels,
+        HUD_WIDTH,
+        HUD_WIDTH as i32 - margin - font::text_width(&clock, 1) as i32,
+        y,
+        1,
+        tint,
+        &clock,
+    );
     y += LINE_HEIGHT as i32;
 
     // Line 2: the XP bar for whatever skill last moved.
@@ -131,6 +151,7 @@ mod tests {
     fn base_content(skills: &Skills) -> HudContent<'_> {
         HudContent {
             skills,
+            time: TimeOfDay::NOON,
             status: None,
             drilling: None,
             level_up: None,
@@ -218,5 +239,20 @@ mod tests {
         with_both.level_up = Some(("mining".into(), 7));
 
         assert_ne!(render_hud(&with_status), render_hud(&with_both));
+    }
+
+    #[test]
+    fn the_hud_shows_the_hour_and_tells_day_from_night() {
+        let skills = Skills::new();
+        let mut noon = base_content(&skills);
+        noon.time = TimeOfDay::NOON;
+        let mut midnight = base_content(&skills);
+        midnight.time = TimeOfDay::MIDNIGHT;
+
+        let day = render_hud(&noon);
+        let night = render_hud(&midnight);
+        assert_ne!(day, night, "the clock does not show on the panel");
+        // And the panel stays a pure function of its inputs.
+        assert_eq!(day, render_hud(&noon));
     }
 }

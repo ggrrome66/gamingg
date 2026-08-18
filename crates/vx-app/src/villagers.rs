@@ -13,9 +13,10 @@
 
 use glam::Vec3;
 use vx_render::Object;
-use vx_world::village;
+use vx_world::town::{self, TownSite};
 
 use crate::awareness::{self, Perception, Sighting, Surroundings, TargetKind};
+use crate::clock::TimeOfDay;
 
 use crate::rig::{self, Rig};
 
@@ -32,16 +33,54 @@ const WALK_SPEED: f32 = 1.2;
 /// block coordinates, authored clear of every building footprint).
 type Patch = (f32, f32, f32, f32);
 
-/// Who lives here: a patch to wander, a line to say, a body to wear.
-const ROSTER: &[(Patch, &str, usize)] = &[
-    ((-8.0, -8.0, 8.0, 4.0), "MORNIN. FINE DAY FOR DIGGIN.", 0),
-    ((-9.0, 0.0, -5.0, 12.0), "SHOP IS JUST UP THE PATH.", 1),
-    ((4.0, -8.0, 9.0, 8.0), "MIND THE DRONES OUT THERE.", 2),
+/// Where somebody goes when the sun is down: the doorstep outside their
+/// container, then the spot inside it. Two authored nodes rather than a path
+/// search — the straight segments never cross a wall, which is both cheaper
+/// and directly testable.
+type HomeRoute = &'static [(f32, f32)];
+
+/// Who lives here: a daytime patch, the way home, a line to say, a body to
+/// wear. Every coordinate is an offset from the town centre.
+const ROSTER: &[(Patch, HomeRoute, &str, usize)] = &[
+    (
+        (-8.0, -8.0, 8.0, 4.0),
+        // The east-door container, west along the high street.
+        &[(-10.0, -1.0), (-14.0, -0.5)],
+        "MORNIN. FINE DAY FOR DIGGIN.",
+        0,
+    ),
+    (
+        (-9.0, 0.0, -5.0, 12.0),
+        // The stacked bunks north of the plaza.
+        &[(-1.0, 3.0), (-1.0, -21.0)],
+        "SHOP IS JUST UP THE PATH.",
+        1,
+    ),
+    (
+        (4.0, -8.0, 9.0, 8.0),
+        // The west-door container, east along the high street.
+        &[(9.0, -1.0), (13.0, -0.5)],
+        "MIND THE DRONES OUT THERE.",
+        2,
+    ),
 ];
 
-/// The feet-level height villagers walk at: on top of the plaza surface.
-fn walk_height() -> f32 {
-    (village::GROUND_Y + 1) as f32
+/// Where a villager is in their day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Out on their patch.
+    Roaming,
+    /// Walking leg `n` of the route home.
+    HeadingHome(usize),
+    /// In for the night.
+    Home,
+    /// Walking the route back out, from leg `n` down.
+    HeadingOut(usize),
+}
+
+/// The feet-level height a town's villagers walk at: on top of its plaza.
+fn walk_height(site: &TownSite) -> f32 {
+    (site.ground + 1) as f32
 }
 
 /// Hash a villager's stroll leg into `0..1`. Same construction as the tile
@@ -64,6 +103,8 @@ struct Villager {
     previous: Vec3,
     yaw: f32,
     patch: Patch,
+    route: HomeRoute,
+    phase: Phase,
     greeting: &'static str,
     variant: usize,
     /// Which leg of the stroll they are on; the hash streams key off it.
@@ -80,37 +121,126 @@ struct Villager {
 }
 
 impl Villager {
-    fn new(index: usize, patch: Patch, greeting: &'static str, variant: usize) -> Self {
-        let start = waypoint_in(index, 0, patch);
+    fn new(
+        index: usize,
+        patch: Patch,
+        route: HomeRoute,
+        greeting: &'static str,
+        variant: usize,
+        site: &TownSite,
+    ) -> Self {
+        let start = waypoint_in(index, 0, patch, site);
         Villager {
             position: start,
             previous: start,
             yaw: 0.0,
             patch,
+            route,
+            phase: Phase::Roaming,
             greeting,
             variant,
             leg: 0,
-            waypoint: waypoint_in(index, 1, patch),
+            waypoint: waypoint_in(index, 1, patch, site),
             pause: 0.0,
             greeted: false,
             perception: Perception::default(),
             attention: 0.0,
         }
     }
+    /// A world position from a route node, which is authored town-relative.
+    fn route_node(&self, leg: usize, site: &TownSite) -> Vec3 {
+        let (x, z) = self.route[leg.min(self.route.len() - 1)];
+        Vec3::new(
+            site.centre.0 as f32 + x,
+            walk_height(site),
+            site.centre.1 as f32 + z,
+        )
+    }
+
+    /// Point them at wherever the hour says they should be.
+    ///
+    /// Only ever *starts* a journey; the walking itself is the same code that
+    /// handles a stroll, so there is one movement path rather than two.
+    fn retarget(&mut self, index: usize, daylight: bool, site: &TownSite) {
+        match (daylight, self.phase) {
+            // Dusk: set off for the doorstep.
+            (false, Phase::Roaming) => {
+                self.phase = Phase::HeadingHome(0);
+                self.waypoint = self.route_node(0, site);
+                self.pause = 0.0;
+            }
+            // Dawn: back out the way they came in.
+            (true, Phase::Home) => {
+                let last = self.route.len() - 1;
+                self.phase = Phase::HeadingOut(last);
+                self.waypoint = self.route_node(last, site);
+                self.pause = 0.0;
+            }
+            // Caught mid-journey by the hour turning back: turn around.
+            (true, Phase::HeadingHome(leg)) => {
+                self.phase = Phase::HeadingOut(leg);
+                self.waypoint = self.route_node(leg, site);
+            }
+            (false, Phase::HeadingOut(leg)) => {
+                self.phase = Phase::HeadingHome(leg);
+                self.waypoint = self.route_node(leg, site);
+            }
+            _ => {
+                let _ = index;
+            }
+        }
+    }
+
+    /// Arrived at the current waypoint: pick the next one.
+    fn arrive(&mut self, index: usize, site: &TownSite) {
+        match self.phase {
+            Phase::Roaming => {
+                self.leg += 1;
+                self.pause = 0.8 + hash01(index, self.leg, 0xa3) * 2.5;
+                self.waypoint = waypoint_in(index, self.leg + 1, self.patch, site);
+            }
+            Phase::HeadingHome(leg) => {
+                if leg + 1 < self.route.len() {
+                    self.phase = Phase::HeadingHome(leg + 1);
+                    self.waypoint = self.route_node(leg + 1, site);
+                } else {
+                    // In, and settled for the night.
+                    self.phase = Phase::Home;
+                }
+            }
+            Phase::HeadingOut(leg) => {
+                if leg > 0 {
+                    self.phase = Phase::HeadingOut(leg - 1);
+                    self.waypoint = self.route_node(leg - 1, site);
+                } else {
+                    // Out on the street: back to the day's stroll.
+                    self.phase = Phase::Roaming;
+                    self.leg += 1;
+                    self.waypoint = waypoint_in(index, self.leg + 1, self.patch, site);
+                }
+            }
+            Phase::Home => {}
+        }
+    }
 }
 
-/// The `leg`-th waypoint inside a patch.
-fn waypoint_in(index: usize, leg: u32, patch: Patch) -> Vec3 {
+/// The `leg`-th waypoint inside a patch, in world coordinates.
+///
+/// Patches are authored as offsets from the town centre, so one roster serves
+/// every town on the lattice.
+fn waypoint_in(index: usize, leg: u32, patch: Patch, site: &TownSite) -> Vec3 {
     let (x0, z0, x1, z1) = patch;
     Vec3::new(
-        x0 + hash01(index, leg, 0xa1) * (x1 - x0),
-        walk_height(),
-        z0 + hash01(index, leg, 0xa2) * (z1 - z0),
+        site.centre.0 as f32 + x0 + hash01(index, leg, 0xa1) * (x1 - x0),
+        walk_height(site),
+        site.centre.1 as f32 + z0 + hash01(index, leg, 0xa2) * (z1 - z0),
     )
 }
 
 /// Every villager in town.
 pub struct Villagers {
+    /// The town these people live in. Patches are offsets from its centre.
+    site: TownSite,
     folk: Vec<Villager>,
     /// Counts `update` calls, not wall time — which is what keeps the
     /// round-robin line-of-sight schedule deterministic.
@@ -124,17 +254,29 @@ impl Default for Villagers {
 }
 
 impl Villagers {
+    /// The hometown's people.
     pub fn new() -> Self {
+        Villagers::for_site(&town::home_site())
+    }
+
+    /// The people of one town on the lattice.
+    pub fn for_site(site: &TownSite) -> Self {
         Villagers {
+            site: *site,
             tick: 0,
             folk: ROSTER
                 .iter()
                 .enumerate()
-                .map(|(index, (patch, line, variant))| {
-                    Villager::new(index, *patch, line, *variant)
+                .map(|(index, (patch, route, line, variant))| {
+                    Villager::new(index, *patch, route, line, *variant, site)
                 })
                 .collect(),
         }
+    }
+
+    /// Which town these people belong to.
+    pub fn site(&self) -> &TownSite {
+        &self.site
     }
 
     /// The rigs the roster wears, in variant order for [`Villagers::objects`].
@@ -148,24 +290,36 @@ impl Villagers {
     /// The stroll runs first and is untouched by what anyone sees, so the
     /// deterministic wander stays deterministic; awareness only decides
     /// whether a villager *stops* and which way they face.
-    pub fn update(&mut self, dt: f32, around: &Surroundings) {
+    pub fn update(&mut self, dt: f32, time: TimeOfDay, around: &Surroundings) {
+        let site = self.site;
+        let daylight = time.is_daylight();
+
         for (index, villager) in self.folk.iter_mut().enumerate() {
             villager.previous = villager.position;
+
+            // The hour decides where they are heading; the walking below is
+            // the same walking as ever.
+            villager.retarget(index, daylight, &site);
+
             // Standing and watching counts as standing: a villager who has
-            // stopped to look at you should not slide across the plaza.
-            if villager.attention > 0.0 {
+            // stopped to look at you should not slide across the plaza. But
+            // somebody on their way in for the night keeps walking — being
+            // caught somebody's eye is not a reason to sleep in the street.
+            let travelling = matches!(
+                villager.phase,
+                Phase::HeadingHome(_) | Phase::HeadingOut(_)
+            );
+            if villager.attention > 0.0 && !travelling {
                 villager.attention = (villager.attention - dt).max(0.0);
             } else if villager.pause > 0.0 {
                 villager.pause = (villager.pause - dt).max(0.0);
-            } else {
+            } else if villager.phase != Phase::Home {
                 let to = villager.waypoint - villager.position;
                 let distance = to.length();
                 let step = WALK_SPEED * dt;
                 if distance <= step {
                     villager.position = villager.waypoint;
-                    villager.leg += 1;
-                    villager.pause = 0.8 + hash01(index, villager.leg, 0xa3) * 2.5;
-                    villager.waypoint = waypoint_in(index, villager.leg + 1, villager.patch);
+                    villager.arrive(index, &site);
                 } else {
                     villager.position += to / distance * step;
                 }
@@ -311,7 +465,7 @@ mod tests {
     fn strolls_stay_inside_their_patches_and_on_the_plateau() {
         let mut town = Villagers::new();
         for _ in 0..4000 {
-            town.update(1.0 / 60.0, &Surroundings::empty());
+            town.update(1.0 / 60.0, TimeOfDay::NOON, &Surroundings::empty());
         }
         for villager in &town.folk {
             let (x0, z0, x1, z1) = villager.patch;
@@ -320,9 +474,9 @@ mod tests {
                 at.x >= x0 - 0.01 && at.x <= x1 + 0.01 && at.z >= z0 - 0.01 && at.z <= z1 + 0.01,
                 "a villager wandered off their patch: {at:?}"
             );
-            assert_eq!(at.y, walk_height(), "a villager left the ground");
+            assert_eq!(at.y, walk_height(&town::home_site()), "a villager left the ground");
             assert!(
-                vx_world::village::blocks_at(at.x as i32, village::GROUND_Y + 1, at.z as i32)
+                vx_world::town::plan::cell_at(&town::home_site(), at.x as i32, town::HOME_GROUND_Y + 1, at.z as i32)
                     .is_none(),
                 "a patch overlaps a building at {at:?}"
             );
@@ -336,8 +490,8 @@ mod tests {
         for step in 0..2000 {
             // Uneven frame times, same sequence for both.
             let dt = 1.0 / 60.0 + (step % 7) as f32 * 0.001;
-            a.update(dt, &Surroundings::empty());
-            b.update(dt, &Surroundings::empty());
+            a.update(dt, TimeOfDay::NOON, &Surroundings::empty());
+            b.update(dt, TimeOfDay::NOON, &Surroundings::empty());
         }
         assert_eq!(a.positions(), b.positions());
     }
@@ -351,7 +505,7 @@ mod tests {
             machines: &[],
         };
         for _ in 0..town.folk.len() {
-            town.update(0.0, &around);
+            town.update(0.0, TimeOfDay::NOON, &around);
         }
     }
 
@@ -362,8 +516,8 @@ mod tests {
         town.folk[1].position.x += 1000.0;
         town.folk[2].position.x -= 1000.0;
         let villager = town.folk[0].position;
-        let near = Vec3::new(villager.x + 1.0, walk_height(), villager.z);
-        let far = Vec3::new(villager.x + REARM_RANGE + 2.0, walk_height(), villager.z);
+        let near = Vec3::new(villager.x + 1.0, walk_height(&town::home_site()), villager.z);
+        let far = Vec3::new(villager.x + REARM_RANGE + 2.0, walk_height(&town::home_site()), villager.z);
 
         look_around(&mut town, near);
         assert!(town.greeting_for().is_some(), "no greeting on approach");
@@ -371,7 +525,7 @@ mod tests {
         assert!(town.greeting_for().is_none(), "greeted every frame");
 
         // Just outside greeting range but inside re-arm range must NOT re-arm.
-        let lurking = Vec3::new(villager.x + GREET_RANGE + 0.5, walk_height(), villager.z);
+        let lurking = Vec3::new(villager.x + GREET_RANGE + 0.5, walk_height(&town::home_site()), villager.z);
         look_around(&mut town, lurking);
         assert!(town.greeting_for().is_none());
         look_around(&mut town, near);
@@ -389,7 +543,7 @@ mod tests {
         let mut town = Villagers::new();
         let at = town.folk[0].position;
         // Stand due +x of them.
-        let player = Vec3::new(at.x + 2.0, walk_height(), at.z);
+        let player = Vec3::new(at.x + 2.0, walk_height(&town::home_site()), at.z);
         look_around(&mut town, player);
 
         let facing = town.folk[0].yaw;
@@ -430,7 +584,7 @@ mod tests {
             machines: &[],
         };
         for _ in 0..town.folk.len() {
-            town.update(0.0, &around);
+            town.update(0.0, TimeOfDay::NOON, &around);
         }
 
         assert!(town.greeting_for().is_none(), "greeted through a wall");
@@ -445,7 +599,7 @@ mod tests {
         // Clear any starting pause so movement is the only variable.
         town.folk[0].pause = 0.0;
         let at = town.folk[0].position;
-        let player = Vec3::new(at.x + 1.5, walk_height(), at.z);
+        let player = Vec3::new(at.x + 1.5, walk_height(&town::home_site()), at.z);
 
         let around = Surroundings {
             world: None,
@@ -453,11 +607,11 @@ mod tests {
             machines: &[],
         };
         for _ in 0..3 {
-            town.update(1.0 / 60.0, &around);
+            town.update(1.0 / 60.0, TimeOfDay::NOON, &around);
         }
         let watching_from = town.folk[0].position;
         for _ in 0..10 {
-            town.update(1.0 / 60.0, &around);
+            town.update(1.0 / 60.0, TimeOfDay::NOON, &around);
         }
         assert_eq!(
             town.folk[0].position, watching_from,
@@ -467,7 +621,7 @@ mod tests {
         // Player leaves: the stroll picks back up.
         let alone = Surroundings::empty();
         for _ in 0..120 {
-            town.update(1.0 / 60.0, &alone);
+            town.update(1.0 / 60.0, TimeOfDay::NOON, &alone);
         }
         assert_ne!(
             town.folk[0].position, watching_from,
@@ -487,7 +641,7 @@ mod tests {
             machines: &machines,
         };
         for _ in 0..town.folk.len() {
-            town.update(0.0, &around);
+            town.update(0.0, TimeOfDay::NOON, &around);
         }
 
         let watched = town.folk[0].perception.watching().expect("saw nothing at all");
@@ -507,7 +661,7 @@ mod tests {
                 let dt = 1.0 / 60.0 + (step % 7) as f32 * 0.001;
                 let player = Vec3::new(
                     (step as f32 * 0.02).sin() * 6.0,
-                    walk_height(),
+                    walk_height(&town::home_site()),
                     (step as f32 * 0.017).cos() * 6.0,
                 );
                 let around = Surroundings {
@@ -515,7 +669,88 @@ mod tests {
                     player: Some(player),
                     machines: &[],
                 };
-                town.update(dt, &around);
+                town.update(dt, TimeOfDay::NOON, &around);
+            }
+            town.positions()
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn the_town_goes_indoors_at_night_and_back_out_at_dawn() {
+        let mut town = Villagers::new();
+        let alone = Surroundings::empty();
+
+        // A night's worth of updates: everyone should be home and settled.
+        for _ in 0..4000 {
+            town.update(1.0 / 60.0, TimeOfDay::MIDNIGHT, &alone);
+        }
+        for (index, villager) in town.folk.iter().enumerate() {
+            assert_eq!(villager.phase, Phase::Home, "villager {index} never got home");
+            let inside = villager.route_node(villager.route.len() - 1, &town.site);
+            assert!(
+                (villager.position - inside).length() < 1.0,
+                "villager {index} settled at {:?}, not indoors at {inside:?}",
+                villager.position
+            );
+        }
+
+        // And a morning's worth: back out on the plaza.
+        for _ in 0..4000 {
+            town.update(1.0 / 60.0, TimeOfDay::NOON, &alone);
+        }
+        for (index, villager) in town.folk.iter().enumerate() {
+            assert_eq!(villager.phase, Phase::Roaming, "villager {index} stayed in bed");
+            let (x0, z0, x1, z1) = villager.patch;
+            let at = villager.position;
+            let centre = town.site.centre;
+            assert!(
+                at.x >= centre.0 as f32 + x0 - 0.01
+                    && at.x <= centre.0 as f32 + x1 + 0.01
+                    && at.z >= centre.1 as f32 + z0 - 0.01
+                    && at.z <= centre.1 as f32 + z1 + 0.01,
+                "villager {index} came out somewhere odd: {at:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nobody_walks_through_a_wall_on_the_way_home() {
+        // The route is two authored nodes precisely so its straight segments
+        // stay in the doorway. Sample them against the town's own blueprint.
+        let site = town::home_site();
+        let town_folk = Villagers::new();
+        for (index, villager) in town_folk.folk.iter().enumerate() {
+            let mut nodes = vec![villager.position];
+            for leg in 0..villager.route.len() {
+                nodes.push(villager.route_node(leg, &site));
+            }
+            for pair in nodes.windows(2) {
+                for step in 0..=20 {
+                    let t = step as f32 / 20.0;
+                    let at = pair[0] + (pair[1] - pair[0]) * t;
+                    let (x, z) = (at.x.round() as i32, at.z.round() as i32);
+                    // Head height: a wall blocks, a doorway does not.
+                    let cell = vx_world::town::plan::cell_at(&site, x, site.ground + 2, z);
+                    assert!(
+                        cell.is_none(),
+                        "villager {index} walks through {cell:?} at ({x},{z})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_clock_is_an_input_so_two_identical_days_are_identical() {
+        // Determinism has to survive the schedule: the hour is a parameter,
+        // never a wall-clock read.
+        let run = || {
+            let mut town = Villagers::new();
+            let alone = Surroundings::empty();
+            for step in 0..3000 {
+                let time = TimeOfDay::new(step as f32 / 3000.0);
+                town.update(1.0 / 60.0, time, &alone);
             }
             town.positions()
         };

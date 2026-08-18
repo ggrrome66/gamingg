@@ -21,6 +21,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use vx_core::{BlockPos, ChunkPos, CHUNK_SIZE};
+use vx_world::town::{self, TownSite};
 use vx_world::{World, SEA_LEVEL};
 
 /// Side length of the map image, in pixels.
@@ -51,6 +52,11 @@ pub mod colour {
     pub const FLIER: [u8; 4] = [120, 200, 255, 255];
     pub const PING: [u8; 4] = [255, 140, 40, 255];
     pub const BASE: [u8; 4] = [80, 255, 170, 255];
+    /// A town you have actually stood in.
+    pub const TOWN: [u8; 4] = [235, 235, 240, 255];
+    /// Where an accepted posting wants you — drawn whether or not the ground
+    /// around it has ever been seen.
+    pub const CONTRACT: [u8; 4] = [255, 90, 140, 255];
 }
 
 /// The map's persistent and per-session state.
@@ -195,7 +201,18 @@ fn read_explored(path: &Path) -> std::io::Result<Option<HashSet<ChunkPos>>> {
 }
 
 /// The colour class of one column, before height shading.
-fn column_colour(world: &World, state: &MapState, x: i32, z: i32) -> Option<([f32; 3], i32)> {
+///
+/// `sites` is the towns overlapping the whole picture, gathered once by
+/// [`render_map`]. Passing them in matters: [`vx_world::gen::TerrainGenerator::height_at`]
+/// runs the town lattice for every column it is asked about, and a map redraw
+/// asks about tens of thousands of them.
+fn column_colour(
+    world: &World,
+    state: &MapState,
+    sites: &[TownSite],
+    x: i32,
+    z: i32,
+) -> Option<([f32; 3], i32)> {
     let chunk = BlockPos::new(x, 0, z).chunk();
 
     if world.is_loaded(chunk) {
@@ -228,7 +245,12 @@ fn column_colour(world: &World, state: &MapState, x: i32, z: i32) -> Option<([f3
     if state.is_explored(chunk) {
         // Unloaded but seen: recompute the generated surface. Edits there are
         // not shown — the accepted trade for storing nothing.
-        let height = world.generator().height_at(x, z);
+        let height = world.generator().height_with_sites(x, z, sites);
+        if town::core_contains(sites, x, z).is_some() {
+            // A levelled plot reads as metal from the air, the way it looks
+            // from the ground.
+            return Some(([0.63, 0.67, 0.73], height));
+        }
         let colour = if height < SEA_LEVEL {
             [0.24, 0.36, 0.65]
         } else if height < SEA_LEVEL + 2 {
@@ -254,13 +276,20 @@ pub fn render_map(
     let zoom = state.zoom.max(1);
     let mut pixels = vec![0u8; (MAP_SIZE * MAP_SIZE * 4) as usize];
 
+    // One lattice gather for the whole picture rather than one per pixel.
+    let half = size / 2 * zoom;
+    let sites = world.generator().towns_overlapping(
+        (centre.0 - half, centre.1 - half),
+        (centre.0 + half, centre.1 + half),
+    );
+
     for py in 0..size {
         for px in 0..size {
             let x = centre.0 + (px - size / 2) * zoom;
             let z = centre.1 + (py - size / 2) * zoom;
             let at = ((py * size + px) * 4) as usize;
 
-            match column_colour(world, state, x, z) {
+            match column_colour(world, state, &sites, x, z) {
                 Some((base, height)) => {
                     // Height shading: high ground bright, valleys dark, so
                     // relief reads at a glance.
@@ -468,5 +497,50 @@ mod tests {
             }
         }
         assert_eq!(fired, 1, "the throttle fired {fired} times in one interval");
+    }
+
+    #[test]
+    fn a_marker_draws_over_unexplored_ground() {
+        // The contract pin depends on this: an accepted posting can name a
+        // town in territory that has never been seen, and the pin has to show
+        // there or the player has nothing to walk towards.
+        let world = World::new(2024);
+        let state = MapState::new();
+        assert!(!state.is_explored(ChunkPos::new(64, 64)));
+
+        let blank = render_map(&world, &state, (1_024, 1_024), &[]);
+        let pinned = render_map(
+            &world,
+            &state,
+            (1_024, 1_024),
+            &[Marker {
+                x: 1_024,
+                z: 1_024,
+                colour: colour::CONTRACT,
+                radius: 3,
+            }],
+        );
+        assert_ne!(blank, pinned, "a pin in the black did not draw");
+
+        let centre = ((MAP_SIZE / 2 * MAP_SIZE + MAP_SIZE / 2) * 4) as usize;
+        assert_eq!(&pinned[centre..centre + 4], &colour::CONTRACT);
+    }
+
+    #[test]
+    fn a_town_reads_as_metal_on_explored_ground() {
+        let mut world = World::new(2024);
+        world.load_around(ChunkPos::new(0, 0), 1);
+        let mut state = MapState::new();
+        // Explored but unloaded: the recomputed-surface path, which is where
+        // the town lattice has to be consulted.
+        state.explore_around(ChunkPos::new(0, 0), 8);
+        let sites = world.generator().towns_overlapping((-128, -128), (128, 128));
+        assert!(!sites.is_empty(), "the hometown vanished");
+
+        let (plot, _) = column_colour(&world, &state, &sites, 0, 0).expect("the plot is unmapped");
+        // Explored, but well outside the hometown's skirt.
+        let (wild, _) =
+            column_colour(&world, &state, &sites, 120, 0).expect("open ground is unmapped");
+        assert_ne!(plot, wild, "a levelled town plot looks like open country");
     }
 }

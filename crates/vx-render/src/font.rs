@@ -26,6 +26,16 @@ type Glyph = [u8; 7];
 /// missing glyph is visible rather than silently absent.
 const UNKNOWN: Glyph = [0b11111, 0b10001, 0b10101, 0b10101, 0b10101, 0b10001, 0b11111];
 
+/// Does the font have a real shape for this character?
+///
+/// Panels are built from formatted strings, and a character the font has
+/// never heard of draws as [`UNKNOWN`] — a filled box that reads as damage.
+/// Callers building labels can assert against this rather than eyeballing a
+/// capture.
+pub fn knows(character: char) -> bool {
+    glyph(character) != UNKNOWN
+}
+
 /// Look up a character's pattern.
 pub fn glyph(character: char) -> Glyph {
     let upper = character.to_ascii_uppercase();

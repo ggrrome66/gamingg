@@ -15,7 +15,7 @@ pub mod raycast;
 pub mod save;
 pub mod sight;
 pub mod storage;
-pub mod village;
+pub mod town;
 pub mod world;
 
 pub use chunk::{BlockView, Chunk, SoloChunkView};
@@ -28,4 +28,5 @@ pub use raycast::{raycast, raycast_solid, RayHit};
 pub use save::{SaveError, WorldSave};
 pub use sight::{obstruction, sees};
 pub use storage::{PalettedStorage, StorageError};
+pub use town::{Speciality, TownName, TownSite};
 pub use world::World;

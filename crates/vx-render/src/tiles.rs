@@ -38,8 +38,13 @@ pub mod slot {
     pub const LOG_TOP: u32 = 19;
     pub const LEAVES: u32 = 20;
     pub const TUFT: u32 = 21;
+    pub const METAL_WALL: u32 = 22;
+    pub const RUSTED_METAL: u32 = 23;
+    pub const CATWALK: u32 = 24;
+    pub const MAST: u32 = 25;
+    pub const BEACON: u32 = 26;
     /// Total generated tiles.
-    pub const COUNT: u32 = 22;
+    pub const COUNT: u32 = 27;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -226,6 +231,62 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.30, 0.52, 0.20], noise * 0.12)
                     } else {
                         [0, 0, 0, 0]
+                    }
+                }
+                slot::METAL_WALL => {
+                    // Corrugated container flank: vertical ribbing catching
+                    // the light, so a wall reads as pressed steel rather than
+                    // a flat panel.
+                    let rib = x % 4;
+                    let lift = match rib {
+                        0 => 0.06,
+                        1 => 0.02,
+                        2 => -0.04,
+                        _ => -0.02,
+                    };
+                    shade([0.55, 0.58, 0.60], lift + noise * 0.05)
+                }
+                slot::RUSTED_METAL => {
+                    // The same ribbing, weathered. Patches of rust bloom
+                    // through where the paint has given up.
+                    let rib = x % 4;
+                    let lift = if rib < 2 { 0.04 } else { -0.03 };
+                    if jitter(tile ^ 0x3d, x / 3, y / 3) > 0.05 {
+                        shade([0.55, 0.30, 0.16], lift + noise * 0.10)
+                    } else {
+                        shade([0.48, 0.47, 0.45], lift + noise * 0.06)
+                    }
+                }
+                slot::CATWALK => {
+                    // Open steel grating, drawn opaque: the mesher has no
+                    // sorted-transparency pass, so a see-through walkway would
+                    // cost far more than it looks.
+                    if x % 4 == 0 || y % 4 == 0 {
+                        shade([0.38, 0.40, 0.43], noise * 0.05)
+                    } else {
+                        shade([0.16, 0.17, 0.19], noise * 0.08)
+                    }
+                }
+                slot::MAST => {
+                    // Galvanised lattice: diagonal bracing over dark sky-grey,
+                    // which reads as a tower from a distance without needing
+                    // a single transparent texel.
+                    let diagonal = (x + y) % 6 < 2 || (x + TILE_SIZE - y) % 6 < 2;
+                    if diagonal {
+                        shade([0.62, 0.65, 0.68], noise * 0.06)
+                    } else {
+                        shade([0.22, 0.24, 0.27], noise * 0.05)
+                    }
+                }
+                slot::BEACON => {
+                    // A console face: dark housing, an amber strip that reads
+                    // as powered even at night.
+                    if (5..9).contains(&y) && (2..14).contains(&x) {
+                        shade([0.95, 0.62, 0.16], noise * 0.06)
+                    } else if y < 3 {
+                        shade([0.30, 0.32, 0.36], noise * 0.05)
+                    } else {
+                        shade([0.18, 0.19, 0.22], noise * 0.06)
                     }
                 }
                 // Unknown slots get magenta, the universal "missing texture".

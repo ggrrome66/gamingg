@@ -11,6 +11,7 @@ use vx_core::{
 use crate::chunk::Chunk;
 use crate::noise::{warp_2d, Fbm, Ridged, Spline};
 use crate::ore::{breaks_surface, deposits_overlapping, ore_at, Deposit};
+use crate::town::TownSite;
 
 /// Sea level. Terrain below this floods.
 pub const SEA_LEVEL: i32 = 62;
@@ -40,6 +41,11 @@ pub struct TerrainBlocks {
     pub log: BlockId,
     pub leaves: BlockId,
     pub tall_grass: BlockId,
+    pub metal_wall: BlockId,
+    pub rusted_metal: BlockId,
+    pub catwalk: BlockId,
+    pub mast: BlockId,
+    pub beacon: BlockId,
 }
 
 impl TerrainBlocks {
@@ -86,6 +92,17 @@ impl TerrainBlocks {
                     .cross()
                     .with_hardness(Some(0.05)),
             ),
+            metal_wall: register(
+                BlockDef::uniform("engine:metal_wall", 22).with_hardness(Some(1.6)),
+            ),
+            rusted_metal: register(
+                BlockDef::uniform("engine:rusted_metal", 23).with_hardness(Some(1.6)),
+            ),
+            catwalk: register(BlockDef::uniform("engine:catwalk", 24).with_hardness(Some(1.0))),
+            mast: register(BlockDef::uniform("engine:mast", 25).with_hardness(Some(2.0))),
+            // The beacon is the town's link to the network, and like the shop
+            // counter it is not something a drill or a drone gets to dismantle.
+            beacon: register(BlockDef::uniform("engine:beacon", 26).with_hardness(None)),
         }
     }
 
@@ -107,6 +124,11 @@ impl TerrainBlocks {
             log: registry.id_of("engine:log")?,
             leaves: registry.id_of("engine:leaves")?,
             tall_grass: registry.id_of("engine:tall_grass")?,
+            metal_wall: registry.id_of("engine:metal_wall")?,
+            rusted_metal: registry.id_of("engine:rusted_metal")?,
+            catwalk: registry.id_of("engine:catwalk")?,
+            mast: registry.id_of("engine:mast")?,
+            beacon: registry.id_of("engine:beacon")?,
         })
     }
 }
@@ -243,7 +265,12 @@ impl TerrainGenerator {
     ///
     /// Pure in `(seed, x, z)` — no state, no ordering, so columns can be
     /// evaluated in any order and on any thread.
-    pub fn height_at(&self, world_x: i32, world_z: i32) -> i32 {
+    ///
+    /// This is the seed's *own* terrain, before any town flattens a plot into
+    /// it, and it is the only height a town-site test may consult. Siting
+    /// against the blended field would let one town's plateau decide where the
+    /// next town stands.
+    pub fn natural_height_at(&self, world_x: i32, world_z: i32) -> i32 {
         // Warp first, so every field downstream samples the bent space and the
         // lattice alignment never shows through.
         let (x, z) = warp_2d(
@@ -273,17 +300,64 @@ impl TerrainGenerator {
         };
 
         let height = base + local + ridge;
-        let natural = (height as i32).clamp(1, CHUNK_HEIGHT - 1);
-        // The starting village flattens its plot and blends into the seed's
-        // terrain over a skirt. Applied here — not just in `generate` — so
-        // the minimap, spawn and physics all see the same town.
-        crate::village::blend_height(world_x, world_z, natural)
+        (height as i32).clamp(1, CHUNK_HEIGHT - 1)
+    }
+
+    /// Surface height with every nearby town's plateau blended in.
+    ///
+    /// What the minimap, spawn placement and physics all ask, so they agree
+    /// about where the ground is. Gathers the towns that could reach this one
+    /// column; for the per-chunk path use [`TerrainGenerator::height_with_sites`]
+    /// instead, which gathers once for the whole chunk.
+    pub fn height_at(&self, world_x: i32, world_z: i32) -> i32 {
+        let sites = self.towns_overlapping((world_x, world_z), (world_x, world_z));
+        self.height_with_sites(world_x, world_z, &sites)
+    }
+
+    /// The same, against an already-gathered site list.
+    ///
+    /// `sites` must have been gathered over a box containing this column —
+    /// the superset contract [`crate::town`] documents. Break it and two
+    /// chunks disagree about a shared column, which shows up as a seam.
+    pub fn height_with_sites(&self, world_x: i32, world_z: i32, sites: &[TownSite]) -> i32 {
+        let natural = self.natural_height_at(world_x, world_z);
+        crate::town::blend_height(sites, world_x, world_z, natural)
+    }
+
+    /// Every town whose plateau could reach the column box.
+    ///
+    /// Binds the *natural* height field, never the blended one: siting a town
+    /// against terrain another town already flattened is how the height field
+    /// starts feeding itself.
+    pub fn towns_overlapping(&self, min: (i32, i32), max: (i32, i32)) -> Vec<TownSite> {
+        crate::town::towns_overlapping(self.seed, min, max, &|x, z| self.natural_height_at(x, z))
+    }
+
+    /// Towns near a column, nearest first — and without loading a thing.
+    pub fn towns_near(&self, at: (i32, i32), radius: i32) -> Vec<TownSite> {
+        crate::town::towns_near(self.seed, at, radius, &|x, z| self.natural_height_at(x, z))
+    }
+
+    /// The towns reaching a chunk, gathered with the margin every per-chunk
+    /// helper needs, so one gather serves terrain, ore masking, flora and
+    /// stamping alike.
+    fn sites_for_chunk(&self, pos: ChunkPos) -> Vec<TownSite> {
+        let origin = pos.origin();
+        let margin = crate::flora::CANOPY_REACH;
+        self.towns_overlapping(
+            (origin.x - margin, origin.z - margin),
+            (origin.x + CHUNK_SIZE - 1 + margin, origin.z + CHUNK_SIZE - 1 + margin),
+        )
     }
 
     /// Generate the chunk at `pos`.
     pub fn generate(&self, pos: ChunkPos) -> Chunk {
         let mut chunk = Chunk::empty(pos);
         let origin = pos.origin();
+
+        // The towns reaching this chunk, gathered once. Every helper below
+        // shares the list, which is what keeps them agreeing about a column.
+        let sites = self.sites_for_chunk(pos);
 
         // Gather the ore bodies reaching this chunk once. Hashing the deposit
         // lattice per block would cost far more than the terrain itself.
@@ -297,13 +371,14 @@ impl TerrainGenerator {
             for local_x in 0..CHUNK_SIZE {
                 let world_x = origin.x + local_x;
                 let world_z = origin.z + local_z;
-                let surface = self.height_at(world_x, world_z);
+                let surface = self.height_with_sites(world_x, world_z, &sites);
                 self.fill_column(
                     &mut chunk,
                     [local_x, local_z],
                     [world_x, world_z],
                     surface,
                     &deposits,
+                    &sites,
                 );
             }
         }
@@ -311,12 +386,13 @@ impl TerrainGenerator {
         // Trees, gathered like ore: every tree whose canopy reaches this
         // chunk, stamped only where it lands inside. Trunks overwrite the
         // tufts fill_column may have dropped on their base columns.
-        let height_at = |x: i32, z: i32| self.height_at(x, z);
+        let height_at = |x: i32, z: i32| self.height_with_sites(x, z, &sites);
         let trees = crate::flora::trees_overlapping(
             self.seed,
             (origin.x, origin.z),
             (origin.x + CHUNK_SIZE - 1, origin.z + CHUNK_SIZE - 1),
             &height_at,
+            &sites,
         );
         for tree in &trees {
             let top = tree.base.y + tree.height + 2;
@@ -356,8 +432,8 @@ impl TerrainGenerator {
             }
         }
 
-        // The village's authored buildings, where this chunk overlaps them.
-        crate::village::stamp(&mut chunk, pos, &self.blocks);
+        // Each town's authored buildings, where this chunk overlaps them.
+        crate::town::plan::stamp(&mut chunk, pos, &sites, &self.blocks);
 
         // Generation touches the palette heavily; compact before it is cached.
         chunk.optimise();
@@ -379,14 +455,15 @@ impl TerrainGenerator {
         world: [i32; 2],
         surface: i32,
         deposits: &[Deposit],
+        sites: &[TownSite],
     ) {
         let blocks = self.blocks;
         let [x, z] = local;
         let [world_x, world_z] = world;
 
         // No ore under main street: prospecting belongs to the wilderness,
-        // and nobody should be tempted to dig up the town.
-        let in_village = crate::village::footprint_contains(world_x, world_z);
+        // and nobody should be tempted to dig up a town.
+        let in_village = crate::town::footprint_contains(sites, world_x, world_z);
 
         // Beaches: columns near sea level get sand instead of grass.
         let coastal = surface <= SEA_LEVEL + 1;
@@ -428,7 +505,10 @@ impl TerrainGenerator {
 
         // A scattering of grass tufts on plain grass tops — never on an
         // outcrop, which players need to be able to spot at distance.
-        if !coastal && !outcrop && crate::flora::tuft_at(self.seed, world_x, world_z, surface) {
+        if !coastal
+            && !outcrop
+            && crate::flora::tuft_at(self.seed, world_x, world_z, surface, sites)
+        {
             place(chunk, surface + 1, blocks.tall_grass);
         }
 
@@ -992,7 +1072,12 @@ mod tests {
                 let chunk = generator.generate(pos);
                 for z in 0..CHUNK_SIZE {
                     for x in 0..CHUNK_SIZE {
-                        let in_town = crate::village::footprint_contains(origin.x + x, origin.z + z);
+                        let sites = generator.towns_overlapping(
+                            (origin.x + x, origin.z + z),
+                            (origin.x + x, origin.z + z),
+                        );
+                        let in_town =
+                            crate::town::footprint_contains(&sites, origin.x + x, origin.z + z);
                         // Town columns top out at the plateau plus rooftops,
                         // so scanning higher buys nothing but test time.
                         for y in 0..100 {
@@ -1009,7 +1094,7 @@ mod tests {
             }
         }
 
-        let at = crate::village::counter_position();
+        let at = crate::town::counter_position(&crate::town::home_site());
         let counter_chunk = generator.generate(ChunkPos::new(
             at.x.div_euclid(CHUNK_SIZE),
             at.z.div_euclid(CHUNK_SIZE),
@@ -1025,11 +1110,13 @@ mod tests {
         let height = |x: i32, z: i32| generator.height_at(x, z);
 
         // Find a tree whose canopy reaches over an x-border between chunks.
+        let sites = generator.towns_overlapping((-400, -400), (400, 400));
         let trees = crate::flora::trees_overlapping(
             generator.seed(),
             (-400, -400),
             (400, 400),
             &height,
+            &sites,
         );
         let straddler = trees
             .iter()
@@ -1103,7 +1190,7 @@ mod tests {
         let (registry, generator) = generator(7);
         let chunk = generator.generate(ChunkPos::new(0, 0));
         let surface = chunk.height_at(0, 0).unwrap();
-        assert_eq!(surface, crate::village::GROUND_Y, "spawn is off the plateau");
+        assert_eq!(surface, crate::town::HOME_GROUND_Y, "spawn is off the plateau");
         let top = chunk.get(LocalPos::new(0, surface, 0).unwrap());
         assert_eq!(registry.get(top).unwrap().name, "engine:stone", "spawn is not paved");
     }

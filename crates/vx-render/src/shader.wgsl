@@ -14,6 +14,16 @@ struct Camera {
 @group(1) @binding(0) var tiles: texture_2d_array<f32>;
 @group(1) @binding(1) var tile_sampler: sampler;
 
+// The sun, the sky and the light level. One value drives both the diffuse
+// term and the fog, so the horizon always agrees with the sky behind it.
+struct Sun {
+    direction: vec4<f32>,
+    sky: vec4<f32>,
+    light: vec4<f32>,
+};
+
+@group(2) @binding(0) var<uniform> sun: Sun;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -89,11 +99,6 @@ fn vs_object(in: VertexInput, instance: InstanceInput) -> VertexOutput {
     return out;
 }
 
-// Direction the key light arrives from.
-const LIGHT_DIRECTION: vec3<f32> = vec3<f32>(0.42, 0.86, 0.29);
-const AMBIENT: f32 = 0.42;
-const FOG_COLOUR: vec3<f32> = vec3<f32>(0.62, 0.74, 0.88);
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let albedo = textureSample(tiles, tile_sampler, in.uv, in.tile);
@@ -105,13 +110,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let normal = normalize(in.normal);
-    let light = normalize(LIGHT_DIRECTION);
+    let light = normalize(sun.direction.xyz);
     let diffuse = max(dot(normal, light), 0.0);
 
     // A small per-axis bias keeps the four side faces from reading as one flat
     // silhouette when the light is nearly overhead.
     let axis_bias = 0.06 * abs(normal.x) - 0.03 * abs(normal.z);
-    let lighting = AMBIENT + 0.58 * diffuse + axis_bias;
+    let lighting = sun.light.y + sun.light.x * diffuse + axis_bias;
 
     var colour = albedo.rgb * clamp(lighting, 0.0, 1.4);
 
@@ -119,7 +124,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // ending in a hard wall.
     let distance = length(in.world_position - camera.position.xyz);
     let fog = clamp((distance - 140.0) / 180.0, 0.0, 1.0);
-    colour = mix(colour, FOG_COLOUR, fog);
+    colour = mix(colour, sun.sky.xyz, fog);
 
     return vec4<f32>(colour, albedo.a);
 }

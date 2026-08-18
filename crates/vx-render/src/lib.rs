@@ -29,6 +29,36 @@ pub use object::{Object, ObjectBatch, ObjectInstance, INSTANCE_LAYOUT};
 pub use overlay::{OverlayPass, OverlayRect, OVERLAY_SLOTS};
 pub use tiles::TileTextures;
 
+/// Sun, sky and light level, as the shader sees them.
+///
+/// A second uniform rather than three more fields on the camera: the camera is
+/// written every frame on the hot path, this is written when the light
+/// changes, and when lamps arrive they belong here beside the sun rather than
+/// inside a matrix.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, PartialEq)]
+pub struct SunUniform {
+    /// Unit vector *toward* the key light. `w` unused.
+    pub direction: [f32; 4],
+    /// Linear sky colour — the frame's clear colour and its fog, one value,
+    /// so the horizon can never disagree with the sky.
+    pub sky: [f32; 4],
+    /// `x` diffuse strength, `y` ambient floor, `zw` reserved.
+    pub light: [f32; 4],
+}
+
+impl Default for SunUniform {
+    /// Exactly the constants the shader used before there was a day, so a
+    /// fresh renderer is pixel-identical to the build that had no clock.
+    fn default() -> Self {
+        SunUniform {
+            direction: [0.42, 0.86, 0.29, 0.0],
+            sky: [0.62, 0.74, 0.88, 1.0],
+            light: [0.58, 0.42, 0.0, 0.0],
+        }
+    }
+}
+
 /// Sky colour, used to clear each frame.
 pub const SKY_COLOUR: wgpu::Color = wgpu::Color {
     r: 0.62,
@@ -42,6 +72,13 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    /// The sun, the sky and the light level. Pushed explicitly — never read
+    /// from a clock in here, which is what keeps captures reproducible.
+    sun_buffer: wgpu::Buffer,
+    sun_bind_group: wgpu::BindGroup,
+    /// The colour the frame clears to. Kept in step with the sun's sky by
+    /// [`Renderer::set_sun`], which writes both from the same value.
+    sky: wgpu::Color,
     tiles: TileTextures,
     depth_view: wgpu::TextureView,
     chunks: HashMap<ChunkPos, ChunkMesh>,
@@ -108,11 +145,51 @@ impl Renderer {
             }],
         });
 
+        let sun_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sun uniform"),
+            size: std::mem::size_of::<SunUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let sun_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sun layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let sun_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sun bind group"),
+            layout: &sun_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: sun_buffer.as_entire_binding(),
+            }],
+        });
+
+        // Start at the documented default, so a renderer nobody has told the
+        // time to draws exactly what it drew before there was a clock.
+        context
+            .queue
+            .write_buffer(&sun_buffer, 0, bytemuck::bytes_of(&SunUniform::default()));
+
         let tiles = TileTextures::new(device, &context.queue);
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain pipeline layout"),
-            bind_group_layouts: &[Some(&camera_layout), Some(&tiles.bind_group_layout)],
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&tiles.bind_group_layout),
+                Some(&sun_layout),
+            ],
             immediate_size: 0,
         });
 
@@ -182,6 +259,9 @@ impl Renderer {
         Renderer {
             pipeline,
             camera_buffer,
+            sun_buffer,
+            sun_bind_group,
+            sky: SKY_COLOUR,
             camera_bind_group,
             tiles,
             depth_view,
@@ -249,6 +329,26 @@ impl Renderer {
     pub fn update_camera(&mut self, queue: &wgpu::Queue, camera: &Camera) {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera.uniform()));
         self.frustum = Some(Frustum::from_view_projection(camera.view_projection()));
+    }
+
+    /// Push the sun, the sky and the light level.
+    ///
+    /// Both the shader's fog and the frame's clear colour come from `sun.sky`,
+    /// written here in one call — so the horizon and the sky are the same
+    /// value by construction and cannot drift apart.
+    pub fn set_sun(&mut self, queue: &wgpu::Queue, sun: SunUniform) {
+        queue.write_buffer(&self.sun_buffer, 0, bytemuck::bytes_of(&sun));
+        self.sky = wgpu::Color {
+            r: sun.sky[0] as f64,
+            g: sun.sky[1] as f64,
+            b: sun.sky[2] as f64,
+            a: 1.0,
+        };
+    }
+
+    /// The colour this renderer currently clears to.
+    pub fn sky(&self) -> wgpu::Color {
+        self.sky
     }
 
     /// Upload (or replace) one chunk's geometry. An empty mesh drops it.
@@ -337,7 +437,7 @@ impl Renderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(SKY_COLOUR),
+                    load: wgpu::LoadOp::Clear(self.sky),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -357,6 +457,7 @@ impl Renderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.camera_bind_group, &[]);
         pass.set_bind_group(1, &self.tiles.bind_group, &[]);
+        pass.set_bind_group(2, &self.sun_bind_group, &[]);
 
         let cull = self.culling_enabled.then_some(self.frustum).flatten();
 

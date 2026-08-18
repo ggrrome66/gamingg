@@ -12,7 +12,7 @@
 use vx_core::BlockPos;
 
 use crate::gen::SEA_LEVEL;
-use crate::village;
+use crate::town::{self, TownSite};
 
 /// Lattice cell size for trees, in blocks. One potential tree per cell.
 pub const TREE_CELL: i32 = 12;
@@ -61,8 +61,8 @@ fn hash01(seed: u64, salt: u64, x: i32, z: i32) -> f32 {
 ///
 /// Mirrors the generator's own surface rule: at or below the beach band the
 /// top block is sand, and the village keeps its lawns clear.
-fn ground_grows_grass(x: i32, z: i32, surface: i32) -> bool {
-    surface > SEA_LEVEL + 1 && !village::footprint_contains(x, z)
+fn ground_grows_grass(sites: &[TownSite], x: i32, z: i32, surface: i32) -> bool {
+    surface > SEA_LEVEL + 1 && !town::footprint_contains(sites, x, z)
 }
 
 /// The tree in one lattice cell, if that cell grows one.
@@ -74,6 +74,7 @@ fn tree_in_cell(
     cell_x: i32,
     cell_z: i32,
     height_at: &impl Fn(i32, i32) -> i32,
+    sites: &[TownSite],
 ) -> Option<Tree> {
     if hash01(seed, 0xf1, cell_x, cell_z) > TREE_PRESENCE {
         return None;
@@ -85,7 +86,7 @@ fn tree_in_cell(
     let z = cell_z * TREE_CELL + jitter_z;
 
     let surface = height_at(x, z);
-    if !ground_grows_grass(x, z, surface) {
+    if !ground_grows_grass(sites, x, z, surface) {
         return None;
     }
 
@@ -102,6 +103,7 @@ pub fn trees_overlapping(
     min: (i32, i32),
     max: (i32, i32),
     height_at: &impl Fn(i32, i32) -> i32,
+    sites: &[TownSite],
 ) -> Vec<Tree> {
     let lo_x = (min.0 - CANOPY_REACH).div_euclid(TREE_CELL);
     let hi_x = (max.0 + CANOPY_REACH).div_euclid(TREE_CELL);
@@ -111,7 +113,7 @@ pub fn trees_overlapping(
     let mut found = Vec::new();
     for cell_x in lo_x..=hi_x {
         for cell_z in lo_z..=hi_z {
-            if let Some(tree) = tree_in_cell(seed, cell_x, cell_z, height_at) {
+            if let Some(tree) = tree_in_cell(seed, cell_x, cell_z, height_at, sites) {
                 found.push(tree);
             }
         }
@@ -144,8 +146,8 @@ pub fn tree_part_at(tree: &Tree, x: i32, y: i32, z: i32) -> Option<TreePart> {
 
 /// Does a grass tuft stand on this column? (Assuming the surface allows one —
 /// the generator also requires the top block to be plain grass.)
-pub fn tuft_at(seed: u64, x: i32, z: i32, surface: i32) -> bool {
-    ground_grows_grass(x, z, surface) && hash01(seed, 0x7f, x, z) < TUFT_DENSITY
+pub fn tuft_at(seed: u64, x: i32, z: i32, surface: i32, sites: &[TownSite]) -> bool {
+    ground_grows_grass(sites, x, z, surface) && hash01(seed, 0x7f, x, z) < TUFT_DENSITY
 }
 
 #[cfg(test)]
@@ -156,14 +158,19 @@ mod tests {
         80
     }
 
+    /// The one town every world has, for the "keep out of town" rules.
+    fn home() -> Vec<TownSite> {
+        vec![town::home_site()]
+    }
+
     #[test]
     fn the_forest_is_deterministic_and_clip_window_correct() {
-        let all = trees_overlapping(7, (-200, -200), (200, 200), &flat_height);
+        let all = trees_overlapping(7, (-200, -200), (200, 200), &flat_height, &home());
         assert!(!all.is_empty(), "no trees anywhere in a 400-block square");
 
         // Every tree found by a small window is in the big list, and every
         // big-list tree overlapping the window is found by it.
-        let window = trees_overlapping(7, (0, 0), (15, 15), &flat_height);
+        let window = trees_overlapping(7, (0, 0), (15, 15), &flat_height, &home());
         for tree in &window {
             assert!(all.contains(tree));
             assert!(
@@ -183,7 +190,7 @@ mod tests {
         }
 
         assert_eq!(
-            trees_overlapping(7, (0, 0), (15, 15), &flat_height),
+            trees_overlapping(7, (0, 0), (15, 15), &flat_height, &home()),
             window,
             "same seed, same window, different forest"
         );
@@ -191,23 +198,23 @@ mod tests {
 
     #[test]
     fn no_tree_grows_in_town_or_on_the_beach() {
-        let in_town = trees_overlapping(
-            7,
-            (-village::CORE_HALF, -village::CORE_HALF),
-            (village::CORE_HALF, village::CORE_HALF),
-            &flat_height,
-        );
+        let sites = home();
+        let half = town::HOME_CORE_HALF;
+        let in_town = trees_overlapping(7, (-half, -half), (half, half), &flat_height, &sites);
         for tree in in_town {
             assert!(
-                !village::footprint_contains(tree.base.x, tree.base.z),
+                !town::footprint_contains(&sites, tree.base.x, tree.base.z),
                 "a tree took root on main street: {tree:?}"
             );
         }
 
-        let on_beach = trees_overlapping(7, (300, 300), (500, 500), &|_, _| SEA_LEVEL);
+        let on_beach = trees_overlapping(7, (300, 300), (500, 500), &|_, _| SEA_LEVEL, &sites);
         assert!(on_beach.is_empty(), "trees growing on the sea floor");
 
-        assert!(!tuft_at(7, 0, 0, village::GROUND_Y), "a tuft on the plaza");
+        assert!(
+            !tuft_at(7, 0, 0, town::HOME_GROUND_Y, &sites),
+            "a tuft on the plaza"
+        );
     }
 
     #[test]
@@ -254,7 +261,7 @@ mod tests {
         for x in 100..228 {
             for z in 100..228 {
                 columns += 1;
-                if tuft_at(7, x, z, 80) {
+                if tuft_at(7, x, z, 80, &home()) {
                     tufts += 1;
                 }
             }
