@@ -160,6 +160,50 @@ impl Rig {
         }
     }
 
+    /// The player, seen from behind in third person.
+    ///
+    /// Deliberately not a villager: same build, but a hi-vis work jacket, a
+    /// hard hat, and the boring drill slung at the hip, so at a glance you
+    /// can tell yourself from the townsfolk in a crowd.
+    pub fn player() -> Self {
+        let leg = 0.64;
+        let torso_h = 0.56;
+        let torso_top = leg + torso_h;
+        Rig {
+            parts: vec![
+                // Legs.
+                Part::fixed(Vec3::new(0.0, leg * 0.5, 0.10), Vec3::new(0.16, leg, 0.14), slot::TREAD),
+                Part::fixed(Vec3::new(0.0, leg * 0.5, -0.10), Vec3::new(0.16, leg, 0.14), slot::TREAD),
+                // Hi-vis torso.
+                Part::fixed(
+                    Vec3::new(0.0, leg + torso_h * 0.5, 0.0),
+                    Vec3::new(0.26, torso_h, 0.42),
+                    slot::HULL,
+                ),
+                // Arms.
+                Part::fixed(
+                    Vec3::new(0.0, leg + torso_h * 0.55, 0.27),
+                    Vec3::new(0.12, torso_h * 0.9, 0.11),
+                    slot::HULL,
+                ),
+                Part::fixed(
+                    Vec3::new(0.0, leg + torso_h * 0.55, -0.27),
+                    Vec3::new(0.12, torso_h * 0.9, 0.11),
+                    slot::HULL,
+                ),
+                // Head, then the hard hat on top of it.
+                Part::fixed(Vec3::new(0.0, torso_top + 0.14, 0.0), Vec3::new(0.24, 0.26, 0.24), slot::SKIN),
+                Part::fixed(Vec3::new(0.0, torso_top + 0.30, 0.0), Vec3::new(0.30, 0.10, 0.30), slot::HULL),
+                // The drill on the hip, so the silhouette says "miner".
+                Part::fixed(
+                    Vec3::new(0.10, leg + 0.06, 0.26),
+                    Vec3::new(0.30, 0.13, 0.12),
+                    slot::STEEL,
+                ),
+            ],
+        }
+    }
+
     /// The player's handheld compact boring drill, sized for the viewmodel.
     pub fn hand_drill() -> Self {
         Rig {
@@ -232,6 +276,10 @@ mod tests {
 
         assert_eq!(Rig::hand_drill().parts.len(), 4);
 
+        let player = Rig::player();
+        assert_eq!(player.parts.len(), 8);
+        assert!(player.parts.iter().all(|part| part.spin.is_none()), "the player does not spin");
+
         for variant in 0..3 {
             let villager = Rig::villager(variant);
             assert_eq!(villager.parts.len(), 6);
@@ -267,7 +315,14 @@ mod tests {
     fn every_part_sits_above_the_ground_point() {
         // position.y is the ground under the rig; nothing may dip below it,
         // or machines look buried in flat terrain.
-        for rig in [Rig::digger(), Rig::flier(), Rig::villager(0), Rig::villager(1), Rig::villager(2)] {
+        for rig in [
+            Rig::digger(),
+            Rig::flier(),
+            Rig::player(),
+            Rig::villager(0),
+            Rig::villager(1),
+            Rig::villager(2),
+        ] {
             for object in rig.objects(Vec3::new(0.0, 50.0, 0.0), 0.7, 0.3) {
                 assert!(
                     object.bounds_min.y >= 50.0 - 0.02,

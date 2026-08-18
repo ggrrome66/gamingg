@@ -8,7 +8,9 @@
 //!   display, so it works over SSH, in CI, and against a software Vulkan
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
+mod awareness;
 mod controller;
+mod device;
 mod hud;
 mod map;
 mod mining;
@@ -16,6 +18,7 @@ mod rig;
 mod shop;
 mod skills;
 mod streaming;
+mod view;
 mod villagers;
 mod wallet;
 
@@ -26,6 +29,7 @@ use controller::{FlyController, MovementMode, WalkController};
 use map::MapState;
 use rig::Rig;
 use skills::Skills;
+use view::ViewMode;
 use villagers::Villagers;
 use wallet::Wallet;
 
@@ -33,6 +37,8 @@ use wallet::Wallet;
 const MAP_SLOT: usize = 0;
 const HUD_SLOT: usize = 1;
 const SHOP_SLOT: usize = 2;
+const DEVICE_SLOT: usize = 3;
+const FEED_SLOT: usize = 4;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -69,6 +75,10 @@ struct Options {
     close: bool,
     /// Draw the supply shop panel open over the capture, stocked for show.
     shop: bool,
+    /// Frame the capture over the player's shoulder, body in shot.
+    third_person: bool,
+    /// Draw the handheld's fleet roster over the capture.
+    device: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -91,6 +101,8 @@ fn parse_args() -> Result<Options, String> {
         ticks: 20_000,
         close: false,
         shop: false,
+        third_person: false,
+        device: false,
     };
 
     let mut args = std::env::args().skip(1);
@@ -134,6 +146,8 @@ fn parse_args() -> Result<Options, String> {
             }
             "--close" => options.close = true,
             "--shop" => options.shop = true,
+            "--third-person" => options.third_person = true,
+            "--device" => options.device = true,
             "--ticks" => {
                 options.ticks = value()?
                     .parse()
@@ -161,6 +175,8 @@ fn parse_args() -> Result<Options, String> {
                                          (auto, adit, decline or pit)\n  \
                      --close             frame the first drone up close (with --dig)\n  \
                      --shop              draw the supply shop panel over the capture\n  \
+                     --third-person      frame over the player's shoulder, body in shot\n  \
+                     --device            draw the handheld fleet roster over the capture\n  \
                      --ticks <n>         drone ticks to run when digging\n  \
                      --width <n>         window or image width\n  \
                      --height <n>        window or image height"
@@ -411,6 +427,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             drilling: Some(0.64),
             level_up: None,
             greeting: None,
+            reconnecting: false,
         });
         renderer.set_overlay(
             HUD_SLOT,
@@ -479,11 +496,86 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // The townsfolk, some way into their stroll, so a village capture
         // shows a town with life in it rather than an empty film set.
         let mut town = Villagers::new();
+        // Nobody about to notice in a still capture, so the town simply
+        // strolls: `Surroundings::empty()` is "clear air, and alone".
+        let alone = awareness::Surroundings::empty();
         for _ in 0..900 {
-            town.update(1.0 / 60.0);
+            town.update(1.0 / 60.0, &alone);
         }
         let rigs = Villagers::rigs();
         renderer.set_objects(&context.device, &context.queue, &town.objects(&rigs));
+    }
+
+    if options.third_person {
+        // Step the camera back over the shoulder and put a body in the shot,
+        // exactly as the live view does it.
+        let pivot = camera.position;
+        let placed = view::camera_placement(&world, &camera, pivot, view::ViewMode::ThirdPerson);
+        let body = pivot - glam::Vec3::Y * 1.62;
+        let forward = camera.forward();
+        let yaw = rig::yaw_towards(forward.x, forward.z).unwrap_or(0.0);
+        let mut objects = Rig::player().objects(body, yaw, 0.0);
+        // Keep the townsfolk that the village capture already drew.
+        let mut town = Villagers::new();
+        let alone = awareness::Surroundings::empty();
+        for _ in 0..900 {
+            town.update(1.0 / 60.0, &alone);
+        }
+        objects.extend(town.objects(&Villagers::rigs()));
+        camera.position = placed;
+        renderer.update_camera(&context.queue, &camera);
+        renderer.set_objects(&context.device, &context.queue, &objects);
+    }
+
+    if options.device {
+        // The handheld's roster, over whatever the frame already shows.
+        let mut mining = Mining::default();
+        let ground = world.surface_y(options.at.0, options.at.1).unwrap_or(80);
+        mining.ensure_flier(glam::Vec3::new(
+            options.at.0 as f32,
+            ground as f32,
+            options.at.1 as f32,
+        ));
+        let mut handheld = device::Device::new();
+        handheld.open_list();
+        handheld.feedback = Some("CONTROL TAKEN".into());
+        let roster = mining.roster(camera.position);
+        let pixels = device::render_device(&handheld, &roster);
+        let panel_width = device::DEVICE_WIDTH as f32 * device::DEVICE_SCALE;
+        let panel_height = device::DEVICE_HEIGHT as f32 * device::DEVICE_SCALE;
+        renderer.set_overlay(
+            DEVICE_SLOT,
+            &context.device,
+            &context.queue,
+            (device::DEVICE_WIDTH, device::DEVICE_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+
+        // And the banner that rides a live feed.
+        if let Some(listing) = roster.first() {
+            let banner = device::render_feed_banner(listing, true, 0.72);
+            let banner_width = device::BANNER_WIDTH as f32 * device::BANNER_SCALE;
+            let banner_height = device::BANNER_HEIGHT as f32 * device::BANNER_SCALE;
+            renderer.set_overlay(
+                FEED_SLOT,
+                &context.device,
+                &context.queue,
+                (device::BANNER_WIDTH, device::BANNER_HEIGHT),
+                &banner,
+                vx_render::OverlayRect {
+                    x: (width as f32 - banner_width) / 2.0,
+                    y: 12.0,
+                    width: banner_width,
+                    height: banner_height,
+                },
+            );
+        }
     }
 
     if options.shop {
@@ -602,6 +694,17 @@ struct Active {
     digging: Option<(vx_core::BlockPos, f32)>,
     /// A recent level-up, shown on the HUD for a moment.
     level_up: Option<(String, u32, Instant)>,
+    /// Whose eyes the player is looking through.
+    view: ViewMode,
+    /// The handheld, and whatever feed it has open.
+    device: device::Device,
+    /// The player's own look, parked while they stare at the handheld.
+    body_yaw: f32,
+    body_pitch: f32,
+    /// True between hanging up and the player's own ground arriving back.
+    resuming: bool,
+    /// The player's own body, drawn in third person.
+    player_rig: Rig,
     /// The handheld drill's shape, built once.
     hand_rig: Rig,
     /// The viewmodel drill's accumulated rotation.
@@ -690,7 +793,15 @@ impl App {
 
         // Trading suspends walking and drilling: the shop owns the input
         // while it is open, and drifting away mid-deal would be silly.
-        let trading = active.shop.open;
+        // The body stands still whenever the player's attention is elsewhere:
+        // haggling at a counter, or staring at a handheld. For the feed that
+        // is also the fiction — you are standing there looking at a screen.
+        let feed = active.device.feed();
+        let busy = active.shop.open || active.device.open || feed.is_some();
+        if busy || active.resuming {
+            active.player.velocity = glam::Vec3::ZERO;
+        }
+        let trading = busy;
 
         match active.mode {
             MovementMode::Fly if trading => {}
@@ -705,6 +816,9 @@ impl App {
                 active.player.velocity = glam::Vec3::ZERO;
                 active.player.on_ground = false;
             }
+            // Just back from a feed: the ground under the body may still be
+            // streaming in. Stepping physics now drops it through the world.
+            MovementMode::Walk if active.resuming => {}
             MovementMode::Walk => {
                 self.walk.apply(
                     &mut active.camera,
@@ -716,6 +830,43 @@ impl App {
             }
         }
 
+        // One owner for where the camera physically sits. The controllers set
+        // orientation (and, walking, the body); this decides first person
+        // against over-the-shoulder, and pulls in past anything solid.
+        let pivot = match active.mode {
+            MovementMode::Fly => active.camera.position,
+            MovementMode::Walk => active.player.eye_position(),
+        };
+        active.camera.position =
+            view::camera_placement(&active.world, &active.camera, pivot, active.view);
+
+        // A live feed steers the machine and rides its camera. Mouse-look
+        // belongs entirely to the drone while it is up; the body's own view is
+        // parked and handed back on hang-up.
+        if let Some(machine) = feed {
+            controller::apply_mouse_look(&mut active.camera, &mut self.input, self.walk.sensitivity);
+            // The simulation is the authority on who has the wheel: the
+            // handheld can ask, but only `Mining` grants it.
+            let command = if active.mining.piloted() == Some(machine) {
+                Self::pilot_command(&active.camera, &self.input, self.drill_held)
+            } else {
+                vx_agent::PilotCommand::default()
+            };
+            active.mining.set_pilot_command(command);
+            active.mining.set_pilot_look(active.camera.yaw);
+            if let Some(eye) = active.mining.machine_eye(machine) {
+                active.camera.position = eye;
+            }
+        }
+
+
+        // Once the body's own ground is back, gravity may have it again.
+        if active.resuming && self.body_chunk_ready() {
+            if let Some(active) = &mut self.active {
+                active.resuming = false;
+            }
+        }
+
         // The player's drill runs before streaming too, for the same reason
         // the drones dig first: edits land in this frame's remesh.
         if !trading {
@@ -723,9 +874,37 @@ impl App {
         }
         let Some(active) = &mut self.active else { return };
 
-        // The townsfolk take their stroll, and one of them may say hello.
-        active.villagers.update(dt);
-        if let Some(line) = active.villagers.greeting_for(active.player.position) {
+        // The townsfolk take their stroll, notice what is about, and one of
+        // them may say hello. Machines count as things worth watching, so a
+        // villager will turn to follow a drone trundling past.
+        let machines: Vec<(awareness::TargetKind, glam::Vec3)> = active
+            .mining
+            .drone_positions()
+            .into_iter()
+            .map(|at| {
+                (
+                    awareness::TargetKind::Digger,
+                    glam::Vec3::new(at.x as f32 + 0.5, at.y as f32, at.z as f32 + 0.5),
+                )
+            })
+            .chain(active.mining.fleet.fliers.iter().map(|flier| {
+                (
+                    awareness::TargetKind::Flier,
+                    glam::Vec3::new(
+                        flier.position.x as f32 + 0.5,
+                        flier.position.y as f32,
+                        flier.position.z as f32 + 0.5,
+                    ),
+                )
+            }))
+            .collect();
+        let around = awareness::Surroundings {
+            world: Some(&active.world),
+            player: Some(active.player.position),
+            machines: &machines,
+        };
+        active.villagers.update(dt, &around);
+        if let Some(line) = active.villagers.greeting_for() {
             active.greeting = Some((line.to_string(), Instant::now()));
         }
 
@@ -772,7 +951,9 @@ impl App {
             ),
         );
 
-        // Keep chunks in step with where the camera is.
+        // Keep chunks in step with where the camera is — which, on a feed, is
+        // the machine. That is what lets you drive a drone across the map and
+        // actually see where it goes.
         let centre = chunk_at(active.camera.position);
         active.streamer.update(
             &mut active.world,
@@ -784,7 +965,12 @@ impl App {
 
         // Ground near the player is explored by being there; swept sectors
         // are explored from the air — half the reason to send the flier.
-        active.map.explore_around(centre, 8);
+        // Exploration is earned by being somewhere yourself. A drone's camera
+        // is not the player, and painting the map by remote would take the
+        // scouting job away from the flier, whose swept sectors still count.
+        if feed.is_none() {
+            active.map.explore_around(centre, 8);
+        }
         for sector in active.mining.fleet.surveyed_sectors().collect::<Vec<_>>() {
             for chunk in map::sector_chunks(sector) {
                 active.map.explore(chunk);
@@ -816,18 +1002,31 @@ impl App {
             + camera_right * 0.42
             + glam::Vec3::Y * (-0.38 + bob);
         let drill_yaw = rig::yaw_towards(camera_forward.x, camera_forward.z).unwrap_or(0.0);
-        objects.extend(active.hand_rig.objects_pitched(
-            drill_position,
-            drill_yaw,
-            active.camera.pitch,
-            active.drill_spin,
-        ));
+        if active.view.draws_viewmodel() {
+            objects.extend(active.hand_rig.objects_pitched(
+                drill_position,
+                drill_yaw,
+                active.camera.pitch,
+                active.drill_spin,
+            ));
+        }
+
+        // Your own body, once you can actually see it.
+        if active.view.draws_body() {
+            objects.extend(active.player_rig.objects(
+                active.player.position,
+                drill_yaw,
+                0.0,
+            ));
+        }
 
         active
             .renderer
             .set_objects(&active.context.device, &active.context.queue, &objects);
         self.refresh_hud();
         self.refresh_shop();
+        self.refresh_device();
+        self.refresh_feed();
         let Some(active) = &mut self.active else { return };
 
         use wgpu::CurrentSurfaceTexture as Acquired;
@@ -1011,6 +1210,56 @@ impl App {
 
     /// React to a key going down, ignoring auto-repeat.
     fn handle_press(&mut self, code: KeyCode) {
+        // The handheld, while open, owns the keyboard the same way the shop
+        // does: Enter must open a feed, never start a dig.
+        if self.active.as_ref().is_some_and(|active| active.device.open) {
+            let (roster_len, selected) = {
+                let Some(active) = &self.active else { return };
+                let from = active.player.eye_position();
+                let roster = active.mining.roster(from);
+                (roster.len(), active.device.selected(&roster))
+            };
+            match code {
+                KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                    let Some(active) = &mut self.active else { return };
+                    let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
+                    active.device.move_cursor(delta, roster_len);
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => {
+                    if let Some(machine) = selected {
+                        self.open_feed(machine);
+                    }
+                }
+                KeyCode::KeyR => {
+                    if let Some(machine) = selected {
+                        self.open_feed(machine);
+                        self.take_or_release_control();
+                    }
+                }
+                KeyCode::KeyV | KeyCode::Escape => {
+                    let Some(active) = &mut self.active else { return };
+                    active.device.close();
+                    active.renderer.clear_overlay(DEVICE_SLOT);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // A live feed: the sticks belong to the machine.
+        if self.active.as_ref().is_some_and(|active| active.device.feed().is_some()) {
+            match code {
+                KeyCode::KeyR => self.take_or_release_control(),
+                KeyCode::Escape => self.close_feed(),
+                KeyCode::KeyV => {
+                    let Some(active) = &mut self.active else { return };
+                    active.device.open_list();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // The shop, while open, owns the keyboard: Enter must trade, never
         // fall through to `start_mining`.
         if self.active.as_ref().is_some_and(|active| active.shop.open) {
@@ -1055,6 +1304,17 @@ impl App {
                     // camera was, so clear any stale fall speed.
                     active.player.velocity = glam::Vec3::ZERO;
                     log::info!("movement mode: {:?}", active.mode);
+                }
+            }
+            KeyCode::KeyV => {
+                if let Some(active) = &mut self.active {
+                    active.device.open_list();
+                }
+            }
+            KeyCode::KeyC => {
+                if let Some(active) = &mut self.active {
+                    active.view = active.view.cycled();
+                    log::info!("view: {:?}", active.view);
                 }
             }
             KeyCode::F5 => self.save_world(),
@@ -1180,6 +1440,164 @@ impl App {
         }
     }
 
+    /// Turn this frame's held keys into one tick of pilot intent.
+    ///
+    /// Movement is camera-relative, exactly like walking: forward is where the
+    /// machine is looking, strafe is that rotated a quarter turn. The result
+    /// is a cardinal, because the simulation underneath moves in whole cells.
+    fn pilot_command(
+        camera: &Camera,
+        input: &InputState,
+        cutting: bool,
+    ) -> vx_agent::PilotCommand {
+        use vx_agent::Heading;
+
+        let axes = input.movement_axes();
+        let forward = camera.forward_level();
+        let looking = Heading::from_look(forward.x, forward.z);
+
+        // Forward wins over strafe when both are held: one cardinal per tick,
+        // and picking the one the player is facing is the least surprising.
+        let heading = if axes.z.abs() > 0.1 {
+            looking.map(|heading| if axes.z > 0.0 { heading } else { heading.rotated(2) })
+        } else if axes.x.abs() > 0.1 {
+            looking.map(|heading| heading.rotated(if axes.x > 0.0 { -1 } else { 1 }))
+        } else {
+            None
+        };
+
+        vx_agent::PilotCommand {
+            heading,
+            cut: cutting,
+            climb: if axes.y > 0.1 {
+                1
+            } else if axes.y < -0.1 {
+                -1
+            } else {
+                0
+            },
+        }
+    }
+
+    /// Has the ground under the player's own feet arrived back?
+    ///
+    /// Piloting a machine far away re-centres streaming on it, which unloads
+    /// the player's own chunks. Stepping physics before they come back drops
+    /// the body through a world that is not there yet.
+    fn body_chunk_ready(&self) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active.world.is_loaded(chunk_at(active.player.position))
+        })
+    }
+
+    /// Master override: take the wheel of whatever is being watched, or give
+    /// it back. Keeps the handheld's idea of control and the simulation's in
+    /// step by doing both in one place.
+    fn take_or_release_control(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let Some((machine, taking)) = active.device.toggle_control() else {
+            return;
+        };
+        if taking {
+            if active.mining.take_control(machine) {
+                active.device.feedback = Some("CONTROL TAKEN".into());
+                log::info!("took control of {machine:?}");
+            } else {
+                // The simulation refused; do not leave the handheld claiming
+                // a wheel it does not have.
+                active.device.toggle_control();
+                active.device.feedback = Some("CONTROL REFUSED".into());
+            }
+        } else {
+            active.mining.release_control();
+            active.device.feedback = Some("CONTROL RELEASED".into());
+            log::info!("handed {machine:?} back");
+        }
+    }
+
+    /// Take a machine's feed, parking the player's own view.
+    fn open_feed(&mut self, machine: mining::MachineRef) {
+        let Some(active) = &mut self.active else { return };
+        if active.device.feed().is_none() {
+            active.body_yaw = active.camera.yaw;
+            active.body_pitch = active.camera.pitch;
+        }
+        active.device.view(machine);
+        active.view = ViewMode::Fpv;
+    }
+
+    /// Hang up: hand any driven machine back and return to the body.
+    fn close_feed(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if active.device.feed().is_none() {
+            return;
+        }
+        if active.device.hand_back().is_some() {
+            active.mining.release_control();
+        }
+        active.camera.yaw = active.body_yaw;
+        active.camera.pitch = active.body_pitch;
+        active.view = ViewMode::FirstPerson;
+        // The body's own ground may have streamed out while we were away.
+        active.resuming = true;
+        active.renderer.clear_overlay(FEED_SLOT);
+        active.renderer.clear_overlay(DEVICE_SLOT);
+    }
+
+    /// Rebuild and upload the handheld panel while it is open.
+    fn refresh_device(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.device.open {
+            return;
+        }
+        let from = active.player.eye_position();
+        let roster = active.mining.roster(from);
+        let pixels = device::render_device(&active.device, &roster);
+        let (width, height) = active.renderer.size();
+        let panel_width = device::DEVICE_WIDTH as f32 * device::DEVICE_SCALE;
+        let panel_height = device::DEVICE_HEIGHT as f32 * device::DEVICE_SCALE;
+        active.renderer.set_overlay(
+            DEVICE_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (device::DEVICE_WIDTH, device::DEVICE_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
+    /// Rebuild and upload the banner sitting over a live feed.
+    fn refresh_feed(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let Some(machine) = active.device.feed() else { return };
+        let from = active.player.eye_position();
+        let Some(listing) = active.mining.listing(machine, from) else { return };
+        let strength = device::signal(listing.distance);
+        let piloting = active.device.is_piloting();
+        let pixels = device::render_feed_banner(&listing, piloting, strength);
+        let (width, _) = active.renderer.size();
+        let panel_width = device::BANNER_WIDTH as f32 * device::BANNER_SCALE;
+        let panel_height = device::BANNER_HEIGHT as f32 * device::BANNER_SCALE;
+        active.renderer.set_overlay(
+            FEED_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (device::BANNER_WIDTH, device::BANNER_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: 12.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     /// Rebuild and upload the shop panel while it is open. Closing clears the
     /// slot in the key handler, so an unset slot keeps frames byte-identical.
     fn refresh_shop(&mut self) {
@@ -1225,6 +1643,7 @@ impl App {
         });
         let content = hud::HudContent {
             skills: &active.skills,
+            reconnecting: active.resuming,
             status: active.mining.status(),
             drilling: active.digging.map(|(_, progress)| progress),
             level_up,
@@ -1258,10 +1677,30 @@ impl App {
             return;
         }
 
-        let camera = active.camera.position;
-        let centre = (camera.x.floor() as i32, camera.z.floor() as i32);
+        // On a feed the map follows the machine — it is what you are looking
+        // through — and the parked body becomes a marker so you can see how
+        // far you have sent it.
+        let feed_at = active
+            .device
+            .feed()
+            .and_then(|machine| active.mining.machine_position(machine));
+        let centre = match feed_at {
+            Some(at) => (at.x, at.z),
+            None => {
+                let camera = active.camera.position;
+                (camera.x.floor() as i32, camera.z.floor() as i32)
+            }
+        };
 
         let mut markers = Vec::new();
+        if feed_at.is_some() {
+            markers.push(map::Marker {
+                x: active.player.position.x.floor() as i32,
+                z: active.player.position.z.floor() as i32,
+                colour: map::colour::PLAYER,
+                radius: 2,
+            });
+        }
         if let Some(base) = &active.mining.fleet.base {
             markers.push(map::Marker {
                 x: base.position.x,
@@ -1497,6 +1936,12 @@ impl ApplicationHandler for App {
             skills,
             digging: None,
             level_up: None,
+            view: ViewMode::default(),
+            device: device::Device::new(),
+            body_yaw: 0.0,
+            body_pitch: 0.0,
+            resuming: false,
+            player_rig: Rig::player(),
             hand_rig: Rig::hand_drill(),
             drill_spin: 0.0,
             villagers: Villagers::new(),

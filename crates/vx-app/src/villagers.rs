@@ -15,6 +15,8 @@ use glam::Vec3;
 use vx_render::Object;
 use vx_world::village;
 
+use crate::awareness::{self, Perception, Sighting, Surroundings, TargetKind};
+
 use crate::rig::{self, Rig};
 
 /// Metres from the player at which a villager speaks.
@@ -71,6 +73,10 @@ struct Villager {
     pause: f32,
     /// Whether the current player approach has been greeted.
     greeted: bool,
+    /// What this villager can see and remembers.
+    perception: Perception,
+    /// Seconds left standing and watching rather than strolling.
+    attention: f32,
 }
 
 impl Villager {
@@ -87,6 +93,8 @@ impl Villager {
             waypoint: waypoint_in(index, 1, patch),
             pause: 0.0,
             greeted: false,
+            perception: Perception::default(),
+            attention: 0.0,
         }
     }
 }
@@ -104,6 +112,9 @@ fn waypoint_in(index: usize, leg: u32, patch: Patch) -> Vec3 {
 /// Every villager in town.
 pub struct Villagers {
     folk: Vec<Villager>,
+    /// Counts `update` calls, not wall time — which is what keeps the
+    /// round-robin line-of-sight schedule deterministic.
+    tick: u64,
 }
 
 impl Default for Villagers {
@@ -115,6 +126,7 @@ impl Default for Villagers {
 impl Villagers {
     pub fn new() -> Self {
         Villagers {
+            tick: 0,
             folk: ROSTER
                 .iter()
                 .enumerate()
@@ -130,53 +142,145 @@ impl Villagers {
         (0..3).map(Rig::villager).collect()
     }
 
-    /// Advance every stroll by `dt` seconds.
-    pub fn update(&mut self, dt: f32) {
+    /// Advance every stroll by `dt` seconds, and let the town notice what is
+    /// around it.
+    ///
+    /// The stroll runs first and is untouched by what anyone sees, so the
+    /// deterministic wander stays deterministic; awareness only decides
+    /// whether a villager *stops* and which way they face.
+    pub fn update(&mut self, dt: f32, around: &Surroundings) {
         for (index, villager) in self.folk.iter_mut().enumerate() {
             villager.previous = villager.position;
-            if villager.pause > 0.0 {
+            // Standing and watching counts as standing: a villager who has
+            // stopped to look at you should not slide across the plaza.
+            if villager.attention > 0.0 {
+                villager.attention = (villager.attention - dt).max(0.0);
+            } else if villager.pause > 0.0 {
                 villager.pause = (villager.pause - dt).max(0.0);
+            } else {
+                let to = villager.waypoint - villager.position;
+                let distance = to.length();
+                let step = WALK_SPEED * dt;
+                if distance <= step {
+                    villager.position = villager.waypoint;
+                    villager.leg += 1;
+                    villager.pause = 0.8 + hash01(index, villager.leg, 0xa3) * 2.5;
+                    villager.waypoint = waypoint_in(index, villager.leg + 1, villager.patch);
+                } else {
+                    villager.position += to / distance * step;
+                }
+                let moved = villager.position - villager.previous;
+                if let Some(yaw) = rig::yaw_towards(moved.x, moved.z) {
+                    villager.yaw = yaw;
+                }
+            }
+            villager.perception.forget(dt);
+        }
+
+        self.observe(around);
+        self.react();
+        self.tick = self.tick.wrapping_add(1);
+    }
+
+    /// Re-cast line of sight for whichever villagers are due this update.
+    fn observe(&mut self, around: &Surroundings) {
+        if self.folk.is_empty() {
+            return;
+        }
+        let positions: Vec<Vec3> = self.folk.iter().map(|villager| villager.position).collect();
+
+        for index in awareness::due(self.tick, self.folk.len()) {
+            let eye = positions[index] + Vec3::Y * TargetKind::Villager.eye_height();
+
+            // Everyone worth looking at: the player, the other townsfolk, and
+            // the machines trundling past.
+            let mut targets = Vec::new();
+            if let Some(player) = around.player {
+                targets.push(Sighting {
+                    kind: TargetKind::Player,
+                    index: 0,
+                    position: player,
+                    distance: (player - positions[index]).length(),
+                });
+            }
+            for (other, at) in positions.iter().enumerate() {
+                if other == index {
+                    continue;
+                }
+                targets.push(Sighting {
+                    kind: TargetKind::Villager,
+                    index: other,
+                    position: *at,
+                    distance: (*at - positions[index]).length(),
+                });
+            }
+            for (machine, (kind, at)) in around.machines.iter().enumerate() {
+                targets.push(Sighting {
+                    kind: *kind,
+                    index: machine,
+                    position: *at,
+                    distance: (*at - positions[index]).length(),
+                });
+            }
+
+            let registry = around.world.map(|world| world.registry());
+            self.folk[index].perception.observe(
+                around.world,
+                registry,
+                eye,
+                &targets,
+                awareness::SIGHT_RANGE,
+            );
+        }
+    }
+
+    /// Turn what each villager can see into what they do about it.
+    fn react(&mut self) {
+        for villager in &mut self.folk {
+            let Some(watched) = villager.perception.watching() else {
+                continue;
+            };
+            if watched.distance > awareness::NOTICE_RANGE {
                 continue;
             }
-            let to = villager.waypoint - villager.position;
-            let distance = to.length();
-            let step = WALK_SPEED * dt;
-            if distance <= step {
-                villager.position = villager.waypoint;
-                villager.leg += 1;
-                villager.pause = 0.8 + hash01(index, villager.leg, 0xa3) * 2.5;
-                villager.waypoint = waypoint_in(index, villager.leg + 1, villager.patch);
-            } else {
-                villager.position += to / distance * step;
-            }
-            let moved = villager.position - villager.previous;
-            if let Some(yaw) = rig::yaw_towards(moved.x, moved.z) {
+            // Face whatever has their attention — including the remembered
+            // spot, which is what stops the head snapping away the instant
+            // somebody steps behind a tree.
+            let to = watched.position - villager.position;
+            if let Some(yaw) = rig::yaw_towards(to.x, to.z) {
                 villager.yaw = yaw;
+            }
+            // And stop to look, if it is close and actually in view.
+            if villager.perception.visible.is_some() && watched.distance < GREET_RANGE * 2.0 {
+                villager.attention = villager.attention.max(0.35);
             }
         }
     }
 
-    /// The line a newly greeted villager says, if the player just walked up
-    /// to one. At most one line per call; hysteresis keeps it one per
-    /// approach.
-    pub fn greeting_for(&mut self, player: Vec3) -> Option<&'static str> {
+    /// The line a villager says when the player walks up — and only when they
+    /// can actually *see* them. A wall between you and a villager should not
+    /// produce a cheery hello.
+    ///
+    /// Hysteresis unchanged in shape: a line fires inside [`GREET_RANGE`] and
+    /// re-arms only once the player is back past [`REARM_RANGE`].
+    pub fn greeting_for(&mut self) -> Option<&'static str> {
         let mut spoken = None;
         for villager in &mut self.folk {
-            let flat = Vec3::new(
-                villager.position.x - player.x,
-                0.0,
-                villager.position.z - player.z,
-            );
-            let distance = flat.length();
-            if distance > REARM_RANGE {
-                villager.greeted = false;
-            } else if distance < GREET_RANGE && !villager.greeted {
-                // Everyone this close counts as met — walking into a group
-                // gets one line, not a queue of them.
-                villager.greeted = true;
-                if spoken.is_none() {
-                    spoken = Some(villager.greeting);
+            let seen = villager.perception.sees_player();
+            let distance = seen.map(|player| player.distance);
+            match distance {
+                Some(distance) if distance < GREET_RANGE && !villager.greeted => {
+                    // Everyone who can see you counts as met — walking into a
+                    // group gets one line, not a queue of them.
+                    villager.greeted = true;
+                    if spoken.is_none() {
+                        spoken = Some(villager.greeting);
+                    }
                 }
+                // Out of view, or far enough away, re-arms the greeting.
+                None => villager.greeted = false,
+                Some(distance) if distance > REARM_RANGE => villager.greeted = false,
+                Some(_) => {}
             }
         }
         spoken
@@ -207,7 +311,7 @@ mod tests {
     fn strolls_stay_inside_their_patches_and_on_the_plateau() {
         let mut town = Villagers::new();
         for _ in 0..4000 {
-            town.update(1.0 / 60.0);
+            town.update(1.0 / 60.0, &Surroundings::empty());
         }
         for villager in &town.folk {
             let (x0, z0, x1, z1) = villager.patch;
@@ -232,10 +336,23 @@ mod tests {
         for step in 0..2000 {
             // Uneven frame times, same sequence for both.
             let dt = 1.0 / 60.0 + (step % 7) as f32 * 0.001;
-            a.update(dt);
-            b.update(dt);
+            a.update(dt, &Surroundings::empty());
+            b.update(dt, &Surroundings::empty());
         }
         assert_eq!(a.positions(), b.positions());
+    }
+
+    /// Drive the town for one update with the player standing at `player`,
+    /// long enough for the round-robin to have looked at everybody.
+    fn look_around(town: &mut Villagers, player: Vec3) {
+        let around = Surroundings {
+            world: None,
+            player: Some(player),
+            machines: &[],
+        };
+        for _ in 0..town.folk.len() {
+            town.update(0.0, &around);
+        }
     }
 
     #[test]
@@ -248,17 +365,161 @@ mod tests {
         let near = Vec3::new(villager.x + 1.0, walk_height(), villager.z);
         let far = Vec3::new(villager.x + REARM_RANGE + 2.0, walk_height(), villager.z);
 
-        let first = town.greeting_for(near);
-        assert!(first.is_some(), "no greeting on approach");
-        assert!(town.greeting_for(near).is_none(), "greeted every frame");
+        look_around(&mut town, near);
+        assert!(town.greeting_for().is_some(), "no greeting on approach");
+        look_around(&mut town, near);
+        assert!(town.greeting_for().is_none(), "greeted every frame");
 
-        // Stepping just outside greet range but inside re-arm range must NOT
-        // re-arm; going properly away must.
+        // Just outside greeting range but inside re-arm range must NOT re-arm.
         let lurking = Vec3::new(villager.x + GREET_RANGE + 0.5, walk_height(), villager.z);
-        assert!(town.greeting_for(lurking).is_none());
-        assert!(town.greeting_for(near).is_none(), "re-armed too eagerly");
-        assert!(town.greeting_for(far).is_none());
-        assert!(town.greeting_for(near).is_some(), "never re-armed");
+        look_around(&mut town, lurking);
+        assert!(town.greeting_for().is_none());
+        look_around(&mut town, near);
+        assert!(town.greeting_for().is_none(), "re-armed too eagerly");
+
+        // Properly away, then back: a fresh approach, a fresh hello.
+        look_around(&mut town, far);
+        assert!(town.greeting_for().is_none());
+        look_around(&mut town, near);
+        assert!(town.greeting_for().is_some(), "never re-armed");
+    }
+
+    #[test]
+    fn a_villager_turns_to_face_a_player_they_can_see() {
+        let mut town = Villagers::new();
+        let at = town.folk[0].position;
+        // Stand due +x of them.
+        let player = Vec3::new(at.x + 2.0, walk_height(), at.z);
+        look_around(&mut town, player);
+
+        let facing = town.folk[0].yaw;
+        let nose = glam::Mat4::from_rotation_y(facing).transform_vector3(Vec3::X);
+        assert!(
+            nose.x > 0.9,
+            "villager faced {nose:?} instead of toward the player"
+        );
+    }
+
+    #[test]
+    fn a_villager_behind_a_wall_neither_turns_nor_greets() {
+        // Real terrain with a wall dropped between the two.
+        let mut world = vx_world::World::new(2024);
+        world.load_around(vx_core::ChunkPos::new(0, 0), 1);
+        let stone = world.registry().id_of("engine:stone").unwrap();
+
+        let mut town = Villagers::new();
+        town.folk[1].position.x += 1000.0;
+        town.folk[2].position.x -= 1000.0;
+        let at = town.folk[0].position;
+        town.folk[0].yaw = 0.0;
+        let player = Vec3::new(at.x + 2.5, at.y, at.z);
+
+        let ground = at.y as i32;
+        for dy in 0..4 {
+            for dz in -3..=3 {
+                world.set_block(
+                    vx_core::BlockPos::new(at.x as i32 + 1, ground + dy, at.z as i32 + dz),
+                    stone,
+                );
+            }
+        }
+
+        let around = Surroundings {
+            world: Some(&world),
+            player: Some(player),
+            machines: &[],
+        };
+        for _ in 0..town.folk.len() {
+            town.update(0.0, &around);
+        }
+
+        assert!(town.greeting_for().is_none(), "greeted through a wall");
+        assert_eq!(town.folk[0].yaw, 0.0, "turned to face somebody they cannot see");
+    }
+
+    #[test]
+    fn a_watched_villager_pauses_their_stroll_and_resumes_after() {
+        let mut town = Villagers::new();
+        town.folk[1].position.x += 1000.0;
+        town.folk[2].position.x -= 1000.0;
+        // Clear any starting pause so movement is the only variable.
+        town.folk[0].pause = 0.0;
+        let at = town.folk[0].position;
+        let player = Vec3::new(at.x + 1.5, walk_height(), at.z);
+
+        let around = Surroundings {
+            world: None,
+            player: Some(player),
+            machines: &[],
+        };
+        for _ in 0..3 {
+            town.update(1.0 / 60.0, &around);
+        }
+        let watching_from = town.folk[0].position;
+        for _ in 0..10 {
+            town.update(1.0 / 60.0, &around);
+        }
+        assert_eq!(
+            town.folk[0].position, watching_from,
+            "kept strolling while being watched"
+        );
+
+        // Player leaves: the stroll picks back up.
+        let alone = Surroundings::empty();
+        for _ in 0..120 {
+            town.update(1.0 / 60.0, &alone);
+        }
+        assert_ne!(
+            town.folk[0].position, watching_from,
+            "never resumed the stroll"
+        );
+    }
+
+    #[test]
+    fn a_villager_notices_a_passing_drone() {
+        let mut town = Villagers::new();
+        let at = town.folk[0].position;
+        let drone = Vec3::new(at.x + 3.0, at.y, at.z);
+        let machines = [(TargetKind::Digger, drone)];
+        let around = Surroundings {
+            world: None,
+            player: None,
+            machines: &machines,
+        };
+        for _ in 0..town.folk.len() {
+            town.update(0.0, &around);
+        }
+
+        let watched = town.folk[0].perception.watching().expect("saw nothing at all");
+        assert_eq!(watched.kind, TargetKind::Digger);
+    }
+
+    #[test]
+    fn two_runs_over_the_same_world_and_route_stay_identical() {
+        // The stronger determinism claim: not just an empty room, but real
+        // terrain and a player walking about.
+        let mut world = vx_world::World::new(2024);
+        world.load_around(vx_core::ChunkPos::new(0, 0), 1);
+
+        let run = || {
+            let mut town = Villagers::new();
+            for step in 0..600 {
+                let dt = 1.0 / 60.0 + (step % 7) as f32 * 0.001;
+                let player = Vec3::new(
+                    (step as f32 * 0.02).sin() * 6.0,
+                    walk_height(),
+                    (step as f32 * 0.017).cos() * 6.0,
+                );
+                let around = Surroundings {
+                    world: Some(&world),
+                    player: Some(player),
+                    machines: &[],
+                };
+                town.update(dt, &around);
+            }
+            town.positions()
+        };
+        assert_eq!(run(), run());
     }
 
     #[test]

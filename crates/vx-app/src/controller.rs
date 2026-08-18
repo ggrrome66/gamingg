@@ -2,6 +2,10 @@
 //!
 //! Separated from the event loop so it can be tested without a window: the
 //! logic is a pure function of (camera, input, elapsed time).
+//!
+//! Controllers own *orientation* and, when walking, the body. They do not own
+//! where the camera sits — `view::camera_placement` decides that once per
+//! frame, which is what lets third person exist without a second controller.
 
 use glam::Vec3;
 use vx_platform::InputState;
@@ -108,8 +112,12 @@ impl Default for WalkController {
 }
 
 impl WalkController {
-    /// Advance the body by `dt` seconds of input, then move the camera to its
-    /// eyes.
+    /// Advance the body by `dt` seconds of input.
+    ///
+    /// The camera is *not* moved here: it owns orientation only, and where it
+    /// physically sits is decided afterwards by `view::camera_placement`, so
+    /// first and third person differ in exactly one place instead of being
+    /// wired through every controller.
     pub fn apply(
         &self,
         camera: &mut Camera,
@@ -137,7 +145,6 @@ impl WalkController {
         }
 
         player.step(world, wish, dt);
-        camera.position = player.eye_position();
     }
 }
 
@@ -336,9 +343,30 @@ mod tests {
         }
 
         assert!(player.position.z < start.z - 1.0, "did not walk forward");
-        // The camera rides the body's eyes, not its feet.
+        // Placement, not the controller, decides where the camera sits — and
+        // in first person that is the body's eyes, not its feet.
+        camera.position =
+            crate::view::camera_placement(&world, &camera, player.eye_position(), crate::view::ViewMode::FirstPerson);
         assert_eq!(camera.position, player.eye_position());
         assert!(camera.position.y > player.position.y);
+    }
+
+    #[test]
+    fn the_walk_controller_no_longer_writes_the_camera_position() {
+        // The whole third-person design rests on this: one owner for where
+        // the camera sits.
+        let world = walk_world();
+        let mut player = standing(&world);
+        let parked = Vec3::new(123.0, 45.0, 67.0);
+        let mut camera = Camera { position: parked, ..Camera::default() };
+        let mut input = InputState::new();
+        let controller = WalkController::default();
+
+        input.press(KeyCode::KeyW);
+        for _ in 0..30 {
+            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
+        }
+        assert_eq!(camera.position, parked, "the controller moved the camera");
     }
 
     #[test]

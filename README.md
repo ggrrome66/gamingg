@@ -17,7 +17,20 @@ art exists.
 
 ## Status
 
-M3 stage 6 is in. Every world now starts in the **same village**: an authored
+M3 stage 7 is in. Press `C` and the camera swings over your shoulder — there
+is a body there now, hi-vis jacket and hard hat, and the camera slides in
+close rather than through the rock when you back into a wall. Press `V` and
+the handheld lists the fleet: pick a machine, look through its eyes while it
+carries on working, or take the master override and drive it yourself, cutter
+and all. Its mining job goes back on the board while you have the wheel and it
+picks the work up again when you hand it back. The world streams around
+whichever eyes you are using, so you can drive a drone clear across the map
+and watch the whole trip. And the townsfolk can see you now — properly see
+you, with the rock in between counting — so they turn to watch, stop their
+strolling, greet only someone actually in view, and keep looking where you
+*were* for a few seconds after you slip out of sight.
+
+Before that, stage 6: Every world now starts in the **same village**: an authored
 town at the origin, identical whatever the seed — plaza, paths, three houses
 and a supply shop — blended into whatever terrain the seed grew around it.
 Villagers stroll the plaza on deterministic rounds and greet you when you
@@ -51,12 +64,12 @@ build in it, and it survives quitting — skills included.
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
-| `vx-world` | Chunk storage, worldgen, ore, village, flora, raycast, physics, editing, saves | Done |
+| `vx-world` | Chunk storage, worldgen, ore, village, flora, raycast, line of sight, physics, editing, saves | Done |
 | `vx-mesh` | Greedy meshing + crossed-quad plants | Done |
 | `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
-| `vx-app` | Window, walk/fly controls, streaming, HUD, rigs, skills, villagers, shop, wallet, `gamingg` binary | Done |
-| `vx-agent` | Job board, flow fields, mine planning, scanner, flier + fleet | Done |
+| `vx-app` | Window, walk/fly/third-person camera, streaming, HUD, rigs, skills, villagers, awareness, shop, wallet, handheld, `gamingg` binary | Done |
+| `vx-agent` | Job board, flow fields, mine planning, scanner, flier + fleet, manual piloting | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
 
@@ -75,7 +88,15 @@ build in it, and it survives quitting — skills included.
   repeating pattern. Real art or per-block texture variation fixes it.
 - Rig parts are lit like everything else but cast no shadows and have no
   animation beyond spin and yaw — no suspension, no articulation. Villagers
-  glide rather than walk: no leg animation yet.
+  and the third-person player glide rather than walk: no leg animation yet.
+- The third-person body is a static pose that yaws with the camera, and the
+  camera does not swing round to avoid it — you can stand nose-first against a
+  wall and watch your own back fill the frame.
+- One machine can be piloted at a time, by design. No squad orders, no
+  waypoint autopilot, no saved view or pilot state: quitting returns you to
+  first person with nothing driven.
+- Villager awareness is sight only — no hearing, and nothing reacts to a
+  machine cutting rock next to it beyond turning to look.
 - Villagers are not persisted — their deterministic stroll restarts each
   run. Cosmetic only, since nothing about them accumulates yet.
 - The village ignores its surroundings beyond height blending: a plateau can
@@ -102,7 +123,9 @@ build in it, and it survives quitting — skills included.
   edits and mine holes only show on it while their chunks are loaded. The
   trade is that the map stores nothing but the explored set.
 - One flier. The fleet is shaped for more; nothing exercises it.
-- No inventory, no UI, no audio, and no gamepad support.
+- No combat, health or hostiles. Piloting and NPC senses are the
+  foundation they will stand on; neither is exercised by anything yet.
+- No inventory, no audio, and no gamepad support.
 
 ## Design notes
 
@@ -199,6 +222,61 @@ pass — any RGBA image at any screen rectangle, no depth test — and headless
 captures and the culling tests never set one, so every pixel-equality
 guarantee stands byte-for-byte. The same pass is deliberately the first brick
 of the terminal screen and anything else that is a flat picture.
+
+**One owner for where the camera sits.** `Camera` has no look target — the
+view is built from position plus yaw/pitch alone — so third person needed no
+renderer change at all, only a different position chosen after movement. The
+controllers own orientation and the body; `view::camera_placement` owns
+placement, which is why first person, over-the-shoulder and a drone's feed
+differ in exactly one place instead of being threaded through every
+controller. The pull-in casts back along `-forward` and clamps to a minimum:
+a ray starting inside a solid reports distance zero, and without the floor the
+camera would collapse onto the player's own head.
+
+**A piloted machine can do nothing an autonomous one could not.** The override
+is a change of driver, not of physics. Held keys become a `PilotCommand`
+sampled once per frame and re-issued on every simulation tick, so a driven
+drone moves one cell per tick obeying the same standability and one-block-step
+rule the flow field enforces, falls when it cuts its own floor, cannot reach
+through rock, and cannot undermine anywhere the planner would refuse to. A
+piloted flier still climbs before it enters a column. Break that and "every
+route in is a route out" — the invariant every mine plan rests on — stops
+being true the moment a player touches a machine.
+
+**Jobs are shared; surveys are not.** Taking a drone *releases* its claimed job
+back to the board, so another drone can pick the work up while you joyride, and
+hand-back needs no bookkeeping at all — the drone goes idle and claims lazily
+on its next tick. A flier's survey lives only in that flier, with no board to
+hand it back to, so taking one **stashes** its state and restores it on
+hand-back instead. Releasing it the way a job is released would silently throw
+the whole sweep away.
+
+**The eye and the body come from one interpolation.** Machines move a whole
+cell per tick and are drawn gliding between ticks; the FPV camera reads the
+*same* interpolated point the rig is drawn at, lifted to eye height, so the
+view can never drift or stutter against the hull it is bolted to.
+
+**Piloting far away unloads your own ground.** Streaming follows the camera,
+which on a feed is the machine — that is what makes driving across the map
+work, and it needed no new code. The consequence needed care: `unload_beyond`
+drops the player's own chunks while they are away, so hanging up does *not*
+resume physics until `world.is_loaded` says their ground is back. Without it
+the first step after a long-range flight drops the body through a world that
+has not arrived yet. The HUD says `RECONNECTING` while it waits.
+
+**Exploration is earned by being somewhere.** Driving a drone around does not
+paint the fog-of-war map. A remote camera is not the player, and letting a
+driven digger reveal terrain would quietly take the scouting job away from the
+flier, whose swept sectors still count.
+
+**NPC memory is the feature, not an optimisation.** An observer that forgets
+the instant line of sight breaks snaps its head away the moment you step behind
+a tree. One that keeps watching where you *were* for a few seconds reads as
+somebody who saw something — and it is the shape a hostile will need to hunt
+rather than twitch. The cost control falls out of the same mechanism: one
+villager re-casts per update on a round robin keyed to an update counter (not
+wall time, so the bit-identical determinism survives), and between turns they
+face the remembered spot. Three villagers today and thirty later cost the same.
 
 **The village is a drawing, not a dice roll.** Everything about the starting
 town is a pure function of *position only* — no seed enters anywhere, which
@@ -354,6 +432,11 @@ Controls:
 | Hold left button | Run the drill — harder rock takes longer |
 | Right click | Place the selected block |
 | `1`–`5` | Choose stone, dirt, grass, sand or the base container |
+| `C` | Toggle first person and over-the-shoulder |
+| `V` | Open the handheld fleet uplink (arrows pick) |
+| `Enter` | (in the uplink) Look through the selected machine |
+| `R` | Take or release the master override of what you are watching |
+| `Escape` | (on a feed) Hang up and return to your body |
 | `E` | Trade at the shop counter (arrows pick, `Enter` trades, `E` leaves) |
 | `M` | Mark a corner of an ore body (two marks make an area) |
 | `Tab` | Cycle the proposed mining method |
@@ -396,6 +479,12 @@ cargo run --release -p vx-app -- --screenshot village.ppm --at 0,0
 
 # the same view with the supply shop panel open over it
 cargo run --release -p vx-app -- --screenshot shop.ppm --at 0,4 --shop
+
+# over the shoulder, with the player's body in shot
+cargo run --release -p vx-app -- --screenshot third.ppm --at 0,10 --third-person
+
+# the handheld's fleet roster and a live feed banner
+cargo run --release -p vx-app -- --screenshot uplink.ppm --at 0,10 --device
 ```
 
 `--dig` runs a whole excavation headlessly against generated terrain — then

@@ -51,6 +51,8 @@ pub enum DroneState {
     Hauling,
     /// Cannot reach its work and has given it back to the board.
     Stuck,
+    /// Under the player's direct control; the tick loop leaves it alone.
+    Manual,
 }
 
 /// A single ground drone.

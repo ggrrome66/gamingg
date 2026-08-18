@@ -67,6 +67,14 @@ pub struct Fleet {
     /// Prospecting level does.
     pub scan_depth: i32,
     surveys: HashMap<Sector, Survey>,
+    /// The flier the player is flying, if any.
+    controlled: Option<usize>,
+    /// What that flier was doing before the player took the stick.
+    ///
+    /// A survey lives *only* in the flier — unlike a mining job, there is no
+    /// board to hand it back to — so taking control has to stash it or the
+    /// sweep is simply lost.
+    suspended: Option<FlierState>,
 }
 
 impl Default for Fleet {
@@ -76,6 +84,8 @@ impl Default for Fleet {
             base: None,
             scan_depth: crate::prospect::SCAN_DEPTH,
             surveys: HashMap::new(),
+            controlled: None,
+            suspended: None,
         }
     }
 }
@@ -158,8 +168,56 @@ impl Fleet {
     pub fn tick(&mut self, world: &World, mines: &mut [Operation]) -> FleetReport {
         let mut report = FleetReport::default();
         for index in 0..self.fliers.len() {
+            // The player is flying this one.
+            if self.controlled == Some(index) {
+                continue;
+            }
             self.tick_flier(index, world, mines, &mut report);
         }
+        report
+    }
+
+    /// Take the stick from a flier.
+    ///
+    /// Its current task is **stashed, not discarded**: a survey exists only in
+    /// the flier's own state, so releasing it the way a mining job is released
+    /// would throw away the whole sweep. Jobs are shared; surveys are not.
+    pub fn take_control(&mut self, index: usize) -> bool {
+        if index >= self.fliers.len() || self.controlled.is_some() {
+            return false;
+        }
+        self.suspended = Some(self.fliers[index].state);
+        self.fliers[index].state = FlierState::Manual;
+        self.controlled = Some(index);
+        true
+    }
+
+    /// Hand the stick back, and the flier picks its task up where it left off.
+    pub fn release_control(&mut self, index: usize) -> bool {
+        if self.controlled != Some(index) {
+            return false;
+        }
+        self.fliers[index].state = self.suspended.take().unwrap_or(FlierState::Idle);
+        self.controlled = None;
+        true
+    }
+
+    /// Which flier the player is flying.
+    pub fn controlled(&self) -> Option<usize> {
+        self.controlled
+    }
+
+    /// Advance the piloted flier by one tick of the player's input.
+    pub fn pilot_tick(
+        &mut self,
+        world: &World,
+        command: crate::pilot::PilotCommand,
+    ) -> crate::pilot::PilotReport {
+        let mut report = crate::pilot::PilotReport::default();
+        let Some(index) = self.controlled else {
+            return report;
+        };
+        report.moved = self.fliers[index].pilot_step(world, command.heading, command.climb);
         report
     }
 
@@ -171,6 +229,8 @@ impl Fleet {
         report: &mut FleetReport,
     ) {
         match self.fliers[index].state {
+            // A piloted flier is the player's business, not the fleet's.
+            FlierState::Manual => {}
             FlierState::Idle => self.consider_ferrying(index, mines),
             FlierState::Scanning { sector, waypoint } => {
                 self.advance_scan(index, world, sector, waypoint, report)
@@ -331,6 +391,61 @@ mod tests {
                 return;
             }
         }
+    }
+
+    #[test]
+    fn taking_control_of_a_flier_suspends_its_survey_and_hand_back_resumes_it() {
+        // A survey lives only in the flier — there is no board to hand it back
+        // to — so a takeover must stash it rather than throw it away.
+        let world = flat(5, 60);
+        let mut fleet = fleet_over(&world);
+        let sector = Sector::containing(20, 20);
+        assert!(fleet.dispatch_scan(sector));
+        for _ in 0..40 {
+            fleet.tick(&world, &mut []);
+        }
+        let mid_sweep = fleet.fliers[0].state;
+        assert!(
+            matches!(mid_sweep, FlierState::Scanning { .. }),
+            "expected a sweep in progress, got {mid_sweep:?}"
+        );
+
+        assert!(fleet.take_control(0));
+        assert_eq!(fleet.controlled(), Some(0));
+        assert_eq!(fleet.fliers[0].state, FlierState::Manual);
+
+        assert!(fleet.release_control(0));
+        assert_eq!(fleet.controlled(), None);
+        assert_eq!(
+            fleet.fliers[0].state, mid_sweep,
+            "the survey was lost instead of resumed"
+        );
+
+        // And it actually finishes from there.
+        for _ in 0..20_000 {
+            fleet.tick(&world, &mut []);
+            if fleet.is_surveyed(sector) {
+                break;
+            }
+        }
+        assert!(fleet.is_surveyed(sector), "the resumed sweep never completed");
+    }
+
+    #[test]
+    fn a_controlled_flier_is_skipped_by_the_fleet_tick() {
+        let world = flat(5, 60);
+        let mut fleet = fleet_over(&world);
+        fleet.dispatch_scan(Sector::containing(20, 20));
+        fleet.take_control(0);
+        let parked = fleet.fliers[0].position;
+
+        for _ in 0..200 {
+            fleet.tick(&world, &mut []);
+        }
+        assert_eq!(
+            fleet.fliers[0].position, parked,
+            "the fleet flew a bird the player was holding"
+        );
     }
 
     #[test]

@@ -16,7 +16,10 @@
 use std::time::Duration;
 
 use glam::Vec3;
-use vx_agent::{options, DroneState, Fleet, FlierState, MineMethod, MinePlan, Operation, Sector, VoxelAabb};
+use vx_agent::{
+    options, DroneState, Fleet, FlierState, MineMethod, MinePlan, Operation, PilotCommand, Sector,
+    VoxelAabb,
+};
 use vx_core::{BlockPos, EventBus};
 use vx_agent::FleetReport;
 use vx_render::tiles::slot;
@@ -69,6 +72,39 @@ pub struct Mining {
     /// The rig shapes, built once.
     digger_rig: Rig,
     flier_rig: Rig,
+    /// The machine the player has the wheel of, if any.
+    piloted: Option<MachineRef>,
+    /// This frame's held pilot input, re-issued on every simulation tick so
+    /// driving is frame-rate independent exactly like the autonomous path.
+    pilot_command: PilotCommand,
+    /// Where the pilot is looking: a driven machine points its nose along the
+    /// player's view rather than along its last step.
+    pilot_look: f32,
+}
+
+/// One of the fleet's machines, by kind and index.
+///
+/// A thin seam rather than a shared entity abstraction: drones and fliers have
+/// almost nothing in common beyond "the player can look through it", and
+/// inventing a trait for two cases would cost more than it saves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineRef {
+    Digger(usize),
+    Flier(usize),
+}
+
+/// One row of the handheld's roster.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MachineListing {
+    pub machine: MachineRef,
+    /// "DIGGER 1", "FLIER 1".
+    pub name: String,
+    /// What it is up to, in a word.
+    pub state: String,
+    /// How far the player is from it, in blocks.
+    pub distance: f32,
+    pub cargo: u64,
+    pub capacity: u64,
 }
 
 impl Default for Mining {
@@ -86,6 +122,9 @@ impl Default for Mining {
             spin: 0.0,
             digger_rig: Rig::digger(),
             flier_rig: Rig::flier(),
+            piloted: None,
+            pilot_command: PilotCommand::default(),
+            pilot_look: 0.0,
         }
     }
 }
@@ -212,6 +251,7 @@ impl Mining {
             self.pending -= f64::from(ticks);
             self.pending = self.pending.min(1.0);
             for _ in 0..ticks {
+                self.pilot_sub_tick(world, events);
                 let tick = self.fleet.tick(world, &mut []);
                 report.delivered += tick.delivered;
                 report.sectors_completed += tick.sectors_completed;
@@ -234,11 +274,10 @@ impl Mining {
         // stays lost; the drone simply pauses with the game.
         self.pending = self.pending.min(1.0);
 
-        {
+        for _ in 0..ticks {
+            self.pilot_sub_tick(world, events);
             let operation = self.operation.as_mut().expect("checked above");
-            for _ in 0..ticks {
-                operation.tick(world, events);
-            }
+            operation.tick(world, events);
         }
         for _ in 0..ticks {
             // The air side reads the world immutably and trades with the
@@ -253,11 +292,41 @@ impl Mining {
         report
     }
 
+    /// One simulation tick of the player's held controls.
+    ///
+    /// Runs inside the same accumulator loop as the autonomous tick, so a
+    /// piloted machine covers exactly the same ground per second as one
+    /// driving itself — the override is a change of driver, not of physics.
+    fn pilot_sub_tick(&mut self, world: &mut World, events: &EventBus) {
+        match self.piloted {
+            Some(MachineRef::Digger(_)) => {
+                if let Some(operation) = &mut self.operation {
+                    operation.pilot_tick(world, events, self.pilot_command);
+                }
+            }
+            Some(MachineRef::Flier(_)) => {
+                self.fleet.pilot_tick(world, self.pilot_command);
+            }
+            None => {}
+        }
+    }
+
     /// Update remembered nose directions from this tick's movement.
     fn remember_yaws(&mut self) {
+        // A piloted machine points where the player is looking. Deriving its
+        // nose from movement instead would leave a stationary drone facing
+        // whatever direction its last step happened to take while the player
+        // spins the camera around it.
+        let piloted = self.piloted;
         if let Some(operation) = &self.operation {
             self.drone_yaws.resize(operation.drones.len(), 0.0);
-            for (yaw, drone) in self.drone_yaws.iter_mut().zip(&operation.drones) {
+            for (index, (yaw, drone)) in
+                self.drone_yaws.iter_mut().zip(&operation.drones).enumerate()
+            {
+                if piloted == Some(MachineRef::Digger(index)) {
+                    *yaw = self.pilot_look;
+                    continue;
+                }
                 let delta = drone.position;
                 let previous = drone.previous_position;
                 if let Some(new) = rig::yaw_towards(
@@ -269,7 +338,12 @@ impl Mining {
             }
         }
         self.flier_yaws.resize(self.fleet.fliers.len(), 0.0);
-        for (yaw, flier) in self.flier_yaws.iter_mut().zip(&self.fleet.fliers) {
+        for (index, (yaw, flier)) in self.flier_yaws.iter_mut().zip(&self.fleet.fliers).enumerate()
+        {
+            if piloted == Some(MachineRef::Flier(index)) {
+                *yaw = self.pilot_look;
+                continue;
+            }
             if let Some(new) = rig::yaw_towards(
                 (flier.position.x - flier.previous_position.x) as f32,
                 (flier.position.z - flier.previous_position.z) as f32,
@@ -300,6 +374,159 @@ impl Mining {
         }
     }
 
+    /// Where a machine sits *right now*, between its last tick and its next.
+    ///
+    /// The single source of truth for machine positions on screen. Both the
+    /// rigs and the FPV camera go through it, which is what stops a piloted
+    /// machine's view from drifting against its own body.
+    fn interpolated(&self, from: BlockPos, to: BlockPos) -> Vec3 {
+        let fraction = self.tick_fraction();
+        let a = Vec3::new(from.x as f32 + 0.5, from.y as f32, from.z as f32 + 0.5);
+        let b = Vec3::new(to.x as f32 + 0.5, to.y as f32, to.z as f32 + 0.5);
+        a + (b - a) * fraction
+    }
+
+    /// Eye height above a machine's ground point, per kind.
+    fn eye_height(machine: MachineRef) -> f32 {
+        match machine {
+            // Roughly the digger's cab and the flier's canopy.
+            MachineRef::Digger(_) => 0.8,
+            MachineRef::Flier(_) => 0.65,
+        }
+    }
+
+    /// Where a machine's camera sits this frame.
+    pub fn machine_eye(&self, machine: MachineRef) -> Option<Vec3> {
+        let base = match machine {
+            MachineRef::Digger(index) => {
+                let drone = self.operation.as_ref()?.drones.get(index)?;
+                self.interpolated(drone.previous_position, drone.position)
+            }
+            MachineRef::Flier(index) => {
+                let flier = self.fleet.fliers.get(index)?;
+                self.interpolated(flier.previous_position, flier.position)
+            }
+        };
+        Some(base + Vec3::Y * Self::eye_height(machine))
+    }
+
+    /// Where a machine is, in whole blocks.
+    pub fn machine_position(&self, machine: MachineRef) -> Option<BlockPos> {
+        match machine {
+            MachineRef::Digger(index) => {
+                Some(self.operation.as_ref()?.drones.get(index)?.position)
+            }
+            MachineRef::Flier(index) => Some(self.fleet.fliers.get(index)?.position),
+        }
+    }
+
+    /// The roster the handheld lists, nearest to `from` first.
+    pub fn roster(&self, from: Vec3) -> Vec<MachineListing> {
+        let mut rows = Vec::new();
+        if let Some(operation) = &self.operation {
+            for (index, drone) in operation.drones.iter().enumerate() {
+                let machine = MachineRef::Digger(index);
+                rows.push(MachineListing {
+                    machine,
+                    name: format!("DIGGER {}", index + 1),
+                    state: match drone.state {
+                        DroneState::Idle => "IDLE".into(),
+                        DroneState::Travelling(_) => "DRIVING".into(),
+                        DroneState::Digging(_) => "DIGGING".into(),
+                        DroneState::Hauling => "HAULING".into(),
+                        DroneState::Stuck => "STUCK".into(),
+                        DroneState::Manual => "PILOTED".into(),
+                    },
+                    distance: self
+                        .machine_eye(machine)
+                        .map_or(0.0, |at| (at - from).length()),
+                    cargo: drone.carrying(),
+                    capacity: drone.capacity,
+                });
+            }
+        }
+        for (index, flier) in self.fleet.fliers.iter().enumerate() {
+            let machine = MachineRef::Flier(index);
+            rows.push(MachineListing {
+                machine,
+                name: format!("FLIER {}", index + 1),
+                state: match flier.state {
+                    FlierState::Idle => "IDLE".into(),
+                    FlierState::Scanning { .. } => "SCANNING".into(),
+                    FlierState::ToPickup { .. } => "COLLECTING".into(),
+                    FlierState::ToBase => "RETURNING".into(),
+                    FlierState::Manual => "PILOTED".into(),
+                },
+                distance: self
+                    .machine_eye(machine)
+                    .map_or(0.0, |at| (at - from).length()),
+                cargo: flier.carrying(),
+                capacity: flier.capacity,
+            });
+        }
+        rows.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        rows
+    }
+
+    /// One machine's row, for the feed banner.
+    pub fn listing(&self, machine: MachineRef, from: Vec3) -> Option<MachineListing> {
+        self.roster(from)
+            .into_iter()
+            .find(|row| row.machine == machine)
+    }
+
+    /// Take the wheel. The machine's own work is suspended, not discarded.
+    pub fn take_control(&mut self, machine: MachineRef) -> bool {
+        if self.piloted.is_some() {
+            return false;
+        }
+        let taken = match machine {
+            MachineRef::Digger(index) => self
+                .operation
+                .as_mut()
+                .is_some_and(|operation| operation.take_control(index)),
+            MachineRef::Flier(index) => self.fleet.take_control(index),
+        };
+        if taken {
+            self.piloted = Some(machine);
+            self.pilot_command = PilotCommand::default();
+        }
+        taken
+    }
+
+    /// Hand the machine back to its own devices.
+    pub fn release_control(&mut self) {
+        let Some(machine) = self.piloted.take() else {
+            return;
+        };
+        match machine {
+            MachineRef::Digger(index) => {
+                if let Some(operation) = &mut self.operation {
+                    operation.release_control(index);
+                }
+            }
+            MachineRef::Flier(index) => {
+                self.fleet.release_control(index);
+            }
+        }
+        self.pilot_command = PilotCommand::default();
+    }
+
+    /// Which machine the player is driving.
+    pub fn piloted(&self) -> Option<MachineRef> {
+        self.piloted
+    }
+
+    /// This frame's held controls.
+    pub fn set_pilot_command(&mut self, command: PilotCommand) {
+        self.pilot_command = command;
+    }
+
+    /// Where the pilot is looking, for the driven machine's nose.
+    pub fn set_pilot_look(&mut self, yaw: f32) {
+        self.pilot_look = yaw;
+    }
+
     /// The cubes to draw this frame: corner markers and drones.
     pub fn objects(&self) -> Vec<Object> {
         let mut objects = Vec::new();
@@ -326,12 +553,7 @@ impl Mining {
         }
 
         // Machines are rigs, gliding between their tick positions.
-        let fraction = self.tick_fraction();
-        let lerp = |from: BlockPos, to: BlockPos| -> Vec3 {
-            let a = Vec3::new(from.x as f32 + 0.5, from.y as f32, from.z as f32 + 0.5);
-            let b = Vec3::new(to.x as f32 + 0.5, to.y as f32, to.z as f32 + 0.5);
-            a + (b - a) * fraction
-        };
+        let lerp = |from: BlockPos, to: BlockPos| -> Vec3 { self.interpolated(from, to) };
 
         if let Some(operation) = &self.operation {
             for (index, drone) in operation.drones.iter().enumerate() {
@@ -379,8 +601,17 @@ impl Mining {
     pub fn status(&self) -> Option<String> {
         // A working flier outranks the mining readout: it is the thing the
         // player just ordered.
+        if let Some(machine) = self.piloted {
+            let name = match machine {
+                MachineRef::Digger(index) => format!("DIGGER {}", index + 1),
+                MachineRef::Flier(index) => format!("FLIER {}", index + 1),
+            };
+            return Some(format!("piloting {name}"));
+        }
+
         if let Some(flier) = self.fleet.fliers.first() {
             match flier.state {
+                FlierState::Manual => {}
                 FlierState::Scanning { .. } => {
                     return Some(format!(
                         "scanning: {} pings so far",
@@ -439,6 +670,140 @@ fn area_corners(area: VoxelAabb) -> Vec<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A world with ground near the origin and a fleet with one flier.
+    fn flying_world() -> (World, Mining) {
+        let mut world = World::new(2024);
+        world.load_around(vx_core::ChunkPos::new(0, 0), 2);
+        let ground = world.surface_y(0, 0).unwrap_or(80);
+        let mut mining = Mining::default();
+        mining.ensure_flier(Vec3::new(0.5, ground as f32, 0.5));
+        (world, mining)
+    }
+
+    #[test]
+    fn the_roster_lists_every_machine_nearest_first() {
+        let (world, mut mining) = flying_world();
+        mining.fleet.add_flier(BlockPos::new(120, 100, 120));
+        let _ = &world;
+
+        let rows = mining.roster(Vec3::new(0.5, 80.0, 0.5));
+        assert_eq!(rows.len(), 2, "both fliers should be listed");
+        assert!(
+            rows[0].distance <= rows[1].distance,
+            "roster is not nearest first: {:?}",
+            rows.iter().map(|row| row.distance).collect::<Vec<_>>()
+        );
+        assert_eq!(rows[0].name, "FLIER 1");
+        assert!(rows.iter().all(|row| !row.state.is_empty()));
+    }
+
+    #[test]
+    fn a_machine_eye_matches_where_its_rig_is_drawn() {
+        // The view and the body must come from one interpolation, or a piloted
+        // machine's camera drifts against its own hull between ticks.
+        let (_, mut mining) = flying_world();
+        mining.fleet.fliers[0].previous_position = BlockPos::new(0, 90, 0);
+        mining.fleet.fliers[0].position = BlockPos::new(4, 94, 4);
+
+        for fraction in [0.0f64, 0.25, 0.5, 0.9] {
+            mining.pending = fraction;
+            let drawn = mining.interpolated(
+                mining.fleet.fliers[0].previous_position,
+                mining.fleet.fliers[0].position,
+            );
+            let eye = mining.machine_eye(MachineRef::Flier(0)).unwrap();
+            let lift = Mining::eye_height(MachineRef::Flier(0));
+            assert!(
+                (eye - (drawn + Vec3::Y * lift)).length() < 1.0e-5,
+                "eye {eye:?} does not sit on the drawn hull {drawn:?} at fraction {fraction}"
+            );
+        }
+    }
+
+    #[test]
+    fn taking_control_of_a_flier_marks_it_piloted_and_hand_back_restores_it() {
+        let (_, mut mining) = flying_world();
+        assert_eq!(mining.piloted(), None);
+
+        assert!(mining.take_control(MachineRef::Flier(0)));
+        assert_eq!(mining.piloted(), Some(MachineRef::Flier(0)));
+        assert_eq!(mining.fleet.fliers[0].state, FlierState::Manual);
+        assert_eq!(
+            mining.roster(Vec3::ZERO)[0].state,
+            "PILOTED",
+            "the roster should say who has the wheel"
+        );
+        // One pair of hands.
+        assert!(!mining.take_control(MachineRef::Flier(0)));
+
+        mining.release_control();
+        assert_eq!(mining.piloted(), None);
+        assert_ne!(mining.fleet.fliers[0].state, FlierState::Manual);
+    }
+
+    #[test]
+    fn a_piloted_machine_takes_its_yaw_from_the_look_not_the_movement() {
+        let (_, mut mining) = flying_world();
+        mining.take_control(MachineRef::Flier(0));
+        // Move it one way, look another.
+        mining.fleet.fliers[0].previous_position = BlockPos::new(0, 90, 0);
+        mining.fleet.fliers[0].position = BlockPos::new(1, 90, 0);
+        mining.set_pilot_look(2.5);
+        mining.remember_yaws();
+        assert_eq!(mining.flier_yaws[0], 2.5, "the nose ignored the pilot's view");
+
+        // And an autonomous one still follows its own travel.
+        mining.release_control();
+        mining.remember_yaws();
+        assert_ne!(mining.flier_yaws[0], 2.5);
+    }
+
+    #[test]
+    fn a_piloted_machine_covers_the_same_ground_per_second_as_an_autonomous_one() {
+        // Piloting is a change of driver, not of physics: one cell per tick.
+        let (mut world, mut mining) = flying_world();
+        let events = EventBus::new();
+        mining.take_control(MachineRef::Flier(0));
+        mining.set_pilot_command(PilotCommand {
+            heading: Some(vx_agent::Heading::PosX),
+            ..Default::default()
+        });
+
+        let start = mining.fleet.fliers[0].position;
+        // Two seconds of held input at the fixed tick rate.
+        for _ in 0..120 {
+            mining.update(&mut world, &events, Duration::from_secs_f32(1.0 / 60.0));
+        }
+        let travelled = mining.fleet.fliers[0].position.x - start.x;
+        let expected = (2.0 * TICK_RATE) as i32;
+        assert!(
+            (travelled - expected).abs() <= 2,
+            "piloted travel was {travelled} cells, the tick rate says about {expected}"
+        );
+    }
+
+    #[test]
+    fn held_pilot_input_is_reissued_once_per_sub_tick_not_once_per_frame() {
+        // One long frame must advance the machine as many cells as the ticks
+        // it covers, or piloting would stutter with the frame rate.
+        let (mut world, mut mining) = flying_world();
+        let events = EventBus::new();
+        mining.take_control(MachineRef::Flier(0));
+        mining.set_pilot_command(PilotCommand {
+            heading: Some(vx_agent::Heading::PosX),
+            ..Default::default()
+        });
+
+        let start = mining.fleet.fliers[0].position;
+        // Half a second in a single frame is four ticks at 8 Hz.
+        mining.update(&mut world, &events, Duration::from_secs_f32(0.5));
+        let travelled = mining.fleet.fliers[0].position.x - start.x;
+        assert!(
+            travelled >= 3,
+            "one long frame only advanced {travelled} cells; input was not re-issued"
+        );
+    }
 
     #[test]
     fn a_marked_area_has_eight_distinct_corners() {

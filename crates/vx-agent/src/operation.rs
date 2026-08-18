@@ -79,6 +79,10 @@ pub struct Operation {
     /// route cache exists so a travel leg costs one build, and this is the
     /// number a test can watch to keep that true.
     pub fields_built: u64,
+    /// The drone the player is driving, if any. One machine, one pair
+    /// of hands — `Option` rather than a per-drone flag makes "at most one"
+    /// unrepresentable-otherwise.
+    controlled: Option<usize>,
 }
 
 impl Operation {
@@ -89,6 +93,7 @@ impl Operation {
             home,
             drones: Vec::new(),
             fields_built: 0,
+            controlled: None,
         }
     }
 
@@ -125,6 +130,11 @@ impl Operation {
     pub fn tick(&mut self, world: &mut World, events: &EventBus) -> TickReport {
         let mut report = TickReport::default();
         for index in 0..self.drones.len() {
+            // A drone under manual control answers to the player, not to the
+            // board. Gravity still applies to it, from `pilot_tick`.
+            if self.controlled == Some(index) {
+                continue;
+            }
             self.tick_drone(index, world, events, &mut report);
         }
         report
@@ -161,6 +171,96 @@ impl Operation {
             }
         }
         (RunOutcome::OutOfTicks, max_ticks)
+    }
+
+    /// Take a drone off the board and hand it to the player.
+    ///
+    /// The claimed job is **released, not completed** — the work still needs
+    /// doing, and another drone should be free to pick it up while this one is
+    /// being driven around. Hand-back needs no bookkeeping at all: the drone
+    /// goes `Idle`, and the next tick claims lazily through `current_job`.
+    pub fn take_control(&mut self, index: usize) -> bool {
+        if index >= self.drones.len() || self.controlled.is_some() {
+            return false;
+        }
+        if let Some(job) = self.drones[index].job.take() {
+            self.board.release(job);
+        }
+        self.drones[index].route = None;
+        self.drones[index].state = DroneState::Manual;
+        self.controlled = Some(index);
+        true
+    }
+
+    /// Give a drone back to the board.
+    pub fn release_control(&mut self, index: usize) -> bool {
+        if self.controlled != Some(index) {
+            return false;
+        }
+        self.controlled = None;
+        self.drones[index].state = DroneState::Idle;
+        true
+    }
+
+    /// Which drone the player is driving.
+    pub fn controlled(&self) -> Option<usize> {
+        self.controlled
+    }
+
+    /// Advance the piloted drone by one tick of the player's input.
+    ///
+    /// Order matches the autonomous path: gravity, then cut, then drive. A
+    /// full drone refuses to cut and says so, which is the pilot's cue to take
+    /// it home.
+    pub fn pilot_tick(
+        &mut self,
+        world: &mut World,
+        events: &EventBus,
+        command: crate::pilot::PilotCommand,
+    ) -> crate::pilot::PilotReport {
+        let mut report = crate::pilot::PilotReport::default();
+        let Some(index) = self.controlled else {
+            return report;
+        };
+
+        report.moved = self.drones[index].pilot_settle(world);
+
+        if command.cut {
+            if self.drones[index].is_full() {
+                report.blocked = true;
+            } else if let Some(target) = self.drones[index].pilot_target(world, command.heading) {
+                match break_block(world, events, target) {
+                    Ok(removed) => {
+                        if !self.drones[index].cargo.add_block(world.registry(), removed, 1) {
+                            log::warn!("pilot cut an unregistered block at {target:?}");
+                        }
+                        report.dug += 1;
+                        // Take the trunk, take the tree — the same rule the
+                        // autonomous cutter follows, for the same reason.
+                        if crate::mine::is_vegetation_id(world.registry(), removed) {
+                            report.dug += self.fell_tree(index, world, events, target);
+                        }
+                    }
+                    Err(error) => {
+                        // A mod said no. Piloting is not a way around a veto.
+                        log::debug!("pilot denied at {target:?}: {error}");
+                        report.blocked = true;
+                    }
+                }
+            } else {
+                report.blocked = true;
+            }
+        }
+
+        if let Some(heading) = command.heading {
+            if self.drones[index].pilot_step(world, heading) {
+                report.moved = true;
+            } else {
+                report.blocked = true;
+            }
+        }
+
+        report
     }
 
     fn tick_drone(
@@ -860,6 +960,189 @@ mod tests {
             "{} fields built over a {ticks}-tick approach; the route cache is not caching",
             operation.fields_built
         );
+    }
+
+    #[test]
+    fn taking_control_releases_the_claimed_job_back_to_the_board() {
+        let mut site = site(
+            60,
+            VoxelAabb::new(BlockPos::new(0, 54, 0), BlockPos::new(2, 56, 2)),
+            MineMethod::Decline,
+        );
+        let events = EventBus::new();
+        // Let the drone claim something first.
+        for _ in 0..40 {
+            site.operation.tick(&mut site.world, &events);
+        }
+        assert!(site.operation.drones[0].job().is_some(), "never claimed a job");
+        let unclaimed_before = site.operation.board.unclaimed_count();
+
+        assert!(site.operation.take_control(0));
+        assert_eq!(site.operation.controlled(), Some(0));
+        assert_eq!(site.operation.drones[0].state, DroneState::Manual);
+        assert_eq!(site.operation.drones[0].job(), None, "kept holding the job");
+        assert_eq!(
+            site.operation.board.unclaimed_count(),
+            unclaimed_before + 1,
+            "the job did not go back on the board"
+        );
+        // The board still owes the work — released, never completed.
+        assert!(!site.operation.board.is_empty());
+    }
+
+    #[test]
+    fn a_controlled_drone_is_skipped_by_the_tick() {
+        let mut site = site(
+            60,
+            VoxelAabb::new(BlockPos::new(0, 54, 0), BlockPos::new(2, 56, 2)),
+            MineMethod::Decline,
+        );
+        let events = EventBus::new();
+        site.operation.take_control(0);
+        let parked = site.operation.drones[0].position;
+
+        for _ in 0..200 {
+            site.operation.tick(&mut site.world, &events);
+        }
+        assert_eq!(
+            site.operation.drones[0].position, parked,
+            "the AI drove a drone the player was holding"
+        );
+        assert_eq!(site.operation.drones[0].state, DroneState::Manual);
+    }
+
+    #[test]
+    fn another_drone_can_claim_the_job_a_takeover_released() {
+        let mut site = site(
+            60,
+            VoxelAabb::new(BlockPos::new(0, 54, 0), BlockPos::new(2, 56, 2)),
+            MineMethod::Decline,
+        );
+        let events = EventBus::new();
+        let start = site.operation.drones[0].position;
+        site.operation.add_drone(start);
+
+        for _ in 0..40 {
+            site.operation.tick(&mut site.world, &events);
+        }
+        site.operation.take_control(0);
+        for _ in 0..80 {
+            site.operation.tick(&mut site.world, &events);
+        }
+        assert!(
+            site.operation.drones[1].job().is_some(),
+            "the second drone never picked up the released work"
+        );
+    }
+
+    #[test]
+    fn handing_back_lets_the_drone_reclaim_and_finish_the_dig() {
+        // The claim the whole override rests on: a mine interrupted by a
+        // joyride still completes.
+        let mut site = site(
+            60,
+            VoxelAabb::new(BlockPos::new(0, 54, 0), BlockPos::new(2, 56, 2)),
+            MineMethod::Decline,
+        );
+        let events = EventBus::new();
+        for _ in 0..60 {
+            site.operation.tick(&mut site.world, &events);
+        }
+
+        assert!(site.operation.take_control(0));
+        // Drive it somewhere unhelpful for a while.
+        let command = crate::pilot::PilotCommand {
+            heading: Some(crate::pilot::Heading::PosX),
+            ..Default::default()
+        };
+        for _ in 0..30 {
+            site.operation.pilot_tick(&mut site.world, &events, command);
+        }
+        assert!(site.operation.release_control(0));
+        assert_eq!(site.operation.drones[0].state, DroneState::Idle);
+
+        let (outcome, _) = site.operation.run(&mut site.world, &events, 400_000);
+        assert_eq!(outcome, RunOutcome::Finished, "the dig never recovered");
+    }
+
+    #[test]
+    fn a_pilot_cut_loads_the_drone_s_own_cargo_and_conserves_blocks() {
+        let mut site = site(
+            60,
+            VoxelAabb::new(BlockPos::new(0, 54, 0), BlockPos::new(2, 56, 2)),
+            MineMethod::Decline,
+        );
+        let events = EventBus::new();
+        // Generous: the decline's portal can sit well away from the body, and
+        // a box that misses where the drone actually stands would count the
+        // wrong blocks.
+        let region = VoxelAabb::new(BlockPos::new(-80, 1, -80), BlockPos::new(80, 120, 80));
+        let before = solid_blocks(&site.world, region);
+
+        site.operation.take_control(0);
+        let command = crate::pilot::PilotCommand { cut: true, ..Default::default() };
+        let mut dug = 0;
+        for _ in 0..20 {
+            dug += site.operation.pilot_tick(&mut site.world, &events, command).dug;
+        }
+
+        assert!(dug > 0, "the cutter never took anything");
+        assert_eq!(
+            site.operation.drones[0].carrying(),
+            dug,
+            "cut blocks did not land in the drone's own bed"
+        );
+        assert_eq!(
+            before - solid_blocks(&site.world, region),
+            dug,
+            "blocks left the world without being accounted for"
+        );
+    }
+
+    #[test]
+    fn a_full_drone_refuses_to_cut_and_reports_blocked() {
+        let mut site = site(
+            60,
+            VoxelAabb::new(BlockPos::new(0, 54, 0), BlockPos::new(2, 56, 2)),
+            MineMethod::Decline,
+        );
+        let events = EventBus::new();
+        site.operation.take_control(0);
+        site.operation.drones[0].capacity = 1;
+        let command = crate::pilot::PilotCommand { cut: true, ..Default::default() };
+
+        // First cut fills it; the next must be refused rather than silently
+        // overloading the machine.
+        site.operation.pilot_tick(&mut site.world, &events, command);
+        let report = site.operation.pilot_tick(&mut site.world, &events, command);
+        assert_eq!(report.dug, 0);
+        assert!(report.blocked, "a full drone kept cutting");
+    }
+
+    #[test]
+    fn a_pilot_cut_goes_through_break_block_so_a_mod_veto_still_wins() {
+        // Piloting is not a way around a mod's veto.
+        let mut site = site(
+            60,
+            VoxelAabb::new(BlockPos::new(0, 54, 0), BlockPos::new(2, 56, 2)),
+            MineMethod::Decline,
+        );
+        let mut events = EventBus::new();
+        events.subscribe("guard", |event: &mut vx_world::BlockBreakEvent| {
+            event.cancel();
+        });
+
+        site.operation.take_control(0);
+        let region = VoxelAabb::new(BlockPos::new(-80, 1, -80), BlockPos::new(80, 120, 80));
+        let before = solid_blocks(&site.world, region);
+        let command = crate::pilot::PilotCommand { cut: true, ..Default::default() };
+
+        for _ in 0..10 {
+            let report = site.operation.pilot_tick(&mut site.world, &events, command);
+            assert_eq!(report.dug, 0, "the veto was ignored");
+            assert!(report.blocked);
+        }
+        assert_eq!(before, solid_blocks(&site.world, region), "the world changed");
     }
 
     #[test]

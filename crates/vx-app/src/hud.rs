@@ -36,6 +36,9 @@ pub struct HudContent<'a> {
     pub level_up: Option<(String, u32)>,
     /// A villager's line, freshly spoken.
     pub greeting: Option<String>,
+    /// True while the body waits for its own ground to stream back in after a
+    /// feed. Worth saying out loud: the controls are briefly dead on purpose.
+    pub reconnecting: bool,
 }
 
 /// Paint a horizontal bar with a filled fraction.
@@ -88,9 +91,12 @@ pub fn render_hud(content: &HudContent) -> Vec<u8> {
     }
     y += LINE_HEIGHT as i32;
 
-    // Line 3: a level-up shout outranks a villager's word outranks the
-    // activity readout.
-    if let Some((skill, level)) = &content.level_up {
+    // Line 3: reconnecting outranks everything — the player's controls are
+    // dead for a moment and they should know why — then a level-up shout, a
+    // villager's word, and finally the activity readout.
+    if content.reconnecting {
+        font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, ACCENT, "RECONNECTING");
+    } else if let Some((skill, level)) = &content.level_up {
         let line = format!("{} LEVEL {level}!", skill.to_uppercase());
         font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, ACCENT, &line);
     } else if let Some(greeting) = &content.greeting {
@@ -129,7 +135,28 @@ mod tests {
             drilling: None,
             level_up: None,
             greeting: None,
+            reconnecting: false,
         }
+    }
+
+    #[test]
+    fn reconnecting_outranks_every_other_line() {
+        let skills = Skills::new();
+        let mut busy = base_content(&skills);
+        busy.status = Some("MINING 4 JOBS LEFT".into());
+        busy.greeting = Some("MORNIN".into());
+        busy.level_up = Some(("mining".into(), 9));
+
+        let mut waiting = base_content(&skills);
+        waiting.reconnecting = true;
+
+        let mut waiting_busy = busy;
+        waiting_busy.reconnecting = true;
+        assert_eq!(
+            render_hud(&waiting_busy),
+            render_hud(&waiting),
+            "something drew over the reconnecting notice"
+        );
     }
 
     #[test]

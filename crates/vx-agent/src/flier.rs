@@ -50,6 +50,8 @@ pub enum FlierState {
     ToPickup { mine: usize },
     /// Flying home to the base container.
     ToBase,
+    /// Under the player's direct control.
+    Manual,
 }
 
 /// A single flying drone.
@@ -78,7 +80,7 @@ impl Flier {
         self.cargo.total()
     }
 
-    fn move_to(&mut self, to: BlockPos) {
+    pub(crate) fn move_to(&mut self, to: BlockPos) {
         self.previous_position = self.position;
         self.position = to;
     }

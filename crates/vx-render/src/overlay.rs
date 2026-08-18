@@ -36,7 +36,12 @@ struct RectUniform {
 /// How many independent overlay pictures a frame can carry. Slot 0 is the
 /// minimap and slot 1 the HUD by convention in the app; the pass itself does
 /// not care.
-pub const OVERLAY_SLOTS: usize = 4;
+///
+/// Raising this is free and safe: an unset slot is a `None` the draw loop
+/// skips entirely, so the "nothing set means byte-identical frames" guarantee
+/// the culling tests rest on is per-slot and cannot be disturbed by the array
+/// getting longer.
+pub const OVERLAY_SLOTS: usize = 6;
 
 /// One picture on screen: its texture, its rectangle uniform, and the bind
 /// group tying them together.
