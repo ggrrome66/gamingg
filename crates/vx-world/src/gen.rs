@@ -34,6 +34,12 @@ pub struct TerrainBlocks {
     pub bedrock: BlockId,
     pub copper_ore: BlockId,
     pub container: BlockId,
+    pub plank: BlockId,
+    pub roof: BlockId,
+    pub counter: BlockId,
+    pub log: BlockId,
+    pub leaves: BlockId,
+    pub tall_grass: BlockId,
 }
 
 impl TerrainBlocks {
@@ -67,6 +73,19 @@ impl TerrainBlocks {
             // The fleet's drop-off. Placing one declares the base; the world
             // knows it only as a block, and the fleet keys off its position.
             container: register(BlockDef::uniform("engine:container", 8).with_hardness(Some(1.5))),
+            plank: register(BlockDef::uniform("engine:plank", 13).with_hardness(Some(1.2))),
+            roof: register(BlockDef::uniform("engine:roof", 14).with_hardness(Some(1.2))),
+            // The shop counter is the town's one immovable fixture: no
+            // hardness, so neither drill nor drone can take the economy
+            // apart.
+            counter: register(BlockDef::uniform("engine:counter", 15).with_hardness(None)),
+            log: register(BlockDef::columnar("engine:log", 19, 18, 19).with_hardness(Some(1.0))),
+            leaves: register(BlockDef::uniform("engine:leaves", 20).with_hardness(Some(0.3))),
+            tall_grass: register(
+                BlockDef::uniform("engine:tall_grass", 21)
+                    .cross()
+                    .with_hardness(Some(0.05)),
+            ),
         }
     }
 
@@ -82,6 +101,12 @@ impl TerrainBlocks {
             bedrock: registry.id_of("engine:bedrock")?,
             copper_ore: registry.id_of("engine:copper_ore")?,
             container: registry.id_of("engine:container")?,
+            plank: registry.id_of("engine:plank")?,
+            roof: registry.id_of("engine:roof")?,
+            counter: registry.id_of("engine:counter")?,
+            log: registry.id_of("engine:log")?,
+            leaves: registry.id_of("engine:leaves")?,
+            tall_grass: registry.id_of("engine:tall_grass")?,
         })
     }
 }
@@ -248,7 +273,11 @@ impl TerrainGenerator {
         };
 
         let height = base + local + ridge;
-        (height as i32).clamp(1, CHUNK_HEIGHT - 1)
+        let natural = (height as i32).clamp(1, CHUNK_HEIGHT - 1);
+        // The starting village flattens its plot and blends into the seed's
+        // terrain over a skirt. Applied here — not just in `generate` — so
+        // the minimap, spawn and physics all see the same town.
+        crate::village::blend_height(world_x, world_z, natural)
     }
 
     /// Generate the chunk at `pos`.
@@ -279,6 +308,57 @@ impl TerrainGenerator {
             }
         }
 
+        // Trees, gathered like ore: every tree whose canopy reaches this
+        // chunk, stamped only where it lands inside. Trunks overwrite the
+        // tufts fill_column may have dropped on their base columns.
+        let height_at = |x: i32, z: i32| self.height_at(x, z);
+        let trees = crate::flora::trees_overlapping(
+            self.seed,
+            (origin.x, origin.z),
+            (origin.x + CHUNK_SIZE - 1, origin.z + CHUNK_SIZE - 1),
+            &height_at,
+        );
+        for tree in &trees {
+            let top = tree.base.y + tree.height + 2;
+            for local_z in 0..CHUNK_SIZE {
+                for local_x in 0..CHUNK_SIZE {
+                    let world_x = origin.x + local_x;
+                    let world_z = origin.z + local_z;
+                    if (world_x - tree.base.x).abs() > crate::flora::CANOPY_REACH
+                        || (world_z - tree.base.z).abs() > crate::flora::CANOPY_REACH
+                    {
+                        continue;
+                    }
+                    for y in tree.base.y + 1..=top {
+                        let Some(part) = crate::flora::tree_part_at(tree, world_x, y, world_z)
+                        else {
+                            continue;
+                        };
+                        let block = match part {
+                            crate::flora::TreePart::Trunk => self.blocks.log,
+                            crate::flora::TreePart::Leaves => self.blocks.leaves,
+                        };
+                        if let Some(cell) = LocalPos::new(local_x, y, local_z) {
+                            // Leaves fill only air (or a tuft caught under
+                            // the crown), so canopies interleave with the
+                            // hillside instead of eating it, and never eat a
+                            // trunk.
+                            let standing = chunk.get(cell);
+                            if part == crate::flora::TreePart::Trunk
+                                || standing.is_air()
+                                || standing == self.blocks.tall_grass
+                            {
+                                chunk.set(cell, block);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // The village's authored buildings, where this chunk overlaps them.
+        crate::village::stamp(&mut chunk, pos, &self.blocks);
+
         // Generation touches the palette heavily; compact before it is cached.
         chunk.optimise();
         chunk.clear_dirty();
@@ -304,6 +384,10 @@ impl TerrainGenerator {
         let [x, z] = local;
         let [world_x, world_z] = world;
 
+        // No ore under main street: prospecting belongs to the wilderness,
+        // and nobody should be tempted to dig up the town.
+        let in_village = crate::village::footprint_contains(world_x, world_z);
+
         // Beaches: columns near sea level get sand instead of grass.
         let coastal = surface <= SEA_LEVEL + 1;
         let top = if coastal { blocks.sand } else { blocks.grass };
@@ -323,22 +407,30 @@ impl TerrainGenerator {
         // Rock, with ore wherever a body reaches. Restricting ore to what would
         // otherwise be stone or soil is what guarantees it never hangs in air.
         for y in 1..stone_top {
-            let has_ore = ore_at(deposits, BlockPos::new(world_x, y, world_z)).is_some();
+            let has_ore =
+                !in_village && ore_at(deposits, BlockPos::new(world_x, y, world_z)).is_some();
             place(chunk, y, if has_ore { blocks.copper_ore } else { blocks.stone });
         }
 
         // Overburden. A body reaching up through here is on its way to becoming
         // a visible outcrop.
         for y in stone_top.max(1)..surface {
-            let has_ore = ore_at(deposits, BlockPos::new(world_x, y, world_z)).is_some();
+            let has_ore =
+                !in_village && ore_at(deposits, BlockPos::new(world_x, y, world_z)).is_some();
             place(chunk, y, if has_ore { blocks.copper_ore } else { subsoil });
         }
 
         // The surface block itself only shows ore when the body also fills the
         // blocks beneath it, so every outcrop a player can see leads somewhere.
         let surface_pos = BlockPos::new(world_x, surface, world_z);
-        let outcrop = breaks_surface(deposits, surface_pos);
+        let outcrop = !in_village && breaks_surface(deposits, surface_pos);
         place(chunk, surface, if outcrop { blocks.copper_ore } else { top });
+
+        // A scattering of grass tufts on plain grass tops — never on an
+        // outcrop, which players need to be able to spot at distance.
+        if !coastal && !outcrop && crate::flora::tuft_at(self.seed, world_x, world_z, surface) {
+            place(chunk, surface + 1, blocks.tall_grass);
+        }
 
         // Flood anything below sea level.
         if surface < SEA_LEVEL {
@@ -386,7 +478,9 @@ mod tests {
     fn different_seeds_generate_different_terrain() {
         let (_, a) = generator(1);
         let (_, b) = generator(2);
-        let pos = ChunkPos::new(0, 0);
+        // Away from the origin: the starting village makes the chunks there
+        // identical across seeds by design.
+        let pos = ChunkPos::new(8, 8);
         assert_ne!(a.generate(pos), b.generate(pos));
     }
 
@@ -429,14 +523,23 @@ mod tests {
         let chunk = generator.generate(pos);
         let origin = pos.origin();
 
+        let flora = [
+            generator.blocks().log,
+            generator.blocks().leaves,
+            generator.blocks().tall_grass,
+        ];
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let expected = generator.height_at(origin.x + x, origin.z + z);
+                // Vegetation legitimately stands above the height field, so
+                // the surface is the topmost non-air, non-water, non-plant.
                 let solid_top = (0..CHUNK_HEIGHT)
                     .rev()
                     .find(|&y| {
                         let block = chunk.get(LocalPos::new(x, y, z).unwrap());
-                        !block.is_air() && block != generator.blocks().water
+                        !block.is_air()
+                            && block != generator.blocks().water
+                            && !flora.contains(&block)
                     })
                     .unwrap();
                 assert_eq!(solid_top, expected, "surface mismatch at ({x},{z})");
@@ -507,17 +610,35 @@ mod tests {
         // field is continuous in world space. This is the test that catches
         // using local instead of world coordinates in the noise lookup.
         let (_, generator) = generator(555);
-        let left = generator.generate(ChunkPos::new(0, 0));
-        let right = generator.generate(ChunkPos::new(1, 0));
+        // Out in the wild: village buildings would put authored blocks above
+        // the height field on the origin chunks.
+        let left = generator.generate(ChunkPos::new(10, 0));
+        let right = generator.generate(ChunkPos::new(11, 0));
 
+        let flora = [
+            generator.blocks().log,
+            generator.blocks().leaves,
+            generator.blocks().tall_grass,
+        ];
+        let ground_top = |chunk: &Chunk, x: i32, z: i32| {
+            (0..CHUNK_HEIGHT)
+                .rev()
+                .find(|&y| {
+                    let block = chunk.get(LocalPos::new(x, y, z).unwrap());
+                    !block.is_air() && !flora.contains(&block)
+                })
+                .unwrap()
+        };
+
+        let seam = 11 * CHUNK_SIZE;
         for z in 0..CHUNK_SIZE {
-            let left_edge = left.height_at(CHUNK_SIZE - 1, z).unwrap();
-            let right_edge = right.height_at(0, z).unwrap();
-            let expected_left = generator.height_at(CHUNK_SIZE - 1, z);
-            let expected_right = generator.height_at(CHUNK_SIZE, z);
+            let left_edge = ground_top(&left, CHUNK_SIZE - 1, z);
+            let right_edge = ground_top(&right, 0, z);
+            let expected_left = generator.height_at(seam - 1, z);
+            let expected_right = generator.height_at(seam, z);
 
-            // `Chunk::height_at` reports the topmost non-air block, and a
-            // column below sea level is flooded to exactly SEA_LEVEL.
+            // The ground top skips vegetation, and a column below sea level
+            // is flooded to exactly SEA_LEVEL.
             assert_eq!(left_edge, expected_left.max(SEA_LEVEL));
             assert_eq!(right_edge, expected_right.max(SEA_LEVEL));
             assert!(
@@ -644,8 +765,14 @@ mod tests {
         let ore = generator.blocks().copper_ore;
         let (mut outcrops, mut columns, mut ore_blocks, mut blocks) = (0, 0, 0, 0);
 
-        for cx in -radius..radius {
-            for cz in -radius..radius {
+        // Surveyed away from the origin: the starting village masks all ore
+        // in its footprint, so a window centred there sees nothing. (16, 16)
+        // rather than the nearest wild chunk because deposits cluster — the
+        // window immediately east of town happens to be barren at the test
+        // seeds, which is the scarcity working as intended.
+        let centre = 16;
+        for cx in centre - radius..centre + radius {
+            for cz in centre - radius..centre + radius {
                 let pos = ChunkPos::new(cx, cz);
                 let chunk = generator.generate(pos);
                 let origin = pos.origin();
@@ -809,15 +936,176 @@ mod tests {
     #[test]
     fn generated_chunks_come_back_clean_and_compacted() {
         let (_, generator) = generator(4);
-        let chunk = generator.generate(ChunkPos::new(0, 0));
+        // Wilderness: the village chunks near the origin legitimately carry
+        // more block kinds and get their own bound below.
+        let chunk = generator.generate(ChunkPos::new(20, 20));
 
         assert!(!chunk.is_dirty(), "a freshly generated chunk needs no remesh flag");
         // Only the handful of terrain blocks should survive palette compaction.
         assert!(
-            chunk.storage().palette_len() <= 8,
+            chunk.storage().palette_len() <= 12,
             "palette not compacted: {} entries",
             chunk.storage().palette_len()
         );
+    }
+
+    #[test]
+    fn village_chunks_compact_and_stay_within_their_own_palette_budget() {
+        let (_, generator) = generator(4);
+        let chunk = generator.generate(ChunkPos::new(0, 0));
+
+        assert!(!chunk.is_dirty());
+        assert!(
+            chunk.storage().palette_len() <= 14,
+            "village palette blew up: {} entries",
+            chunk.storage().palette_len()
+        );
+    }
+
+    #[test]
+    fn the_village_is_identical_whatever_the_seed() {
+        // The whole point: two different worlds, one hometown. Compare the
+        // four chunks meeting at the origin block-for-block.
+        let (_, a) = generator(2024);
+        let (_, b) = generator(555);
+        for pos in [
+            ChunkPos::new(0, 0),
+            ChunkPos::new(-1, 0),
+            ChunkPos::new(0, -1),
+            ChunkPos::new(-1, -1),
+        ] {
+            assert_eq!(a.generate(pos), b.generate(pos), "chunk {pos:?} differs");
+        }
+    }
+
+    #[test]
+    fn the_village_has_no_ore_and_the_counter_is_home() {
+        let (registry, generator) = generator(2024);
+        let ore = registry.id_of("engine:copper_ore").unwrap();
+        let counter = registry.id_of("engine:counter").unwrap();
+
+        let mut counters = 0;
+        for cx in -3..3 {
+            for cz in -3..3 {
+                let pos = ChunkPos::new(cx, cz);
+                let origin = pos.origin();
+                let chunk = generator.generate(pos);
+                for z in 0..CHUNK_SIZE {
+                    for x in 0..CHUNK_SIZE {
+                        let in_town = crate::village::footprint_contains(origin.x + x, origin.z + z);
+                        // Town columns top out at the plateau plus rooftops,
+                        // so scanning higher buys nothing but test time.
+                        for y in 0..100 {
+                            let block = chunk.get(LocalPos::new(x, y, z).unwrap());
+                            if block == ore {
+                                assert!(!in_town, "ore under main street at ({x},{y},{z})");
+                            }
+                            if block == counter {
+                                counters += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let at = crate::village::counter_position();
+        let counter_chunk = generator.generate(ChunkPos::new(
+            at.x.div_euclid(CHUNK_SIZE),
+            at.z.div_euclid(CHUNK_SIZE),
+        ));
+        let local = LocalPos::new(at.x.rem_euclid(CHUNK_SIZE), at.y, at.z.rem_euclid(CHUNK_SIZE));
+        assert_eq!(counter_chunk.get(local.unwrap()), counter, "no counter at its post");
+        assert_eq!(counters, 5, "the shop's counter row should be five blocks");
+    }
+
+    #[test]
+    fn a_canopy_crossing_a_chunk_border_is_whole_on_both_sides() {
+        let (_, generator) = generator(2024);
+        let height = |x: i32, z: i32| generator.height_at(x, z);
+
+        // Find a tree whose canopy reaches over an x-border between chunks.
+        let trees = crate::flora::trees_overlapping(
+            generator.seed(),
+            (-400, -400),
+            (400, 400),
+            &height,
+        );
+        let straddler = trees
+            .iter()
+            .find(|tree| {
+                let offset = tree.base.x.rem_euclid(CHUNK_SIZE);
+                !(crate::flora::CANOPY_REACH..CHUNK_SIZE - crate::flora::CANOPY_REACH)
+                    .contains(&offset)
+            })
+            .expect("no border-straddling tree in an 800-block square");
+
+        let mut chunks = std::collections::HashMap::new();
+        let top = straddler.base.y + straddler.height + 2;
+        for x in straddler.base.x - 2..=straddler.base.x + 2 {
+            for z in straddler.base.z - 2..=straddler.base.z + 2 {
+                for y in straddler.base.y + 1..=top {
+                    let Some(part) = crate::flora::tree_part_at(straddler, x, y, z) else {
+                        continue;
+                    };
+                    let pos = ChunkPos::new(x.div_euclid(CHUNK_SIZE), z.div_euclid(CHUNK_SIZE));
+                    let chunk = chunks.entry(pos).or_insert_with(|| generator.generate(pos));
+                    let cell =
+                        LocalPos::new(x.rem_euclid(CHUNK_SIZE), y, z.rem_euclid(CHUNK_SIZE))
+                            .unwrap();
+                    let block = chunk.get(cell);
+                    match part {
+                        crate::flora::TreePart::Trunk => assert_eq!(
+                            block,
+                            generator.blocks().log,
+                            "trunk missing at ({x},{y},{z})"
+                        ),
+                        // Leaves only fill air, so a hillside or another
+                        // tree's trunk may legitimately hold the cell.
+                        crate::flora::TreePart::Leaves => assert!(
+                            block == generator.blocks().leaves
+                                || block == generator.blocks().log
+                                || height(x, z) >= y,
+                            "canopy hole at ({x},{y},{z})"
+                        ),
+                    }
+                }
+            }
+        }
+        assert!(chunks.len() >= 2, "the straddler did not actually straddle");
+    }
+
+    #[test]
+    fn tufts_grow_on_grass_and_never_in_town() {
+        let (_, generator) = generator(2024);
+        let tuft = generator.blocks().tall_grass;
+
+        // The village chunk must have none; a wild chunk should have some.
+        let town = generator.generate(ChunkPos::new(0, 0));
+        for (local, block) in town.iter_blocks() {
+            assert_ne!(block, tuft, "a tuft in town at {local:?}");
+        }
+
+        let mut found = 0;
+        for cx in 12..18 {
+            let wild = generator.generate(ChunkPos::new(cx, 12));
+            for (_, block) in wild.iter_blocks() {
+                if block == tuft {
+                    found += 1;
+                }
+            }
+        }
+        assert!(found > 0, "no tufts anywhere in six wild chunks");
+    }
+
+    #[test]
+    fn spawn_column_is_paved_flat_ground() {
+        let (registry, generator) = generator(7);
+        let chunk = generator.generate(ChunkPos::new(0, 0));
+        let surface = chunk.height_at(0, 0).unwrap();
+        assert_eq!(surface, crate::village::GROUND_Y, "spawn is off the plateau");
+        let top = chunk.get(LocalPos::new(0, surface, 0).unwrap());
+        assert_eq!(registry.get(top).unwrap().name, "engine:stone", "spawn is not paved");
     }
 }
 

@@ -29,6 +29,17 @@ impl BlockId {
     }
 }
 
+/// How a block's geometry is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shape {
+    /// The ordinary cube, greedy-meshed with its neighbours.
+    #[default]
+    Cube,
+    /// Two crossed diagonal quads — the classic plant. Never culls or merges;
+    /// always non-solid and non-opaque.
+    Cross,
+}
+
 /// How a block is drawn and how it behaves physically.
 // Not `Eq`: `hardness` is a float.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +58,8 @@ pub struct BlockDef {
     pub textures: [u16; 6],
     /// Time multiplier to break. `None` means unbreakable.
     pub hardness: Option<f32>,
+    /// Geometry: cube by default.
+    pub shape: Shape,
 }
 
 impl BlockDef {
@@ -61,6 +74,7 @@ impl BlockDef {
             opaque: true,
             textures: [texture; 6],
             hardness: Some(1.0),
+            shape: Shape::Cube,
         }
     }
 
@@ -91,6 +105,15 @@ impl BlockDef {
     /// Mark as passable: no collision.
     pub fn non_solid(mut self) -> Self {
         self.solid = false;
+        self
+    }
+
+    /// Crossed-quad plant geometry. Cross blocks cannot block movement or
+    /// hide a neighbour's face, so this implies non-solid and non-opaque.
+    pub fn cross(mut self) -> Self {
+        self.shape = Shape::Cross;
+        self.solid = false;
+        self.opaque = false;
         self
     }
 
@@ -148,6 +171,7 @@ impl BlockRegistry {
             opaque: false,
             textures: [0; 6],
             hardness: None,
+            shape: Shape::Cube,
         };
         let mut registry = BlockRegistry {
             defs: Vec::new(),

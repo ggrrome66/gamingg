@@ -214,6 +214,12 @@ impl Operation {
                     }
                     self.drones[index].state = DroneState::Digging(job.id);
                     report.dug += 1;
+                    // Take the trunk, take the tree: a felled tree's crown
+                    // cannot be pruned from mid-air, so cutting any part of
+                    // one brings the connected whole down into the cargo bed.
+                    if crate::mine::is_vegetation_id(world.registry(), removed) {
+                        report.dug += self.fell_tree(index, world, events, target);
+                    }
                 }
                 Err(error) => {
                     // A veto — `next_cut` already refuses bedrock, so a mod
@@ -253,11 +259,17 @@ impl Operation {
         //
         // "Outstanding" counts *breakable* blocks. Bedrock does not count as
         // work, so a region overlapping the world floor completes once all the
-        // rock that can come out has come out.
+        // rock that can come out has come out. Vegetation does not count
+        // either: a crown hanging into a bench from a tree rooted elsewhere
+        // has no cell to stand and prune it from, and it falls with its trunk
+        // when any drone finally cuts one — it must never wedge a job open.
         let remaining: Vec<BlockPos> = region
             .clamped_to_world()
             .blocks()
-            .filter(|pos| crate::drone::is_breakable(world, *pos))
+            .filter(|pos| {
+                crate::drone::is_breakable(world, *pos)
+                    && !crate::mine::is_vegetation(world, *pos)
+            })
             .collect();
 
         if remaining.is_empty() {
@@ -377,6 +389,53 @@ impl Operation {
         let cached = self.drones[index].route.as_ref()?;
         (cached.key == key && cached.edits == world.edit_count())
             .then(|| cached.field.step_from(world, self.drones[index].position))
+    }
+
+    /// Fell the vegetation connected to a just-cut block: flood out over
+    /// touching vegetation cells, breaking each through the same cancellable
+    /// event path as any other edit (a veto stops the spread through that
+    /// cell), and load the lot. Bounded, so a modded megaflora cannot hold a
+    /// tick hostage.
+    fn fell_tree(
+        &mut self,
+        index: usize,
+        world: &mut World,
+        events: &EventBus,
+        seed: BlockPos,
+    ) -> u64 {
+        const FELL_LIMIT: usize = 512;
+        const SIDES: [[i32; 3]; 6] = [
+            [1, 0, 0],
+            [-1, 0, 0],
+            [0, 1, 0],
+            [0, -1, 0],
+            [0, 0, 1],
+            [0, 0, -1],
+        ];
+
+        let mut queue = vec![seed];
+        let mut seen = std::collections::HashSet::from([seed]);
+        let mut felled = 0u64;
+        while let Some(at) = queue.pop() {
+            for side in SIDES {
+                let next = at.offset(side);
+                if seen.len() >= FELL_LIMIT || !seen.insert(next) {
+                    continue;
+                }
+                if !crate::mine::is_vegetation(world, next) {
+                    continue;
+                }
+                let Ok(removed) = break_block(world, events, next) else {
+                    continue;
+                };
+                if !self.drones[index].cargo.add_block(world.registry(), removed, 1) {
+                    log::warn!("drone felled an unregistered block at {next:?}");
+                }
+                felled += 1;
+                queue.push(next);
+            }
+        }
+        felled
     }
 
     /// Hand the job back and mark the drone stuck.

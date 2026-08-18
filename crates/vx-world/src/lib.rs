@@ -6,6 +6,7 @@
 
 pub mod chunk;
 pub mod edit;
+pub mod flora;
 pub mod gen;
 pub mod noise;
 pub mod ore;
@@ -13,6 +14,7 @@ pub mod physics;
 pub mod raycast;
 pub mod save;
 pub mod storage;
+pub mod village;
 pub mod world;
 
 pub use chunk::{BlockView, Chunk, SoloChunkView};

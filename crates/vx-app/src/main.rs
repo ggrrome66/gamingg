@@ -13,8 +13,11 @@ mod hud;
 mod map;
 mod mining;
 mod rig;
+mod shop;
 mod skills;
 mod streaming;
+mod villagers;
+mod wallet;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,10 +26,13 @@ use controller::{FlyController, MovementMode, WalkController};
 use map::MapState;
 use rig::Rig;
 use skills::Skills;
+use villagers::Villagers;
+use wallet::Wallet;
 
-/// Overlay slot assignments: the minimap and the HUD.
+/// Overlay slot assignments: the minimap, the HUD and the shop panel.
 const MAP_SLOT: usize = 0;
 const HUD_SLOT: usize = 1;
+const SHOP_SLOT: usize = 2;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -61,6 +67,8 @@ struct Options {
     ticks: u64,
     /// Frame the first drone up close instead of the whole excavation.
     close: bool,
+    /// Draw the supply shop panel open over the capture, stocked for show.
+    shop: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -82,6 +90,7 @@ fn parse_args() -> Result<Options, String> {
         dig: None,
         ticks: 20_000,
         close: false,
+        shop: false,
     };
 
     let mut args = std::env::args().skip(1);
@@ -124,6 +133,7 @@ fn parse_args() -> Result<Options, String> {
                 });
             }
             "--close" => options.close = true,
+            "--shop" => options.shop = true,
             "--ticks" => {
                 options.ticks = value()?
                     .parse()
@@ -150,6 +160,7 @@ fn parse_args() -> Result<Options, String> {
                      --dig <method>      find ore near --at and mine it before capturing\n  \
                                          (auto, adit, decline or pit)\n  \
                      --close             frame the first drone up close (with --dig)\n  \
+                     --shop              draw the supply shop panel over the capture\n  \
                      --ticks <n>         drone ticks to run when digging\n  \
                      --width <n>         window or image width\n  \
                      --height <n>        window or image height"
@@ -399,6 +410,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             status: Some(format!("MINING {} JOBS LEFT", operation.board.len())),
             drilling: Some(0.64),
             level_up: None,
+            greeting: None,
         });
         renderer.set_overlay(
             HUD_SLOT,
@@ -464,6 +476,43 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         );
     } else {
         renderer.update_camera(&context.queue, &camera);
+        // The townsfolk, some way into their stroll, so a village capture
+        // shows a town with life in it rather than an empty film set.
+        let mut town = Villagers::new();
+        for _ in 0..900 {
+            town.update(1.0 / 60.0);
+        }
+        let rigs = Villagers::rigs();
+        renderer.set_objects(&context.device, &context.queue, &town.objects(&rigs));
+    }
+
+    if options.shop {
+        // The shop panel over the frame, stocked the way a good session
+        // leaves it — this is the capture that eyeballs the trade UI.
+        let mut pile = vx_agent::Stockpile::new();
+        pile.add("engine:copper_ore", 240);
+        pile.add("engine:log", 17);
+        let mut walletbook = wallet::Wallet::new();
+        walletbook.earn(350);
+        let mut panel = shop::Shop::new();
+        panel.open_at_counter();
+        panel.feedback = Some("SOLD 60 COPPER ORE FOR 480 CR".into());
+        let pixels = shop::render_shop(&panel, Some(&pile), &walletbook);
+        let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = shop::SHOP_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            SHOP_SLOT,
+            &context.device,
+            &context.queue,
+            (shop::SHOP_WIDTH, shop::SHOP_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
     }
 
     let capture = capture_frame(&context, &renderer, width, height);
@@ -557,6 +606,16 @@ struct Active {
     hand_rig: Rig,
     /// The viewmodel drill's accumulated rotation.
     drill_spin: f32,
+    /// The town's inhabitants.
+    villagers: Villagers,
+    /// Their bodies, built once per variant.
+    villager_rigs: Vec<Rig>,
+    /// A villager's freshly spoken line, shown on the HUD for a moment.
+    greeting: Option<(String, Instant)>,
+    /// Credits and bought upgrades.
+    wallet: Wallet,
+    /// The supply shop's panel state.
+    shop: shop::Shop,
 }
 
 struct App {
@@ -629,7 +688,13 @@ impl App {
         // in place rather than through a copy.
         let Some(active) = &mut self.active else { return };
 
+        // Trading suspends walking and drilling: the shop owns the input
+        // while it is open, and drifting away mid-deal would be silly.
+        let trading = active.shop.open;
+
         match active.mode {
+            MovementMode::Fly if trading => {}
+            MovementMode::Walk if trading => {}
             MovementMode::Fly => {
                 self.fly.apply(&mut active.camera, &mut self.input, dt);
                 // Keep the body under the camera so switching to walk mode
@@ -653,8 +718,16 @@ impl App {
 
         // The player's drill runs before streaming too, for the same reason
         // the drones dig first: edits land in this frame's remesh.
-        self.update_drilling(dt);
+        if !trading {
+            self.update_drilling(dt);
+        }
         let Some(active) = &mut self.active else { return };
+
+        // The townsfolk take their stroll, and one of them may say hello.
+        active.villagers.update(dt);
+        if let Some(line) = active.villagers.greeting_for(active.player.position) {
+            active.greeting = Some((line.to_string(), Instant::now()));
+        }
 
         // Drones dig before streaming, so the chunks their edits dirty get
         // re-meshed in the same frame rather than the next one.
@@ -678,16 +751,24 @@ impl App {
                 active.level_up = Some((skills::LOGISTICS.to_string(), level, Instant::now()));
             }
         }
-        // Levels feed straight back into the machines' stats.
+        // Levels feed straight back into the machines' stats, and bought
+        // cargo upgrades multiply on top of what Logistics earned.
+        let cargo_level = active.wallet.upgrade(wallet::CARGO);
         active.mining.apply_skills(
             skills::scan_depth(active.skills.level(skills::PROSPECTING)),
-            skills::capacity(
-                vx_agent::DEFAULT_CAPACITY,
-                active.skills.level(skills::LOGISTICS),
+            wallet::boosted_capacity(
+                skills::capacity(
+                    vx_agent::DEFAULT_CAPACITY,
+                    active.skills.level(skills::LOGISTICS),
+                ),
+                cargo_level,
             ),
-            skills::capacity(
-                vx_agent::DEFAULT_FLIER_CAPACITY,
-                active.skills.level(skills::LOGISTICS),
+            wallet::boosted_capacity(
+                skills::capacity(
+                    vx_agent::DEFAULT_FLIER_CAPACITY,
+                    active.skills.level(skills::LOGISTICS),
+                ),
+                cargo_level,
             ),
         );
 
@@ -718,6 +799,7 @@ impl App {
         // After the camera, because objects are culled against the frustum it
         // just refreshed.
         let mut objects = active.mining.objects();
+        objects.extend(active.villagers.objects(&active.villager_rigs));
 
         // The held drill, drawn in camera space so it rides the view. The bit
         // spins up while it is cutting and idles otherwise; a slight bob sells
@@ -745,6 +827,7 @@ impl App {
             .renderer
             .set_objects(&active.context.device, &active.context.queue, &objects);
         self.refresh_hud();
+        self.refresh_shop();
         let Some(active) = &mut self.active else { return };
 
         use wgpu::CurrentSurfaceTexture as Acquired;
@@ -838,7 +921,8 @@ impl App {
             return;
         };
 
-        let power = skills::drill_power(active.skills.level(skills::MINING));
+        let power = skills::drill_power(active.skills.level(skills::MINING))
+            * wallet::drill_multiplier(active.wallet.upgrade(wallet::DRILL));
         let step = dt * power / hardness.max(0.05);
 
         match &mut active.digging {
@@ -927,8 +1011,43 @@ impl App {
 
     /// React to a key going down, ignoring auto-repeat.
     fn handle_press(&mut self, code: KeyCode) {
+        // The shop, while open, owns the keyboard: Enter must trade, never
+        // fall through to `start_mining`.
+        if self.active.as_ref().is_some_and(|active| active.shop.open) {
+            let Some(active) = &mut self.active else { return };
+            match code {
+                KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                    let pile = active
+                        .mining
+                        .fleet
+                        .base
+                        .as_ref()
+                        .map(|base| &base.stockpile);
+                    let rows = shop::Shop::rows(pile, &active.wallet).len();
+                    let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
+                    active.shop.move_cursor(delta, rows);
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => {
+                    let pile = active
+                        .mining
+                        .fleet
+                        .base
+                        .as_mut()
+                        .map(|base| &mut base.stockpile);
+                    active.shop.confirm(pile, &mut active.wallet);
+                }
+                KeyCode::KeyE | KeyCode::Escape => {
+                    active.shop.close();
+                    active.renderer.clear_overlay(SHOP_SLOT);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match code {
             KeyCode::Escape => self.set_capture(false),
+            KeyCode::KeyE => self.open_shop_at_counter(),
             KeyCode::KeyF => {
                 if let Some(active) = &mut self.active {
                     active.mode = active.mode.toggled();
@@ -1044,6 +1163,55 @@ impl App {
         }
     }
 
+    /// Open the shop if the player is looking at the counter within reach.
+    fn open_shop_at_counter(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let Some(hit) = raycast_solid(
+            &active.world,
+            active.world.registry(),
+            active.camera.position,
+            active.camera.forward(),
+            Self::REACH,
+        ) else {
+            return;
+        };
+        if active.world.registry().get_or_air(hit.id).name == "engine:counter" {
+            active.shop.open_at_counter();
+        }
+    }
+
+    /// Rebuild and upload the shop panel while it is open. Closing clears the
+    /// slot in the key handler, so an unset slot keeps frames byte-identical.
+    fn refresh_shop(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.shop.open {
+            return;
+        }
+        let pile = active
+            .mining
+            .fleet
+            .base
+            .as_ref()
+            .map(|base| &base.stockpile);
+        let pixels = shop::render_shop(&active.shop, pile, &active.wallet);
+        let (width, height) = active.renderer.size();
+        let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = shop::SHOP_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            SHOP_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (shop::SHOP_WIDTH, shop::SHOP_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     /// Rebuild and upload the HUD panel. Cheap enough to run every frame,
     /// which the fast-moving drill bar wants anyway.
     fn refresh_hud(&mut self) {
@@ -1052,11 +1220,15 @@ impl App {
         let level_up = active.level_up.as_ref().and_then(|(skill, level, at)| {
             (at.elapsed().as_secs_f32() < 2.5).then(|| (skill.clone(), *level))
         });
+        let greeting = active.greeting.as_ref().and_then(|(line, at)| {
+            (at.elapsed().as_secs_f32() < 3.0).then(|| line.clone())
+        });
         let content = hud::HudContent {
             skills: &active.skills,
             status: active.mining.status(),
             drilling: active.digging.map(|(_, progress)| progress),
             level_up,
+            greeting,
         };
         let pixels = hud::render_hud(&content);
 
@@ -1166,6 +1338,9 @@ impl App {
         }
         if let Err(error) = active.skills.save(save.root()) {
             log::error!("could not save the skill sheet: {error}");
+        }
+        if let Err(error) = active.wallet.save(save.root()) {
+            log::error!("could not save the wallet: {error}");
         }
     }
 
@@ -1292,9 +1467,11 @@ impl ApplicationHandler for App {
 
         let mut map = MapState::new();
         let mut skills = Skills::new();
+        let mut wallet = Wallet::new();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
+            wallet.load(save.root());
         }
 
         self.active = Some(Active {
@@ -1322,6 +1499,11 @@ impl ApplicationHandler for App {
             level_up: None,
             hand_rig: Rig::hand_drill(),
             drill_spin: 0.0,
+            villagers: Villagers::new(),
+            villager_rigs: Villagers::rigs(),
+            greeting: None,
+            wallet,
+            shop: shop::Shop::new(),
         });
 
         self.last_frame = Instant::now();

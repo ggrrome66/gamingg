@@ -215,6 +215,10 @@ fn column_colour(world: &World, state: &MapState, x: i32, z: i32) -> Option<([f3
                 "engine:sand" => [0.78, 0.72, 0.51],
                 "engine:dirt" => [0.44, 0.32, 0.22],
                 "engine:container" => [0.63, 0.67, 0.73],
+                "engine:plank" | "engine:counter" => [0.62, 0.45, 0.26],
+                "engine:roof" => [0.52, 0.24, 0.17],
+                "engine:log" => [0.38, 0.27, 0.16],
+                "engine:leaves" | "engine:tall_grass" => [0.20, 0.42, 0.16],
                 _ => [0.51, 0.51, 0.53],
             }
         };
@@ -365,18 +369,21 @@ mod tests {
     #[test]
     fn loaded_terrain_colours_match_their_surface_blocks() {
         // The map must tell the truth about ground it can see directly.
-        let world = world_with_origin();
+        // Centred in the wilderness: the starting village's paving around the
+        // origin is deliberately none of the classifiable colours below.
+        let mut world = World::new(2024);
+        world.load_around(ChunkPos::new(12, 12), 2);
         let mut state = MapState::new();
-        state.explore_around(ChunkPos::new(0, 0), 2);
+        state.explore_around(ChunkPos::new(12, 12), 2);
 
-        let pixels = render_map(&world, &state, (0, 0), &[]);
+        let pixels = render_map(&world, &state, (200, 200), &[]);
         let size = MAP_SIZE as i32;
         let zoom = state.zoom;
 
         let mut checked = 0;
         for (px, py) in [(96, 96), (60, 96), (96, 60), (120, 120)] {
-            let x = (px - size / 2) * zoom;
-            let z = (py - size / 2) * zoom;
+            let x = 200 + (px - size / 2) * zoom;
+            let z = 200 + (py - size / 2) * zoom;
             let Some(clear) = world.surface_y(x, z) else { continue };
             let name = world
                 .registry()

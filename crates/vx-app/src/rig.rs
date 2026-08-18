@@ -100,6 +100,66 @@ impl Rig {
         }
     }
 
+    /// A villager: boots, trousers, jacket, arms and a head, with the
+    /// proportions nudged per variant so the town is not staffed by clones.
+    pub fn villager(variant: usize) -> Self {
+        // Deterministic small nudges, one per variant.
+        let stretch = match variant % 3 {
+            1 => 1.08,
+            2 => 0.92,
+            _ => 1.0,
+        };
+        let girth = match variant % 3 {
+            2 => 1.18,
+            _ => 1.0,
+        };
+        let jacket = match variant % 3 {
+            1 => slot::HULL, // one of them wears work orange
+            _ => slot::CLOTH,
+        };
+        let leg = 0.62 * stretch;
+        let torso_h = 0.52 * stretch;
+        let torso_top = leg + torso_h;
+        Rig {
+            parts: vec![
+                // Legs.
+                Part::fixed(
+                    Vec3::new(0.0, leg * 0.5, 0.09),
+                    Vec3::new(0.15, leg, 0.13) * Vec3::new(girth, 1.0, 1.0),
+                    slot::TREAD,
+                ),
+                Part::fixed(
+                    Vec3::new(0.0, leg * 0.5, -0.09),
+                    Vec3::new(0.15, leg, 0.13) * Vec3::new(girth, 1.0, 1.0),
+                    slot::TREAD,
+                ),
+                // Torso.
+                Part::fixed(
+                    Vec3::new(0.0, leg + torso_h * 0.5, 0.0),
+                    Vec3::new(0.24, torso_h, 0.4) * Vec3::new(girth, 1.0, girth),
+                    jacket,
+                ),
+                // Arms, hanging at the sides.
+                Part::fixed(
+                    Vec3::new(0.0, leg + torso_h * 0.55, 0.26 * girth),
+                    Vec3::new(0.11, torso_h * 0.9, 0.1),
+                    jacket,
+                ),
+                Part::fixed(
+                    Vec3::new(0.0, leg + torso_h * 0.55, -0.26 * girth),
+                    Vec3::new(0.11, torso_h * 0.9, 0.1),
+                    jacket,
+                ),
+                // Head.
+                Part::fixed(
+                    Vec3::new(0.0, torso_top + 0.15, 0.0),
+                    Vec3::new(0.24, 0.28, 0.24),
+                    slot::SKIN,
+                ),
+            ],
+        }
+    }
+
     /// The player's handheld compact boring drill, sized for the viewmodel.
     pub fn hand_drill() -> Self {
         Rig {
@@ -171,6 +231,16 @@ mod tests {
         assert_eq!(flier.parts.iter().filter(|part| part.spin == Some(Spin::Yaw)).count(), 1);
 
         assert_eq!(Rig::hand_drill().parts.len(), 4);
+
+        for variant in 0..3 {
+            let villager = Rig::villager(variant);
+            assert_eq!(villager.parts.len(), 6);
+            assert!(villager.parts.iter().all(|part| part.spin.is_none()));
+        }
+        // The variants must actually look different.
+        let a = Rig::villager(0).objects(Vec3::ZERO, 0.0, 0.0);
+        let b = Rig::villager(1).objects(Vec3::ZERO, 0.0, 0.0);
+        assert_ne!(a[2].model, b[2].model, "variant 1 is a clone of variant 0");
     }
 
     #[test]
@@ -197,7 +267,7 @@ mod tests {
     fn every_part_sits_above_the_ground_point() {
         // position.y is the ground under the rig; nothing may dip below it,
         // or machines look buried in flat terrain.
-        for rig in [Rig::digger(), Rig::flier()] {
+        for rig in [Rig::digger(), Rig::flier(), Rig::villager(0), Rig::villager(1), Rig::villager(2)] {
             for object in rig.objects(Vec3::new(0.0, 50.0, 0.0), 0.7, 0.3) {
                 assert!(
                     object.bounds_min.y >= 50.0 - 0.02,

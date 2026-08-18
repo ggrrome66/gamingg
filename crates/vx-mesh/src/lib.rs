@@ -11,7 +11,7 @@
 //! visibility rules are exactly the things that are painful to debug visually.
 
 use bytemuck::{Pod, Zeroable};
-use vx_core::{BlockId, BlockRegistry, Face, CHUNK_HEIGHT, CHUNK_SIZE};
+use vx_core::{BlockId, BlockRegistry, Face, Shape, CHUNK_HEIGHT, CHUNK_SIZE};
 use vx_world::BlockView;
 
 /// Size of the volume being meshed, per axis.
@@ -76,6 +76,11 @@ fn face_is_visible(registry: &BlockRegistry, block: BlockId, neighbour: BlockId)
     if block.is_air() {
         return false;
     }
+    // Cross blocks have no cube faces; their geometry comes from the cross
+    // pass, and they must never merge into the greedy sweep.
+    if registry.get_or_air(block).shape == Shape::Cross {
+        return false;
+    }
     // A fully opaque neighbour hides this face entirely.
     if registry.is_opaque(neighbour) {
         return false;
@@ -97,7 +102,66 @@ pub fn build_mesh(view: &impl BlockView, registry: &BlockRegistry, chunk_origin:
     for face in Face::ALL {
         mesh_face_direction(&mut mesh, view, registry, chunk_origin, face);
     }
+    mesh_cross_blocks(&mut mesh, view, registry, chunk_origin);
     mesh
+}
+
+/// Emit the crossed-quad plants.
+///
+/// Each cross block becomes two diagonal quads, and each quad is pushed twice
+/// with reversed winding: the terrain pipeline culls back faces, so a plant
+/// must carry its own back or vanish from half the compass.
+fn mesh_cross_blocks(
+    mesh: &mut Mesh,
+    view: &impl BlockView,
+    registry: &BlockRegistry,
+    origin: [i32; 3],
+) {
+    for y in 0..CHUNK_HEIGHT {
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let block = view.block_at(origin[0] + x, origin[1] + y, origin[2] + z);
+                if block.is_air() {
+                    continue;
+                }
+                let def = registry.get_or_air(block);
+                if def.shape != Shape::Cross {
+                    continue;
+                }
+                let tile = def.texture(Face::PosX) as u32;
+                let (fx, fy, fz) = (
+                    (origin[0] + x) as f32,
+                    (origin[1] + y) as f32,
+                    (origin[2] + z) as f32,
+                );
+                // Lit as if lying flat: plants take the ground's light, and
+                // neither diagonal ever shows a dark "back of the leaf".
+                let up = [0.0, 1.0, 0.0];
+                // Corners run top-left, top-right, bottom-right, bottom-left
+                // so v grows downward — texture row 0 is the top of the
+                // blades.
+                let diagonals = [
+                    [
+                        [fx, fy + 1.0, fz],
+                        [fx + 1.0, fy + 1.0, fz + 1.0],
+                        [fx + 1.0, fy, fz + 1.0],
+                        [fx, fy, fz],
+                    ],
+                    [
+                        [fx + 1.0, fy + 1.0, fz],
+                        [fx, fy + 1.0, fz + 1.0],
+                        [fx, fy, fz + 1.0],
+                        [fx + 1.0, fy, fz],
+                    ],
+                ];
+                for corners in diagonals {
+                    mesh.push_quad(corners, up, [1.0, 1.0], tile);
+                    let reversed = [corners[3], corners[2], corners[1], corners[0]];
+                    mesh.push_quad(reversed, up, [1.0, 1.0], tile);
+                }
+            }
+        }
+    }
 }
 
 /// Sweep one face direction, slice by slice.
@@ -251,6 +315,7 @@ mod tests {
         stone: BlockId,
         glass: BlockId,
         water: BlockId,
+        plant: BlockId,
     }
 
     fn fixture() -> Fixture {
@@ -262,7 +327,10 @@ mod tests {
         let water = registry
             .register(BlockDef::uniform("test:water", 2).translucent().non_solid())
             .unwrap();
-        Fixture { registry, stone, glass, water }
+        let plant = registry
+            .register(BlockDef::uniform("test:plant", 3).cross())
+            .unwrap();
+        Fixture { registry, stone, glass, water, plant }
     }
 
     fn local(x: i32, y: i32, z: i32) -> LocalPos {
@@ -312,6 +380,45 @@ mod tests {
         assert_eq!(mesh.vertices.len(), 24);
         assert_eq!(mesh.indices.len(), 36);
         assert_eq!(mesh.triangle_count(), 12);
+    }
+
+    #[test]
+    fn a_cross_block_is_two_double_sided_diagonals() {
+        let fixture = fixture();
+        let mut chunk = Chunk::empty(ChunkPos::new(0, 0));
+        chunk.set(local(5, 40, 5), fixture.plant);
+
+        let mesh = mesh_of(&chunk, &fixture.registry);
+
+        // Two diagonals, each emitted front and back: 4 quads, 8 triangles,
+        // and not a single axis-aligned cube face.
+        assert_eq!(mesh.quad_count(), 4);
+        assert_eq!(mesh.triangle_count(), 8);
+        for vertex in &mesh.vertices {
+            let [x, _, z] = vertex.position;
+            assert!(
+                (x - 5.0).abs() < 1.0e-6 && (z - 5.0).abs() < 1.0e-6
+                    || (x - 6.0).abs() < 1.0e-6 && (z - 6.0).abs() < 1.0e-6
+                    || (x - 6.0).abs() < 1.0e-6 && (z - 5.0).abs() < 1.0e-6
+                    || (x - 5.0).abs() < 1.0e-6 && (z - 6.0).abs() < 1.0e-6,
+                "cross vertex off the cell corners: {:?}",
+                vertex.position
+            );
+        }
+    }
+
+    #[test]
+    fn a_plant_never_hides_its_neighbours_faces() {
+        let fixture = fixture();
+        let mut chunk = Chunk::empty(ChunkPos::new(0, 0));
+        chunk.set(local(5, 40, 5), fixture.stone);
+        let bare = mesh_of(&chunk, &fixture.registry);
+
+        // Grass against the stone's +X face: the stone must keep all six
+        // faces, and the mesh gains exactly the plant's four quads.
+        chunk.set(local(6, 40, 5), fixture.plant);
+        let planted = mesh_of(&chunk, &fixture.registry);
+        assert_eq!(planted.quad_count(), bare.quad_count() + 4);
     }
 
     #[test]

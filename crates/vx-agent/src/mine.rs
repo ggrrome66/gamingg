@@ -189,11 +189,40 @@ impl MinePlan {
     }
 }
 
-/// Height of the topmost solid block in a column, or `None` when the column is
-/// not loaded or is empty.
+/// Is this block vegetation rather than ground — something a machine plans
+/// *through*, not *on*?
+///
+/// Named like [`crate::prospect::is_ore`]: the planner recognises the engine's
+/// plants by name rather than depending on how they generate. Mod vegetation
+/// will want a real block property; until then it is ground like anything
+/// else, which is merely conservative.
+pub fn is_vegetation(world: &World, pos: BlockPos) -> bool {
+    is_vegetation_id(world.registry(), world.block(pos))
+}
+
+/// [`is_vegetation`] by block id, for callers already holding the registry.
+pub fn is_vegetation_id(registry: &vx_core::BlockRegistry, block: vx_core::BlockId) -> bool {
+    registry.get(block).is_some_and(|def| {
+        matches!(
+            def.name.as_str(),
+            "engine:log" | "engine:leaves" | "engine:tall_grass"
+        )
+    })
+}
+
+/// Height of the topmost *ground* block in a column, or `None` when the
+/// column is not loaded or is empty.
+///
+/// Walks down through vegetation: a tree canopy is not a hilltop, and taking
+/// it for one gave a pit a rim six blocks up in the branches — benches in
+/// mid-air, a portal on a treetop, and a drone stuck the moment it spawned.
 pub fn ground_height(world: &World, x: i32, z: i32) -> Option<i32> {
-    // `surface_y` reports the first clear block above the ground.
-    world.surface_y(x, z).map(|clear| clear - 1)
+    // `surface_y` reports the first clear block above the topmost solid.
+    let mut y = world.surface_y(x, z)? - 1;
+    while y > 0 && (!world.is_solid(BlockPos::new(x, y, z)) || is_vegetation(world, BlockPos::new(x, y, z))) {
+        y -= 1;
+    }
+    Some(y)
 }
 
 /// The part of `area` worth mining: the bounding box of the ore inside it, or

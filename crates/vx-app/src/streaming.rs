@@ -274,9 +274,11 @@ mod tests {
     #[test]
     fn parallel_meshing_produces_actual_geometry() {
         // Guards against the equivalence test above passing vacuously because
-        // both paths returned nothing.
+        // both paths returned nothing. Out in the wilderness — the village
+        // plateau at the origin greedy-meshes to almost nothing, flat ground
+        // being exactly what greedy meshing is best at.
         let mut world = World::new(7);
-        world.load_around(ChunkPos::new(0, 0), 1);
+        world.load_around(ChunkPos::new(10, 10), 1);
 
         let positions: Vec<ChunkPos> = world.loaded_chunks().collect();
         let built = ChunkStreamer::build_meshes(&world, &positions);

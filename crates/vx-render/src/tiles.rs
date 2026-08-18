@@ -29,8 +29,17 @@ pub mod slot {
     pub const TREAD: u32 = 10;
     pub const STEEL: u32 = 11;
     pub const CAB: u32 = 12;
+    pub const PLANK: u32 = 13;
+    pub const ROOF: u32 = 14;
+    pub const COUNTER: u32 = 15;
+    pub const CLOTH: u32 = 16;
+    pub const SKIN: u32 = 17;
+    pub const LOG_SIDE: u32 = 18;
+    pub const LOG_TOP: u32 = 19;
+    pub const LEAVES: u32 = 20;
+    pub const TUFT: u32 = 21;
     /// Total generated tiles.
-    pub const COUNT: u32 = 13;
+    pub const COUNT: u32 = 22;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -136,6 +145,87 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.80, 0.88, 0.94], noise * 0.03)
                     } else {
                         shade([0.55, 0.66, 0.76], noise * 0.05)
+                    }
+                }
+                slot::PLANK => {
+                    // Warm boards with a dark seam every fourth row and the
+                    // odd nail head, so a wall reads as carpentry.
+                    if y % 4 == 3 {
+                        shade([0.38, 0.26, 0.14], noise * 0.06)
+                    } else if y % 4 == 1 && x % 8 == 2 {
+                        shade([0.30, 0.28, 0.26], 0.0) // nails
+                    } else {
+                        shade([0.62, 0.44, 0.24], noise * 0.10)
+                    }
+                }
+                slot::ROOF => {
+                    // Staggered shingle courses in a weathered red-brown.
+                    let course = y / 4;
+                    let shifted = x + course * 2;
+                    if y % 4 == 0 || shifted % 8 == 0 {
+                        shade([0.30, 0.13, 0.10], noise * 0.06)
+                    } else {
+                        shade([0.50, 0.22, 0.15], noise * 0.10)
+                    }
+                }
+                slot::COUNTER => {
+                    // Dark shop wood under a brass strip: the one block in
+                    // town you trade over, so it has to stand apart.
+                    if y < 3 {
+                        shade([0.72, 0.58, 0.22], noise * 0.06)
+                    } else if y % 5 == 4 {
+                        shade([0.24, 0.16, 0.10], noise * 0.05)
+                    } else {
+                        shade([0.40, 0.28, 0.16], noise * 0.08)
+                    }
+                }
+                slot::CLOTH => {
+                    // Woven fabric: a faint checked weave in a muted blue.
+                    if (x + y) % 2 == 0 {
+                        shade([0.28, 0.38, 0.55], noise * 0.05)
+                    } else {
+                        shade([0.24, 0.33, 0.49], noise * 0.05)
+                    }
+                }
+                slot::SKIN => shade([0.82, 0.62, 0.46], noise * 0.05),
+                slot::LOG_SIDE => {
+                    // Bark: vertical ridges, the grain running with the trunk.
+                    if jitter(tile ^ 0x2f, x, 0) > 0.1 {
+                        shade([0.26, 0.17, 0.09], noise * 0.08)
+                    } else {
+                        shade([0.38, 0.26, 0.14], noise * 0.10)
+                    }
+                }
+                slot::LOG_TOP => {
+                    // End grain: rough growth rings around the centre.
+                    let cx = x as f32 - 7.5;
+                    let cy = y as f32 - 7.5;
+                    let ring = (cx * cx + cy * cy).sqrt() as u32;
+                    if ring.is_multiple_of(3) {
+                        shade([0.44, 0.31, 0.17], noise * 0.06)
+                    } else {
+                        shade([0.60, 0.44, 0.24], noise * 0.08)
+                    }
+                }
+                slot::LEAVES => {
+                    // Mottled two-tone canopy. Opaque on purpose — the
+                    // "fast graphics" look — so foliage never joins water in
+                    // the unsorted alpha-blend pass.
+                    if jitter(tile ^ 0x63, x / 2, y / 2) > 0.05 {
+                        shade([0.16, 0.34, 0.12], noise * 0.10)
+                    } else {
+                        shade([0.24, 0.46, 0.16], noise * 0.12)
+                    }
+                }
+                slot::TUFT => {
+                    // A few grass blades on a transparent field; drawn as a
+                    // crossed pair of quads in the world, not a cube.
+                    let sway = (jitter(tile ^ 0x11, x, 0) * 3.0) as i32;
+                    let blade = x % 5 == 2 && (y as i32) > 4 + sway && jitter(tile ^ 0x19, x, 0) > -0.3;
+                    if blade {
+                        shade([0.30, 0.52, 0.20], noise * 0.12)
+                    } else {
+                        [0, 0, 0, 0]
                     }
                 }
                 // Unknown slots get magenta, the universal "missing texture".
@@ -307,14 +397,22 @@ mod tests {
     }
 
     #[test]
-    fn only_water_is_transparent() {
+    fn only_water_and_tufts_are_transparent() {
         for tile in 0..slot::COUNT {
             let pixels = generate_tile(tile);
             let alphas: Vec<u8> = pixels.chunks_exact(4).map(|texel| texel[3]).collect();
-            if tile == slot::WATER {
-                assert!(alphas.iter().all(|&a| a < 255), "water should be see-through");
-            } else {
-                assert!(alphas.iter().all(|&a| a == 255), "tile {tile} should be opaque");
+            match tile {
+                slot::WATER => {
+                    assert!(alphas.iter().all(|&a| a < 255), "water should be see-through")
+                }
+                slot::TUFT => {
+                    // Blades on empty air: some texels fully clear, some
+                    // fully solid, nothing half-and-half to blend badly.
+                    assert!(alphas.contains(&0), "tuft has no clear texels");
+                    assert!(alphas.contains(&255), "tuft has no blades");
+                    assert!(alphas.iter().all(|&a| a == 0 || a == 255));
+                }
+                _ => assert!(alphas.iter().all(|&a| a == 255), "tile {tile} should be opaque"),
             }
         }
     }

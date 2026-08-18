@@ -34,6 +34,8 @@ pub struct HudContent<'a> {
     pub drilling: Option<f32>,
     /// A recent level-up to celebrate: (skill, new level).
     pub level_up: Option<(String, u32)>,
+    /// A villager's line, freshly spoken.
+    pub greeting: Option<String>,
 }
 
 /// Paint a horizontal bar with a filled fraction.
@@ -86,10 +88,13 @@ pub fn render_hud(content: &HudContent) -> Vec<u8> {
     }
     y += LINE_HEIGHT as i32;
 
-    // Line 3: a level-up shout, or the activity readout.
+    // Line 3: a level-up shout outranks a villager's word outranks the
+    // activity readout.
     if let Some((skill, level)) = &content.level_up {
         let line = format!("{} LEVEL {level}!", skill.to_uppercase());
         font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, ACCENT, &line);
+    } else if let Some(greeting) = &content.greeting {
+        font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, ACCENT, greeting);
     } else if let Some(status) = &content.status {
         font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, TEXT, status);
     }
@@ -123,7 +128,24 @@ mod tests {
             status: None,
             drilling: None,
             level_up: None,
+            greeting: None,
         }
+    }
+
+    #[test]
+    fn a_greeting_shows_and_yields_to_a_level_up() {
+        let skills = Skills::new();
+        let plain = base_content(&skills);
+        let mut greeted = base_content(&skills);
+        greeted.greeting = Some("MORNIN. FINE DAY FOR DIGGIN.".into());
+        assert_ne!(render_hud(&plain), render_hud(&greeted));
+
+        let mut both = base_content(&skills);
+        both.greeting = Some("MORNIN. FINE DAY FOR DIGGIN.".into());
+        both.level_up = Some(("mining".into(), 3));
+        let mut level_only = base_content(&skills);
+        level_only.level_up = Some(("mining".into(), 3));
+        assert_eq!(render_hud(&both), render_hud(&level_only));
     }
 
     #[test]

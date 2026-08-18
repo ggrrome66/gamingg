@@ -24,11 +24,14 @@ fn world_around(at: (i32, i32), radius: i32) -> World {
     world
 }
 
-fn solid_in(world: &World, region: VoxelAabb) -> u64 {
+/// Blocks a drone could conceivably put on the pile: everything non-air.
+/// Counting only *solids* undercounts by the grass tufts a felled tree
+/// flattens — they are non-solid, but they still land in the cargo bed.
+fn occupied_in(world: &World, region: VoxelAabb) -> u64 {
     region
         .clamped_to_world()
         .blocks()
-        .filter(|pos| world.is_solid(*pos))
+        .filter(|pos| !world.block(*pos).is_air())
         .count() as u64
 }
 
@@ -78,7 +81,11 @@ fn every_applicable_method_opens_a_real_mine() {
         operation.post_plan(plan);
 
         let events = EventBus::new();
-        let before = solid_in(&world, body.expanded(48).clamped_to_world());
+        // 48 covers the workings; the extra margin covers felling — cutting
+        // one vegetation block takes the connected tree, and a canopy at the
+        // edge of the workings spills its crown a few blocks past them.
+        let count_box = body.expanded(80).clamped_to_world();
+        let before = occupied_in(&world, count_box);
         let (outcome, ticks) = operation.run(&mut world, &events, 400_000);
 
         assert_eq!(
@@ -93,7 +100,7 @@ fn every_applicable_method_opens_a_real_mine() {
         let left = body.blocks().filter(|pos| is_ore(&world, *pos)).count();
         assert_eq!(left, 0, "{}: {left} ore blocks left in the ground", plan.method.name());
 
-        let removed = before - solid_in(&world, body.expanded(48).clamped_to_world());
+        let removed = before - occupied_in(&world, count_box);
         assert_eq!(
             operation.accounted_blocks(),
             removed,

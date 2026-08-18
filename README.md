@@ -17,7 +17,18 @@ art exists.
 
 ## Status
 
-M3 stage 5 is in. The world has real relief, meshes across all cores, draws
+M3 stage 6 is in. Every world now starts in the **same village**: an authored
+town at the origin, identical whatever the seed — plaza, paths, three houses
+and a supply shop — blended into whatever terrain the seed grew around it.
+Villagers stroll the plaza on deterministic rounds and greet you when you
+walk up. Press E at the shop counter to trade for real: sell the ore your
+flier ferried home for credits, buy drill-power and cargo upgrades that take
+effect immediately and stack on top of your skill levels. Credits and
+upgrades persist in their own small save file. The wilderness grew greenery
+too — trees (felled whole when a drone cuts any part of one) and grass
+tufts, the engine's first non-cube shape.
+
+Before that, stage 5: The world has real relief, meshes across all cores, draws
 only what the camera can see, and hides copper ore in the rock with occasional
 outcrops breaking the surface. Mark a body and the game works out how to mine
 it — a level adit into a hillside, a diagonal decline, or a benched open pit —
@@ -40,11 +51,11 @@ build in it, and it survives quitting — skills included.
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
-| `vx-world` | Chunk storage, worldgen, ore, raycast, physics, editing, saves | Done |
-| `vx-mesh` | Greedy meshing | Done |
+| `vx-world` | Chunk storage, worldgen, ore, village, flora, raycast, physics, editing, saves | Done |
+| `vx-mesh` | Greedy meshing + crossed-quad plants | Done |
 | `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
-| `vx-app` | Window, walk/fly controls, streaming, HUD, rigs, skills, `gamingg` binary | Done |
+| `vx-app` | Window, walk/fly controls, streaming, HUD, rigs, skills, villagers, shop, wallet, `gamingg` binary | Done |
 | `vx-agent` | Job board, flow fields, mine planning, scanner, flier + fleet | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
@@ -63,7 +74,15 @@ build in it, and it survives quitting — skills included.
 - Ore uses one tile for every block, so a large exposed body shows a visibly
   repeating pattern. Real art or per-block texture variation fixes it.
 - Rig parts are lit like everything else but cast no shadows and have no
-  animation beyond spin and yaw — no suspension, no articulation.
+  animation beyond spin and yaw — no suspension, no articulation. Villagers
+  glide rather than walk: no leg animation yet.
+- Villagers are not persisted — their deterministic stroll restarts each
+  run. Cosmetic only, since nothing about them accumulates yet.
+- The village ignores its surroundings beyond height blending: a plateau can
+  abut open water, and no path leads out of town.
+- Leaves do not decay when a trunk is felled by the player's drill (drones
+  fell whole trees; the handheld drill still breaks one block at a time).
+  Felled wood has nowhere to go but the pile until stage 9's crafting.
 - The viewmodel drill is drawn in world space at a camera offset, so it can
   clip into a wall you stand against. A real fix renders it in a separate
   near-scaled pass; cosmetic until then.
@@ -181,6 +200,52 @@ captures and the culling tests never set one, so every pixel-equality
 guarantee stands byte-for-byte. The same pass is deliberately the first brick
 of the terminal screen and anything else that is a flat picture.
 
+**The village is a drawing, not a dice roll.** Everything about the starting
+town is a pure function of *position only* — no seed enters anywhere, which
+is not a special case but the type signature. The plateau override lives
+inside `height_at` itself, so the minimap, spawn placement and physics agree
+about the town for free; buildings are ASCII layer blueprints stamped during
+generation and never saved (they regenerate); ore is masked from the town's
+footprint. The blending skirt smoothsteps plateau into wilderness over 24
+blocks — wide enough that even a mountain seed meets the town at a walkable
+grade.
+
+**Vegetation is not ground, and machines know it.** Trees are solid blocks,
+so the planners had to learn that a canopy is not a hilltop: `ground_height`
+walks down through vegetation, or a pit surveys its rim six blocks up in the
+branches. And a crown hanging into a bench from a tree rooted elsewhere has
+no cell to stand and prune it from — so cutting *any* part of a tree fells
+the connected whole into the cargo bed (through the same cancellable event
+path as every edit), and standing vegetation never counts as outstanding
+work. Take the trunk, take the tree.
+
+**The cross shape is the engine's first non-cube.** A grass tuft is two
+diagonal quads, each emitted twice with reversed winding because the terrain
+pipeline culls back faces — a plant must carry its own back or vanish from
+half the compass. Cross blocks never merge into the greedy sweep and never
+cull a neighbour's face; they are non-solid, so you walk through them and
+the raycast ignores them.
+
+**Selling drains the fleet's base pile.** The shop buys whatever the flier
+ferried home, which closes the loop the whole game is about: scan → mine →
+ferry → sell → upgrade → dig deeper. There is deliberately no separate
+player inventory yet (stage 7); the pile *is* the wealth. Prices and
+upgrade lines are name-keyed tables, so the shelf grows by adding rows.
+
+**Bought upgrades multiply on top of skill effects.** `wallet.dat` is its
+own small file beside `player.dat` (one concern per file, no migrations,
+same tolerant loader — a corrupt wallet is an empty wallet, never a failed
+world). A fresh wallet is the exact identity, and upgrades reach machines
+already in the field on the next frame. Retroactive upgrades feel good;
+that is deliberate. The shop counter itself has no hardness: you cannot
+drill the economy out of the town.
+
+**Villagers are deterministic clockwork.** Waypoints and pauses come from
+hashing the villager's index and stroll leg — no RNG state, nothing saved,
+two runs fed the same frame times are bit-identical. Greetings use
+hysteresis (speak at 3 m, re-arm at 5 m), so walking up gets one line, not
+a line per frame.
+
 **The font is data, the HUD is pixels.** Text is a hand-set 5×7 bitmap —
 A–Z, digits, punctuation, seven bytes a glyph — stamped into any RGBA buffer.
 The HUD composites a small panel on the CPU exactly the way the minimap does
@@ -289,6 +354,7 @@ Controls:
 | Hold left button | Run the drill — harder rock takes longer |
 | Right click | Place the selected block |
 | `1`–`5` | Choose stone, dirt, grass, sand or the base container |
+| `E` | Trade at the shop counter (arrows pick, `Enter` trades, `E` leaves) |
 | `M` | Mark a corner of an ore body (two marks make an area) |
 | `Tab` | Cycle the proposed mining method |
 | `Enter` | Send a drone to dig it |
@@ -324,6 +390,12 @@ cargo run --release -p vx-app -- --screenshot pit.ppm --at 146,30 --dig pit
 
 # same, but framed close on the digger rig itself
 cargo run --release -p vx-app -- --screenshot rig.ppm --at 146,30 --dig auto --close
+
+# the starting village (identical in every world), villagers included
+cargo run --release -p vx-app -- --screenshot village.ppm --at 0,0
+
+# the same view with the supply shop panel open over it
+cargo run --release -p vx-app -- --screenshot shop.ppm --at 0,4 --shop
 ```
 
 `--dig` runs a whole excavation headlessly against generated terrain — then
