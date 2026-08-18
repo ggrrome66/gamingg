@@ -33,6 +33,7 @@ pub struct TerrainBlocks {
     pub water: BlockId,
     pub bedrock: BlockId,
     pub copper_ore: BlockId,
+    pub container: BlockId,
 }
 
 impl TerrainBlocks {
@@ -63,6 +64,9 @@ impl TerrainBlocks {
             copper_ore: register(
                 BlockDef::uniform("engine:copper_ore", 7).with_hardness(Some(2.5)),
             ),
+            // The fleet's drop-off. Placing one declares the base; the world
+            // knows it only as a block, and the fleet keys off its position.
+            container: register(BlockDef::uniform("engine:container", 8).with_hardness(Some(1.5))),
         }
     }
 
@@ -77,6 +81,7 @@ impl TerrainBlocks {
             water: registry.id_of("engine:water")?,
             bedrock: registry.id_of("engine:bedrock")?,
             copper_ore: registry.id_of("engine:copper_ore")?,
+            container: registry.id_of("engine:container")?,
         })
     }
 }

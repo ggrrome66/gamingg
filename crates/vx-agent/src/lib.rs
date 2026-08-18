@@ -16,13 +16,17 @@
 //!   planning their own.
 //! - [`drone`] — one machine's position, cargo and reach.
 //! - [`operation`] — the tick that turns a plan into a hole in the ground.
-//! - [`prospect`] — finding ore by eye; the scanner grows from here.
+//! - [`prospect`] — finding ore: by eye, and by the scanner's column walk.
+//! - [`flier`] — the aircraft: trivial movement, above all the trouble.
+//! - [`fleet`] — the air coordinator: sweeps, pings, the ferry loop, the base.
 //! - [`stockpile`] — what came back, keyed by block name.
 
 pub mod aabb;
 pub mod drone;
 #[cfg(test)]
 mod fixture;
+pub mod fleet;
+pub mod flier;
 pub mod flow;
 pub mod job;
 pub mod mine;
@@ -32,9 +36,11 @@ pub mod stockpile;
 
 pub use aabb::VoxelAabb;
 pub use drone::{Drone, DroneState, DEFAULT_CAPACITY, DEFAULT_GRADE};
+pub use fleet::{Base, Fleet};
+pub use flier::{Flier, FlierState, CLEARANCE, DEFAULT_FLIER_CAPACITY};
 pub use flow::{is_standable, settle, FlowField, STEP, UNREACHABLE};
 pub use job::{DroneId, Job, JobBoard, JobId, JobKind};
 pub use mine::{options, plan, propose, MineMethod, MinePlan, PIT_MAX_DEPTH};
 pub use operation::{Operation, RunOutcome, TickReport};
-pub use prospect::{find_body, is_ore};
+pub use prospect::{find_body, is_ore, scan_columns, Ping, Sector, SCAN_DEPTH, SECTOR_SIZE};
 pub use stockpile::Stockpile;

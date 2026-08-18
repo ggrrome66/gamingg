@@ -10,7 +10,7 @@
 //! The seed and position are the ones the screenshots use, so a failure here
 //! and a bad screenshot are the same bug.
 
-use vx_agent::{find_body, is_ore, options, MineMethod, Operation, RunOutcome, VoxelAabb};
+use vx_agent::{find_body, is_ore, options, scan_columns, MineMethod, Operation, RunOutcome, Sector, VoxelAabb, SCAN_DEPTH};
 use vx_core::{BlockPos, ChunkPos, EventBus};
 use vx_world::World;
 
@@ -185,4 +185,64 @@ fn a_chunk_boundary_does_not_split_a_body() {
     for pos in body.blocks().filter(|pos| is_ore(&world, *pos)) {
         assert!(world.is_loaded(pos.chunk()), "ore in an unloaded chunk at {pos:?}");
     }
+}
+
+#[test]
+fn every_ping_is_honest_on_real_ground() {
+    // Any ping the scanner raises must have real ore within SCAN_DEPTH under
+    // its column — on generated terrain, not a fixture.
+    let world = world_around(OUTCROP, 12);
+    let home = Sector::containing(OUTCROP.0, OUTCROP.1);
+
+    let mut total = 0;
+    for sx in -1..=1 {
+        for sz in -1..=1 {
+            let sector = Sector { x: home.x + sx, z: home.z + sz };
+            for ping in scan_columns(&world, sector) {
+                let (x, z) = (ping.position.x, ping.position.z);
+                let top = world.surface_y(x, z).expect("ping column loaded") - 1;
+                let hit = (0..=SCAN_DEPTH)
+                    .any(|depth| is_ore(&world, vx_core::BlockPos::new(x, top - depth, z)));
+                assert!(hit, "ping at ({x}, {z}) has no ore under it: the scanner lied");
+                total += 1;
+            }
+        }
+    }
+    assert!(total > 0, "nine sectors around a known outcrop scanned empty");
+}
+
+#[test]
+fn the_scanner_finds_ore_the_eye_cannot_see() {
+    // The scanner's value, proved on ground where it can show: gentler
+    // terrain, where shallow bodies stay roofed instead of poking through a
+    // hillside. (Around the mountainous reference spot every shallow body
+    // happens to breach somewhere — which is itself the geology working: in
+    // steep country your eyes really are nearly as good as the scanner, and
+    // the flat country is where the instrument earns its keep.)
+    const FLATS: (i32, i32) = (300, 300);
+    let mut world = World::new(SEED);
+    world.load_around(BlockPos::new(FLATS.0, 0, FLATS.1).chunk(), 12);
+    let home = Sector::containing(FLATS.0, FLATS.1);
+
+    let mut depths = Vec::new();
+    for sx in -1..=1 {
+        for sz in -1..=1 {
+            let sector = Sector { x: home.x + sx, z: home.z + sz };
+            depths.extend(scan_columns(&world, sector).iter().map(|ping| ping.depth));
+        }
+    }
+
+    eprintln!("depths across the flats: {depths:?}");
+    assert!(
+        depths.iter().any(|&depth| depth > 0),
+        "no fully buried ping anywhere; the scanner added nothing over eyes"
+    );
+}
+
+#[test]
+fn scanning_the_same_ground_twice_agrees() {
+    let a = world_around(OUTCROP, 8);
+    let b = world_around(OUTCROP, 8);
+    let sector = Sector::containing(OUTCROP.0, OUTCROP.1);
+    assert_eq!(scan_columns(&a, sector), scan_columns(&b, sector));
 }

@@ -76,41 +76,41 @@ pub struct Ping {
     pub ore_columns: u32,
 }
 
-/// Ore within scanner range of the surface at one column, as (depth, count).
+/// Ore within scanner range of the surface at one column.
 ///
-/// Walks real blocks rather than querying the deposit lattice, deliberately:
-/// the scanner then reflects the world *as it is* — a mined-out body honestly
+/// Returns `(depth, hover_y)`: how far under the surface the shallowest ore
+/// sits, and the altitude a marker over this column should hover at. Walks
+/// real blocks rather than querying the deposit lattice, deliberately: the
+/// scanner then reflects the world *as it is* — a mined-out body honestly
 /// stops pinging, and player-placed ore pings — and the cost is a bounded
 /// `SCAN_DEPTH` walk per column.
-fn column_hit(world: &World, x: i32, z: i32) -> Option<i32> {
+pub(crate) fn column_hit(world: &World, x: i32, z: i32) -> Option<(i32, i32)> {
     let clear = world.surface_y(x, z)?;
     let top = clear - 1;
-    (0..=SCAN_DEPTH).find(|depth| is_ore(world, BlockPos::new(x, top - depth, z)))
+    (0..=SCAN_DEPTH)
+        .find(|depth| is_ore(world, BlockPos::new(x, top - depth, z)))
+        .map(|depth| (depth, clear + 2))
 }
 
-/// Scan every column of `sector`, clustering hits into one [`Ping`] per body.
+/// Cluster hit columns into one [`Ping`] per body.
 ///
-/// Deterministic: same world, same sector, same pings in the same order.
-pub fn scan_columns(world: &World, sector: Sector) -> Vec<Ping> {
-    let hits: HashMap<(i32, i32), i32> = sector
-        .columns()
-        .filter_map(|(x, z)| column_hit(world, x, z).map(|depth| ((x, z), depth)))
-        .collect();
+/// Flood-fills 4-connected hits: two bodies whose columns touch merge into
+/// one ping, which is what a survey from the air would genuinely be unable to
+/// tell apart. Deterministic — hits are visited in sorted column order.
+pub(crate) fn cluster_pings(hits: &HashMap<(i32, i32), (i32, i32)>) -> Vec<Ping> {
+    let mut columns: Vec<(i32, i32)> = hits.keys().copied().collect();
+    columns.sort_unstable();
 
-    // Flood-fill 4-connected hit columns into bodies. Two bodies whose
-    // columns touch merge into one ping, which is what a survey from the air
-    // would genuinely be unable to tell apart.
     let mut seen: HashSet<(i32, i32)> = HashSet::new();
     let mut pings = Vec::new();
 
-    // Iterate in sector order so cluster discovery is deterministic.
-    for (x, z) in sector.columns() {
-        if !hits.contains_key(&(x, z)) || seen.contains(&(x, z)) {
+    for start in columns {
+        if seen.contains(&start) {
             continue;
         }
         let mut cluster = Vec::new();
-        let mut queue = vec![(x, z)];
-        seen.insert((x, z));
+        let mut queue = vec![start];
+        seen.insert(start);
         while let Some(column) = queue.pop() {
             cluster.push(column);
             for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -123,7 +123,7 @@ pub fn scan_columns(world: &World, sector: Sector) -> Vec<Ping> {
 
         let depth = cluster
             .iter()
-            .map(|column| hits[column])
+            .map(|column| hits[column].0)
             .min()
             .expect("a cluster has at least one column");
         let centre_x = cluster.iter().map(|c| c.0).sum::<i32>() / cluster.len() as i32;
@@ -138,17 +138,27 @@ pub fn scan_columns(world: &World, sector: Sector) -> Vec<Ping> {
             })
             .expect("a cluster has at least one column");
 
-        let surface = world
-            .surface_y(hover_x, hover_z)
-            .expect("a hit column has a surface");
         pings.push(Ping {
-            position: BlockPos::new(hover_x, surface + 2, hover_z),
+            position: BlockPos::new(hover_x, hits[&(hover_x, hover_z)].1, hover_z),
             depth,
             ore_columns: cluster.len() as u32,
         });
     }
 
     pings
+}
+
+/// Scan every column of `sector` at once, clustering hits into pings.
+///
+/// The instantaneous version — what a completed sweep knows. The fleet's
+/// progressive scanning covers the same columns a swath at a time and calls
+/// [`cluster_pings`] over what it has so far.
+pub fn scan_columns(world: &World, sector: Sector) -> Vec<Ping> {
+    let hits: HashMap<(i32, i32), (i32, i32)> = sector
+        .columns()
+        .filter_map(|(x, z)| column_hit(world, x, z).map(|hit| ((x, z), hit)))
+        .collect();
+    cluster_pings(&hits)
 }
 
 /// Does this position hold ore, by the naming convention every ore block
@@ -203,6 +213,44 @@ pub fn find_body(world: &World, at: (i32, i32), radius: i32) -> Option<VoxelAabb
 mod tests {
     use super::*;
     use crate::fixture::{flat, ore_body};
+
+    #[test]
+    fn sectors_tile_the_plane_including_negative_coordinates() {
+        assert_eq!(Sector::containing(0, 0), Sector { x: 0, z: 0 });
+        assert_eq!(Sector::containing(63, 63), Sector { x: 0, z: 0 });
+        assert_eq!(Sector::containing(64, 0), Sector { x: 1, z: 0 });
+        // div_euclid, not integer division: column -1 is in sector -1.
+        assert_eq!(Sector::containing(-1, -1), Sector { x: -1, z: -1 });
+        assert_eq!(Sector::containing(-64, 0), Sector { x: -1, z: 0 });
+
+        let sector = Sector { x: -1, z: 2 };
+        assert!(sector.columns().all(|(x, z)| Sector::containing(x, z) == sector));
+        assert_eq!(sector.columns().count(), (SECTOR_SIZE * SECTOR_SIZE) as usize);
+    }
+
+    #[test]
+    fn two_separate_bodies_yield_two_pings() {
+        let mut world = flat(5, 60);
+        ore_body(&mut world, VoxelAabb::new(BlockPos::new(5, 52, 5), BlockPos::new(8, 55, 8)));
+        ore_body(&mut world, VoxelAabb::new(BlockPos::new(40, 45, 40), BlockPos::new(44, 50, 44)));
+
+        let pings = scan_columns(&world, Sector { x: 0, z: 0 });
+        assert_eq!(pings.len(), 2, "got {pings:?}");
+        // Sizes and depths distinguish them, whatever the order.
+        let mut depths: Vec<i32> = pings.iter().map(|ping| ping.depth).collect();
+        depths.sort_unstable();
+        assert_eq!(depths, vec![5, 10]);
+    }
+
+    #[test]
+    fn scanning_is_deterministic() {
+        let mut world = flat(5, 60);
+        ore_body(&mut world, VoxelAabb::new(BlockPos::new(5, 52, 5), BlockPos::new(9, 56, 9)));
+        ore_body(&mut world, VoxelAabb::new(BlockPos::new(30, 40, 30), BlockPos::new(34, 44, 34)));
+
+        let sector = Sector { x: 0, z: 0 };
+        assert_eq!(scan_columns(&world, sector), scan_columns(&world, sector));
+    }
 
     #[test]
     fn a_surfaced_body_is_found_and_boxed() {

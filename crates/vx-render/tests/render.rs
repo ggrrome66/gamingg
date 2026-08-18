@@ -675,6 +675,48 @@ fn a_swarm_of_objects_draws_in_one_call() {
 }
 
 #[test]
+fn the_overlay_draws_only_when_set_and_vanishes_when_cleared() {
+    // The overlay's contract: never set means byte-identical to a build
+    // without it — which is what keeps every culling pixel-equality guarantee
+    // intact — and clearing restores exactly that.
+    let Some(context) = context() else { return };
+    let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+    let world = scene(&context, &mut renderer, 1);
+
+    let camera = surface_camera(&world, 6.0, -0.2);
+    renderer.update_camera(&context.queue, &camera);
+
+    let bare = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    assert!(!renderer.has_overlay());
+
+    // A solid magenta square, hard to miss.
+    let size = 32u32;
+    let pixels: Vec<u8> = (0..size * size).flat_map(|_| [255, 0, 255, 255]).collect();
+    renderer.set_overlay(
+        &context.device,
+        &context.queue,
+        (size, size),
+        &pixels,
+        vx_render::OverlayRect {
+            x: 8.0,
+            y: 8.0,
+            width: 64.0,
+            height: 64.0,
+        },
+    );
+    let overlaid = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    assert_ne!(bare.pixels, overlaid.pixels, "the overlay drew nothing");
+    // The quad is where the rect says, in top-left pixel coordinates.
+    assert_eq!(overlaid.pixel(40, 40)[0..3], [255, 0, 255]);
+    // And outside it, the frame is untouched.
+    assert_eq!(overlaid.pixel(200, 200), bare.pixel(200, 200));
+
+    renderer.clear_overlay();
+    let cleared = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    assert_eq!(bare.pixels, cleared.pixels, "clearing did not fully remove the overlay");
+}
+
+#[test]
 fn greedy_meshing_keeps_the_triangle_count_modest() {
     // A sanity bound on the mesher at real scale: 25 chunks of terrain should
     // be tens of thousands of triangles, not millions.

@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use glam::Vec3;
-use vx_agent::{options, MineMethod, MinePlan, Operation, VoxelAabb};
+use vx_agent::{options, Fleet, FlierState, MineMethod, MinePlan, Operation, Sector, VoxelAabb};
 use vx_core::{BlockPos, EventBus};
 use vx_render::tiles::slot;
 use vx_render::Object;
@@ -37,6 +37,12 @@ const MARKER_SIZE: f32 = 0.35;
 /// Edge length of a drone.
 const DRONE_SIZE: f32 = 0.8;
 
+/// Edge length of the flier.
+const FLIER_SIZE: f32 = 1.0;
+
+/// Edge length of a hovering ping marker.
+const PING_SIZE: f32 = 0.5;
+
 /// What the player is currently doing with the mining tools.
 #[derive(Debug, Default)]
 pub struct Mining {
@@ -53,9 +59,30 @@ pub struct Mining {
     /// Fractional ticks carried between frames, so the drone runs at a steady
     /// rate rather than at whatever the frame rate happens to be.
     pending: f64,
+    /// The air side: the flier, its surveys, and the base container.
+    pub fleet: Fleet,
 }
 
 impl Mining {
+    /// Make sure the fleet has its aircraft, hovering near `position`.
+    ///
+    /// Idempotent so callers need not track whether it happened; one flier is
+    /// this milestone's scope.
+    pub fn ensure_flier(&mut self, position: Vec3) {
+        if self.fleet.fliers.is_empty() {
+            self.fleet.add_flier(BlockPos::new(
+                position.x.floor() as i32,
+                position.y.floor() as i32 + 6,
+                position.z.floor() as i32,
+            ));
+        }
+    }
+
+    /// Send the flier to sweep the sector containing the column `(x, z)`.
+    pub fn dispatch_scan(&mut self, x: i32, z: i32) -> bool {
+        self.fleet.dispatch_scan(Sector::containing(x, z))
+    }
+
     /// Add a corner at `pos`, replacing the previous pair once two are down.
     pub fn mark(&mut self, world: &World, pos: BlockPos) {
         if self.operation.is_some() {
@@ -103,13 +130,27 @@ impl Mining {
         Some(plan.method)
     }
 
-    /// Abandon whatever is marked or running. The hole stays dug.
+    /// Abandon whatever is marked or running. The hole stays dug, and the
+    /// fleet — the flier, its surveys, the base — is not the plan's to throw
+    /// away, so it survives.
     pub fn cancel(&mut self) {
-        *self = Mining::default();
+        let fleet = std::mem::take(&mut self.fleet);
+        *self = Mining {
+            fleet,
+            ..Mining::default()
+        };
     }
 
     pub fn is_running(&self) -> bool {
         self.operation.is_some()
+    }
+
+    /// Where the ground drones are, for the minimap's dots.
+    pub fn drone_positions(&self) -> Vec<BlockPos> {
+        self.operation
+            .iter()
+            .flat_map(|operation| operation.drones.iter().map(|drone| drone.position))
+            .collect()
     }
 
     /// Advance the excavation by however many ticks `elapsed` is worth.
@@ -133,6 +174,12 @@ impl Mining {
 
         for _ in 0..ticks {
             operation.tick(world, events);
+        }
+        for _ in 0..ticks {
+            // The air side reads the world immutably and trades with the
+            // mine's stockpile.
+            let mines = self.operation.as_mut().map(std::slice::from_mut).unwrap_or(&mut []);
+            self.fleet.tick(world, mines);
         }
     }
 
@@ -172,11 +219,51 @@ impl Mining {
             }
         }
 
+        for flier in &self.fleet.fliers {
+            let centre = Vec3::new(
+                flier.position.x as f32 + 0.5,
+                flier.position.y as f32,
+                flier.position.z as f32 + 0.5,
+            );
+            objects.push(Object::standing(centre, FLIER_SIZE, slot::CONTAINER));
+        }
+
+        // Pings hover and read as copper, since copper is what they promise.
+        for ping in self.fleet.pings() {
+            let centre = Vec3::new(
+                ping.position.x as f32 + 0.5,
+                ping.position.y as f32 + 1.0,
+                ping.position.z as f32 + 0.5,
+            );
+            objects.push(Object::box_between(
+                centre - Vec3::splat(PING_SIZE * 0.5),
+                centre + Vec3::splat(PING_SIZE * 0.5),
+                slot::COPPER_ORE,
+            ));
+        }
+
         objects
     }
 
     /// A one-line readout for the title bar.
     pub fn status(&self) -> Option<String> {
+        // A working flier outranks the mining readout: it is the thing the
+        // player just ordered.
+        if let Some(flier) = self.fleet.fliers.first() {
+            match flier.state {
+                FlierState::Scanning { .. } => {
+                    return Some(format!(
+                        "scanning: {} pings so far",
+                        self.fleet.pings().len()
+                    ));
+                }
+                FlierState::ToPickup { .. } | FlierState::ToBase => {
+                    return Some(format!("ferrying: {} aboard", flier.carrying()));
+                }
+                FlierState::Idle => {}
+            }
+        }
+
         if let Some(operation) = &self.operation {
             let drone = operation.drones.first()?;
             return Some(format!(

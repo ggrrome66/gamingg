@@ -17,11 +17,15 @@ art exists.
 
 ## Status
 
-M3 is under way. The world has real relief, meshes across all cores, draws only
-what the camera can see, and hides copper ore in the rock with occasional
+M3 stage 4 is in. The world has real relief, meshes across all cores, draws
+only what the camera can see, and hides copper ore in the rock with occasional
 outcrops breaking the surface. Mark a body and the game works out how to mine
 it — a level adit into a hillside, a diagonal decline, or a benched open pit —
-and a drone cuts the excavation, drives in, digs the ore out and hauls it home.
+and a ground drone cuts the excavation, drives in, digs the ore out and hauls
+it to the mine mouth. A flying drone sweeps sectors and drops pings on ore
+buried up to 24 blocks down, and once you place a container it ferries every
+pile home automatically. A fog-of-war minimap paints in as you walk — and as
+the flier sweeps — with live dots for you, the drones, the pings and the base.
 You can walk on it, build in it, and it survives quitting.
 
 | Crate | What it does | State |
@@ -29,10 +33,10 @@ You can walk on it, build in it, and it survives quitting.
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
 | `vx-world` | Chunk storage, worldgen, ore, raycast, physics, editing, saves | Done |
 | `vx-mesh` | Greedy meshing | Done |
-| `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, offscreen capture | Done |
+| `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlay, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
 | `vx-app` | Window, walk/fly controls, streaming, `gamingg` binary | Done |
-| `vx-agent` | Job board, flow fields, mine planning, one drone | Done |
+| `vx-agent` | Job board, flow fields, mine planning, scanner, flier + fleet | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
 
@@ -57,9 +61,13 @@ You can walk on it, build in it, and it survives quitting.
   tracks how far a drone has run since it last climbed.
 - Only one drone. The job board is built for a swarm and nothing exercises it
   yet.
-- A running excavation is not saved. The hole is — block edits go through the
-  same path a player's do — but quitting mid-dig loses the drone and the job
-  board, and the marked plan has to be set up again.
+- A running excavation is not saved, and neither is the fleet. The holes are —
+  block edits go through the same path a player's do — but quitting mid-dig
+  loses the drone, the job board, the surveys and the base declaration.
+- The minimap draws explored-but-unloaded ground from the generator, so your
+  edits and mine holes only show on it while their chunks are loaded. The
+  trade is that the map stores nothing but the explored set.
+- One flier. The fleet is shaped for more; nothing exercises it.
 - No inventory, no UI, no audio, and no gamepad support.
 
 ## Design notes
@@ -135,6 +143,35 @@ can climb out of.
 can cut standing on its own floor. A three-block corridor needs somebody a block
 off the ground to cut the roof, and on a level tunnel there is nowhere to stand.
 
+**The scanner samples real blocks, not the deposit function.** For each surface
+column it walks up to 24 blocks down looking for ore, then clusters adjacent
+hits into one ping per body. Reading the pure deposit lattice would have been
+cheaper and always right about generated terrain — and wrong about everything
+else: a mined-out body must honestly stop pinging, and player-placed ore must
+ping. Depth-0 pings are outcrops anyone can eyeball; the depth-1-to-24 band is
+what the scanner is for, and in practice that band matters most on gentle
+terrain — in steep country shallow bodies usually breach a hillside somewhere,
+so your eyes really are nearly as good as the instrument there.
+
+**The flier's movement is trivial by design.** It flies at a fixed clearance
+over whichever column it is over, one block per tick horizontally, climbing
+first before entering a column whose ground is too close — so it is never
+inside terrain, and a cliff costs climb time instead of a collision. No flow
+fields, no reachability: not needing them is the fantasy of the flier, and it
+is also what makes it nearly free to simulate.
+
+**The overlay draws only when set.** The minimap goes through a generic 2D
+pass — any RGBA image at any screen rectangle, no depth test — and headless
+captures and the culling tests never set one, so every pixel-equality
+guarantee stands byte-for-byte. The same pass is deliberately the first brick
+of the terminal screen and anything else that is a flat picture.
+
+**The map's only state is the explored set.** Worldgen is a pure function of
+`(seed, position)`, so explored-but-unloaded terrain is recomputed from the
+height field on demand rather than cached as thumbnails. `explored.dat` is a
+list of chunk coordinates and nothing else, and a corrupt one logs and starts
+empty — player knowledge must never take the world down with it.
+
 **Every visible outcrop has ore continuing beneath it.** A surface block only
 shows ore when the body also fills the blocks below it. Without that rule a body
 could graze the surface and leave a single speck leading nowhere, players would
@@ -199,11 +236,14 @@ Controls:
 | `Left Ctrl` | Sprint |
 | Click | Capture the mouse; once captured, break a block |
 | Right click | Place the selected block |
-| `1`–`4` | Choose stone, dirt, grass or sand |
+| `1`–`5` | Choose stone, dirt, grass, sand or the base container |
 | `M` | Mark a corner of an ore body (two marks make an area) |
 | `Tab` | Cycle the proposed mining method |
 | `Enter` | Send a drone to dig it |
 | `Backspace` | Cancel the marked plan |
+| `G` | Send the flier to scan the sector you are standing in |
+| `N` | Toggle the minimap |
+| `[` / `]` | Zoom the minimap out / in |
 | `F` | Toggle walking and flying |
 | `F5` | Save |
 | `Escape` | Release the mouse |
@@ -231,9 +271,11 @@ cargo run --release -p vx-app -- --screenshot mine.ppm --at 146,30 --dig auto
 cargo run --release -p vx-app -- --screenshot pit.ppm --at 146,30 --dig pit
 ```
 
-`--dig` runs a whole excavation headlessly against generated terrain, so it is
-both a screenshot tool and the fastest way to see whether a change to the
-planners still produces a mine a drone can drive.
+`--dig` runs a whole excavation headlessly against generated terrain — then
+sweeps the surrounding sector with the flier and draws the pings, the aircraft
+and the minimap into the frame. It is both a screenshot tool and the fastest
+way to see whether a change still produces a mine a drone can drive and a
+survey the scanner can fly.
 
 The render tests do the same thing and assert on the pixels. Both run against a
 software Vulkan driver, so no GPU is required:

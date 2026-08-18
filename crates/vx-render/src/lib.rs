@@ -11,6 +11,7 @@ pub mod gpu;
 pub mod headless;
 pub mod mesh_buffer;
 pub mod object;
+pub mod overlay;
 pub mod tiles;
 
 use std::collections::HashMap;
@@ -24,6 +25,7 @@ pub use frustum::Frustum;
 pub use gpu::{GpuContext, GpuError, WindowSurface, DEPTH_FORMAT};
 pub use mesh_buffer::{ChunkMesh, VERTEX_LAYOUT};
 pub use object::{Object, ObjectBatch, ObjectInstance, INSTANCE_LAYOUT};
+pub use overlay::{OverlayPass, OverlayRect};
 pub use tiles::TileTextures;
 
 /// Sky colour, used to clear each frame.
@@ -46,6 +48,10 @@ pub struct Renderer {
     /// the tile textures and the depth buffer with the terrain pass.
     object_pipeline: wgpu::RenderPipeline,
     objects: ObjectBatch,
+    /// The 2D overlay (minimap and friends). Draws only when set, so every
+    /// path that never sets one — headless captures, the culling tests — is
+    /// byte-identical to a build without it.
+    overlay: OverlayPass,
     /// Refreshed whenever the camera moves. `None` until the first update, so
     /// a frame drawn before any camera is set shows everything rather than
     /// culling against a meaningless volume.
@@ -181,6 +187,7 @@ impl Renderer {
             chunks: HashMap::new(),
             object_pipeline,
             objects: ObjectBatch::new(device),
+            overlay: OverlayPass::new(device, target_format),
             frustum: None,
             culling_enabled: true,
             width,
@@ -280,6 +287,28 @@ impl Renderer {
         self.objects.live_count()
     }
 
+    /// Put a 2D picture on screen at `rect` until cleared. See [`OverlayPass`].
+    pub fn set_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size: (u32, u32),
+        pixels: &[u8],
+        rect: OverlayRect,
+    ) {
+        let screen = (self.width, self.height);
+        self.overlay
+            .set_picture(device, queue, size, pixels, rect, screen);
+    }
+
+    pub fn clear_overlay(&mut self) {
+        self.overlay.clear();
+    }
+
+    pub fn has_overlay(&self) -> bool {
+        self.overlay.is_set()
+    }
+
     pub fn loaded_chunk_count(&self) -> usize {
         self.chunks.len()
     }
@@ -346,6 +375,9 @@ impl Renderer {
         // are standing behind.
         pass.set_pipeline(&self.object_pipeline);
         self.objects.draw(&mut pass);
+
+        // And the 2D overlay over everything, if one is set.
+        self.overlay.draw(&mut pass);
 
         drawn
     }

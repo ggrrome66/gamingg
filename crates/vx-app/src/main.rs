@@ -9,6 +9,7 @@
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
 mod controller;
+mod map;
 mod mining;
 mod streaming;
 
@@ -16,6 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use controller::{FlyController, MovementMode, WalkController};
+use map::MapState;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -265,9 +267,31 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         look_at(&mut camera, centre);
         let _ = portal;
 
+        // Sweep the sector too, so the capture shows the whole loop: the
+        // workings, the drone, the flier and the pings it found.
+        let mut fleet = vx_agent::Fleet::new();
+        fleet.add_flier(vx_core::BlockPos::new(portal.x, portal.y + 12, portal.z));
+        let sector = vx_agent::Sector::containing(options.at.0, options.at.1);
+        fleet.dispatch_scan(sector);
+        let mut scan_ticks = 0u32;
+        while !fleet.is_surveyed(sector) {
+            fleet.tick(&world, &mut []);
+            scan_ticks += 1;
+            if scan_ticks > 20_000 {
+                return Err("the survey sweep never finished".into());
+            }
+        }
+        let pings = fleet.pings();
+        println!(
+            "scan: {} pings over sector ({}, {}) in {scan_ticks} ticks",
+            pings.len(),
+            sector.x,
+            sector.z
+        );
+
         remesh_all(&context, &mut renderer, &mut world);
         renderer.update_camera(&context.queue, &camera);
-        let objects: Vec<vx_render::Object> = operation
+        let mut objects: Vec<vx_render::Object> = operation
             .drones
             .iter()
             .map(|drone| {
@@ -282,7 +306,78 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                 )
             })
             .collect();
+        for flier in &fleet.fliers {
+            objects.push(vx_render::Object::standing(
+                glam::Vec3::new(
+                    flier.position.x as f32 + 0.5,
+                    flier.position.y as f32,
+                    flier.position.z as f32 + 0.5,
+                ),
+                1.0,
+                vx_render::tiles::slot::CONTAINER,
+            ));
+        }
+        for ping in &pings {
+            let centre = glam::Vec3::new(
+                ping.position.x as f32 + 0.5,
+                ping.position.y as f32 + 1.0,
+                ping.position.z as f32 + 0.5,
+            );
+            objects.push(vx_render::Object::box_between(
+                centre - glam::Vec3::splat(0.25),
+                centre + glam::Vec3::splat(0.25),
+                vx_render::tiles::slot::COPPER_ORE,
+            ));
+        }
         renderer.set_objects(&context.device, &context.queue, &objects);
+
+        // And the minimap in the corner, exactly as the game draws it: every
+        // loaded chunk counts as explored, the surveyed sector shades in, and
+        // the dots are the drone, the flier and the pings.
+        let mut map_state = MapState::new();
+        for chunk in world.loaded_chunks().collect::<Vec<_>>() {
+            map_state.explore(chunk);
+        }
+        let mut markers = Vec::new();
+        for ping in &pings {
+            markers.push(map::Marker {
+                x: ping.position.x,
+                z: ping.position.z,
+                colour: map::colour::PING,
+                radius: 2,
+            });
+        }
+        for drone in &operation.drones {
+            markers.push(map::Marker {
+                x: drone.position.x,
+                z: drone.position.z,
+                colour: map::colour::DRONE,
+                radius: 1,
+            });
+        }
+        for flier in &fleet.fliers {
+            markers.push(map::Marker {
+                x: flier.position.x,
+                z: flier.position.z,
+                colour: map::colour::FLIER,
+                radius: 1,
+            });
+        }
+        let map_pixels = map::render_map(&world, &map_state, options.at, &markers);
+        let margin = 10.0;
+        let panel = map::MAP_SIZE as f32;
+        renderer.set_overlay(
+            &context.device,
+            &context.queue,
+            (map::MAP_SIZE, map::MAP_SIZE),
+            &map_pixels,
+            vx_render::OverlayRect {
+                x: width as f32 - panel - margin,
+                y: margin,
+                width: panel,
+                height: panel,
+            },
+        );
     } else {
         renderer.update_camera(&context.queue, &camera);
     }
@@ -366,6 +461,8 @@ struct Active {
     selected: usize,
     /// Marking a body and running a drone on it.
     mining: Mining,
+    /// The fog-of-war minimap.
+    map: MapState,
 }
 
 struct App {
@@ -475,6 +572,17 @@ impl App {
             active.save.as_ref(),
         );
 
+        // Ground near the player is explored by being there; swept sectors
+        // are explored from the air — half the reason to send the flier.
+        active.map.explore_around(centre, 8);
+        for sector in active.mining.fleet.surveyed_sectors().collect::<Vec<_>>() {
+            for chunk in map::sector_chunks(sector) {
+                active.map.explore(chunk);
+            }
+        }
+        self.refresh_minimap();
+        let Some(active) = &mut self.active else { return };
+
         active
             .renderer
             .update_camera(&active.context.queue, &active.camera);
@@ -551,8 +659,27 @@ impl App {
         ) else {
             return;
         };
-        if let Err(error) = break_block(&mut active.world, &active.events, hit.block) {
-            log::debug!("could not break {:?}: {error}", hit.block);
+        match break_block(&mut active.world, &active.events, hit.block) {
+            Err(error) => log::debug!("could not break {:?}: {error}", hit.block),
+            Ok(_) => {
+                // Breaking the base container un-declares the base. The pile
+                // it held is spilled into the mine's... nowhere yet — it is
+                // logged, and stage 7's inventory gives it somewhere to go.
+                let was_base = active
+                    .mining
+                    .fleet
+                    .base
+                    .as_ref()
+                    .is_some_and(|base| base.position == hit.block);
+                if was_base {
+                    if let Some(pile) = active.mining.fleet.clear_base() {
+                        log::info!(
+                            "base container broken; {} blocks in it are set aside",
+                            pile.total()
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -581,6 +708,14 @@ impl App {
             block,
             |position| body.contains_block(position),
         );
+        // Placing a container declares it the fleet's base.
+        if let Ok(position) = result {
+            let container = active.world.registry().id_of("engine:container");
+            if container == Some(block) {
+                active.mining.fleet.set_base(position);
+                log::info!("base container set at {position:?}");
+            }
+        }
         if let Err(error) = result {
             log::debug!("could not place at {:?}: {error}", hit.placement());
         }
@@ -610,6 +745,39 @@ impl App {
                 }
             }
             KeyCode::Enter | KeyCode::NumpadEnter => self.start_mining(),
+            KeyCode::KeyN => {
+                if let Some(active) = &mut self.active {
+                    active.map.visible = !active.map.visible;
+                    if !active.map.visible {
+                        active.renderer.clear_overlay();
+                    } else {
+                        active.map.invalidate();
+                    }
+                }
+            }
+            KeyCode::BracketLeft => {
+                if let Some(active) = &mut self.active {
+                    active.map.zoom_out();
+                    active.map.invalidate();
+                }
+            }
+            KeyCode::BracketRight => {
+                if let Some(active) = &mut self.active {
+                    active.map.zoom_in();
+                    active.map.invalidate();
+                }
+            }
+            KeyCode::KeyG => {
+                if let Some(active) = &mut self.active {
+                    let at = active.camera.position;
+                    let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
+                    if active.mining.dispatch_scan(x, z) {
+                        log::info!("flier dispatched to scan this sector");
+                    } else {
+                        log::info!("the flier is busy");
+                    }
+                }
+            }
             KeyCode::Backspace => {
                 if let Some(active) = &mut self.active {
                     active.mining.cancel();
@@ -617,13 +785,18 @@ impl App {
                 }
             }
             // Number keys pick a block to build with.
-            KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 => {
+            KeyCode::Digit1
+            | KeyCode::Digit2
+            | KeyCode::Digit3
+            | KeyCode::Digit4
+            | KeyCode::Digit5 => {
                 if let Some(active) = &mut self.active {
                     let slot = match code {
                         KeyCode::Digit1 => 0,
                         KeyCode::Digit2 => 1,
                         KeyCode::Digit3 => 2,
-                        _ => 3,
+                        KeyCode::Digit4 => 3,
+                        _ => 4,
                     };
                     if slot < active.palette.len() {
                         active.selected = slot;
@@ -667,6 +840,75 @@ impl App {
         }
     }
 
+    /// Rebuild and upload the minimap overlay, on the redraw throttle.
+    fn refresh_minimap(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.map.visible || !active.map.should_redraw() {
+            return;
+        }
+
+        let camera = active.camera.position;
+        let centre = (camera.x.floor() as i32, camera.z.floor() as i32);
+
+        let mut markers = Vec::new();
+        if let Some(base) = &active.mining.fleet.base {
+            markers.push(map::Marker {
+                x: base.position.x,
+                z: base.position.z,
+                colour: map::colour::BASE,
+                radius: 2,
+            });
+        }
+        for ping in active.mining.fleet.pings() {
+            markers.push(map::Marker {
+                x: ping.position.x,
+                z: ping.position.z,
+                colour: map::colour::PING,
+                radius: 2,
+            });
+        }
+        for position in active.mining.drone_positions() {
+            markers.push(map::Marker {
+                x: position.x,
+                z: position.z,
+                colour: map::colour::DRONE,
+                radius: 1,
+            });
+        }
+        for flier in &active.mining.fleet.fliers {
+            markers.push(map::Marker {
+                x: flier.position.x,
+                z: flier.position.z,
+                colour: map::colour::FLIER,
+                radius: 1,
+            });
+        }
+        // The player draws last, so nothing covers you.
+        markers.push(map::Marker {
+            x: centre.0,
+            z: centre.1,
+            colour: map::colour::PLAYER,
+            radius: 1,
+        });
+
+        let pixels = map::render_map(&active.world, &active.map, centre, &markers);
+        let (screen_width, _) = active.renderer.size();
+        let margin = 12.0;
+        let panel = map::MAP_SIZE as f32;
+        active.renderer.set_overlay(
+            &active.context.device,
+            &active.context.queue,
+            (map::MAP_SIZE, map::MAP_SIZE),
+            &pixels,
+            vx_render::OverlayRect {
+                x: screen_width as f32 - panel - margin,
+                y: margin,
+                width: panel,
+                height: panel,
+            },
+        );
+    }
+
     /// Write the world to disk, reporting how it went.
     fn save_world(&mut self) {
         let Some(active) = &mut self.active else { return };
@@ -677,6 +919,10 @@ impl App {
             Ok(0) => log::info!("nothing to save"),
             Ok(count) => log::info!("saved {count} chunks to {}", save.root().display()),
             Err(error) => log::error!("could not save the world: {error}"),
+        }
+        match active.map.save(save.root()) {
+            Ok(()) => log::info!("saved the map ({} explored chunks)", active.map.explored_count()),
+            Err(error) => log::error!("could not save the map: {error}"),
         }
     }
 
@@ -779,6 +1025,7 @@ impl ApplicationHandler for App {
             "engine:dirt",
             "engine:grass",
             "engine:sand",
+            "engine:container",
         ]
         .iter()
         .filter_map(|name| world.registry().id_of(name))
@@ -800,6 +1047,11 @@ impl ApplicationHandler for App {
         };
         renderer.update_camera(&context.queue, &camera);
 
+        let mut map = MapState::new();
+        if let Some(save) = &save {
+            map.load(save.root());
+        }
+
         self.active = Some(Active {
             window,
             context,
@@ -814,7 +1066,12 @@ impl ApplicationHandler for App {
             save,
             palette,
             selected: 0,
-            mining: Mining::default(),
+            mining: {
+                let mut mining = Mining::default();
+                mining.ensure_flier(camera.position);
+                mining
+            },
+            map,
         });
 
         self.last_frame = Instant::now();

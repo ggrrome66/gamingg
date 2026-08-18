@@ -24,8 +24,9 @@ pub mod slot {
     pub const WATER: u32 = 5;
     pub const BEDROCK: u32 = 6;
     pub const COPPER_ORE: u32 = 7;
+    pub const CONTAINER: u32 = 8;
     /// Total generated tiles.
-    pub const COUNT: u32 = 8;
+    pub const COUNT: u32 = 9;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -89,6 +90,18 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.78, 0.40, 0.16], noise * 0.16)
                     } else {
                         shade([0.44, 0.44, 0.47], noise * 0.10)
+                    }
+                }
+                slot::CONTAINER => {
+                    // A steel crate: riveted border around brushed panels, so
+                    // it reads as built rather than mined even at distance.
+                    let edge = x.min(TILE_SIZE - 1 - x).min(y).min(TILE_SIZE - 1 - y);
+                    if edge == 0 {
+                        shade([0.30, 0.32, 0.36], noise * 0.05)
+                    } else if edge == 1 && (x + y) % 3 == 0 {
+                        shade([0.72, 0.74, 0.78], 0.0) // rivets
+                    } else {
+                        shade([0.52, 0.56, 0.62], noise * 0.08)
                     }
                 }
                 // Unknown slots get magenta, the universal "missing texture".
