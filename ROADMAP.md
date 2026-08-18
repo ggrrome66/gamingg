@@ -80,6 +80,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 6 | `2d263c2` | Rigs, handheld drill, skills, bitmap-font HUD |
 | 6.5 | `229a299` | Starting village, villagers, trading shop, trees |
 | 7 | `42fb8ab` | Third person, drone piloting, NPC senses |
+| 8 | `f050c16` | Day/night, container towns on a lattice, the beacon network |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -140,32 +141,32 @@ eyes and take the master override, driving and cutting yourself; and NPC
 perception with line of sight and memory. The piloting layer is deliberately
 the foundation for drone-assisted combat later.
 
----
-
-## In flight — Stage 8: Frontier
-
-Day/night cycle; towns rebuilt in shipping containers and corrugated metal with
-a radio mast at the centre; **many** towns on a deterministic lattice, varied by
-size and speciality; and a beacon board posting delivery and prospecting
-contracts that can name a town you have never visited — pinning it on a map
-that is still blacked out around it.
-
-The structural piece: `height_at` currently *is* the village override, so town
-siting would read its own output. It splits into `natural_height_at` (the
-seed's honest terrain) plus a blend over nearby sites.
-
-**Nothing is pre-generated.** Because worldgen is pure in the seed, town sites
-are derivable arithmetic — "where are the towns within 5 km?" costs a few
-hundred hash evaluations and touches no chunks. Only *discovery* is stored.
+**8 — The frontier.** A day/night cycle pushed to the renderer as a uniform
+(never read from a clock in a render path, so captures stay byte-identical);
+towns rebuilt in shipping containers and corrugated metal with a radio mast at
+the centre; **many** towns on a jittered 512-block lattice, varied by size and
+speciality; and a beacon network whose derived job postings can name a town the
+player has never seen, pinning it on a map that is still black around it. The
+structural half of the round was splitting `height_at` into `natural_height_at`
+plus a blend, so town siting could stop reading its own output.
 
 ---
 
-## Next — Stage 9: the trade network
+## In flight — Stage 9: the trade network
 
 Towns get stockpiles and prices that differ between them; they broadcast what
-they need; trade drones run routes. The game-of-life economy — where a
-shortage in one town becomes a run on another — is what stage 8's beacon
-network exists to make possible.
+they need over the network stage 8 built; trade drones run routes. The
+game-of-life economy — a shortage in one town becoming a run on another — is
+the point, and it is the first thing in the game where the world changes while
+the player is not looking.
+
+Groundwork already in place: `postings_for` derives a board from a town and its
+neighbours, `Ledger` records what the player did about it, and `towns_near`
+answers "who can this mast hear" without loading a chunk. What stage 9 adds is
+state that *persists per town* — the first thing in the world that is not a
+pure function of the seed — and the rule for how it changes.
+
+---
 
 ## The arc beyond
 
@@ -181,7 +182,7 @@ network exists to make possible.
 
 ## Known rough edges
 
-Tracked in `README.md` under "Known rough edges" — currently ~20 entries, the
+Tracked in `README.md` under "Known rough edges" — currently ~25 entries, the
 notable ones being: saves store a whole chunk snapshot per modified chunk;
 water is alpha-blended without depth sorting; a running excavation is not
 persisted; only one drone and one flier are ever created; and there is no
