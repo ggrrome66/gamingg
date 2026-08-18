@@ -18,7 +18,7 @@ use vx_core::{BlockPos, EventBus};
 use vx_world::{break_block, World};
 
 use crate::aabb::VoxelAabb;
-use crate::drone::{Drone, DroneState};
+use crate::drone::{CachedRoute, Drone, DroneState, RouteKey};
 use crate::flow::{self, FlowField};
 use crate::job::{DroneId, Job, JobBoard, JobKind};
 use crate::mine::MinePlan;
@@ -75,6 +75,10 @@ pub struct Operation {
     /// Where hauled blocks are dropped off.
     pub home: BlockPos,
     pub drones: Vec<Drone>,
+    /// Flow fields built since the operation started. Purely diagnostic: the
+    /// route cache exists so a travel leg costs one build, and this is the
+    /// number a test can watch to keep that true.
+    pub fields_built: u64,
 }
 
 impl Operation {
@@ -84,6 +88,7 @@ impl Operation {
             stockpile: Stockpile::new(),
             home,
             drones: Vec::new(),
+            fields_built: 0,
         }
     }
 
@@ -210,12 +215,33 @@ impl Operation {
                     self.drones[index].state = DroneState::Digging(job.id);
                     report.dug += 1;
                 }
-                Err(_) => {
-                    // Unbreakable (bedrock) or vetoed by a mod. Leaving it and
-                    // moving on is right: a drone that jammed on one block
-                    // would hold its job forever.
-                    log::debug!("drone could not break {target:?}");
+                Err(error) => {
+                    // A veto — `next_cut` already refuses bedrock, so a mod
+                    // said no. Remember the position so the drone moves on
+                    // instead of chewing the same block until the end of time,
+                    // which is exactly what the previous version did while its
+                    // comment claimed otherwise.
+                    log::debug!("drone denied at {target:?}: {error}");
+                    self.drones[index].denied.insert(target);
                     self.drones[index].state = DroneState::Digging(job.id);
+                }
+            }
+            return;
+        }
+
+        // Cached route still valid? While the world is unedited, the region's
+        // remaining work cannot have changed either, so both the scan and the
+        // field build below are skippable and travelling costs one step.
+        if let Some(step) = self.cached_step(index, RouteKey::Work(job.id), world) {
+            match step {
+                Some(next) => {
+                    self.drones[index].move_to(next);
+                    self.drones[index].state = DroneState::Travelling(job.id);
+                    report.moved += 1;
+                }
+                None => {
+                    self.drones[index].route = None;
+                    self.give_up(index, job.id);
                 }
             }
             return;
@@ -224,10 +250,14 @@ impl Operation {
         // Slow path: is the job even still outstanding? This is the only place
         // the region is scanned, which is why the fast path above is worth
         // having.
+        //
+        // "Outstanding" counts *breakable* blocks. Bedrock does not count as
+        // work, so a region overlapping the world floor completes once all the
+        // rock that can come out has come out.
         let remaining: Vec<BlockPos> = region
             .clamped_to_world()
             .blocks()
-            .filter(|pos| world.is_solid(*pos))
+            .filter(|pos| crate::drone::is_breakable(world, *pos))
             .collect();
 
         if remaining.is_empty() {
@@ -238,7 +268,22 @@ impl Operation {
             return;
         }
 
-        self.travel_to_work(index, world, &region, &remaining, job.id, report);
+        // Breakable work remains, but everything left may have been vetoed for
+        // this drone. Release rather than complete — the blocks genuinely
+        // remain, and claiming otherwise would lie — and the operation stalls
+        // *visibly* with the job outstanding, which is the correct outcome for
+        // "a mod forbids this dig".
+        let workable: Vec<BlockPos> = remaining
+            .iter()
+            .copied()
+            .filter(|pos| !self.drones[index].denied.contains(pos))
+            .collect();
+        if workable.is_empty() {
+            self.give_up(index, job.id);
+            return;
+        }
+
+        self.travel_to_work(index, world, &region, &workable, job.id, report);
     }
 
     /// The drone's claimed job, taking a new one if it has none.
@@ -256,6 +301,12 @@ impl Operation {
         let id = self.drones[index].id;
         let job = self.board.claim_nearest(id, from)?;
         self.drones[index].job = Some(job.id);
+        // Denials are per job, and survive re-claiming the *same* job so a
+        // veto stays learned; a different job starts clean.
+        if self.drones[index].denied_job != Some(job.id) {
+            self.drones[index].denied.clear();
+            self.drones[index].denied_job = Some(job.id);
+        }
         Some(job)
     }
 
@@ -298,14 +349,34 @@ impl Operation {
         }
 
         let field = FlowField::build(world, bounds, goals);
+        self.fields_built += 1;
         match field.step_from(world, position) {
             Some(next) => {
                 self.drones[index].move_to(next);
                 self.drones[index].state = DroneState::Travelling(job);
+                self.drones[index].route = Some(CachedRoute {
+                    key: RouteKey::Work(job),
+                    edits: world.edit_count(),
+                    field,
+                });
                 report.moved += 1;
             }
             None => self.give_up(index, job),
         }
+    }
+
+    /// One step from the drone's cached field, if the cache is still valid for
+    /// `key`. `Some(None)` means "valid field, but no route from here" — which
+    /// is an answer, not a miss.
+    fn cached_step(
+        &self,
+        index: usize,
+        key: RouteKey,
+        world: &World,
+    ) -> Option<Option<BlockPos>> {
+        let cached = self.drones[index].route.as_ref()?;
+        (cached.key == key && cached.edits == world.edit_count())
+            .then(|| cached.field.step_from(world, self.drones[index].position))
     }
 
     /// Hand the job back and mark the drone stuck.
@@ -314,7 +385,7 @@ impl Operation {
     /// and a drone with a better route — or a later one, once more access is
     /// cut — should be able to pick it up.
     fn give_up(&mut self, index: usize, job: crate::job::JobId) {
-        
+        self.drones[index].route = None;
         self.board.release(job);
         self.drones[index].job = None;
         self.drones[index].state = DroneState::Stuck;
@@ -328,9 +399,16 @@ impl Operation {
     fn haul(&mut self, index: usize, world: &World, report: &mut TickReport) -> bool {
         let position = self.drones[index].position;
 
-        let close = (position.x - self.home.x).abs() <= DROP_OFF_RANGE
-            && (position.y - self.home.y).abs() <= DROP_OFF_RANGE
-            && (position.z - self.home.z).abs() <= DROP_OFF_RANGE;
+        // The drop-off is where `home` *settles to today*, and the proximity
+        // check and the navigation target must both use it. Checking closeness
+        // against the unsettled `home` while walking toward the settled one
+        // livelocked a drone the day the home column itself got dug away: it
+        // stood exactly on the settled spot, forever four blocks from a point
+        // in mid-air.
+        let drop_off = flow::settle(world, self.home);
+        let close = (position.x - drop_off.x).abs() <= DROP_OFF_RANGE
+            && (position.y - drop_off.y).abs() <= DROP_OFF_RANGE
+            && (position.z - drop_off.z).abs() <= DROP_OFF_RANGE;
 
         if close {
             let delivered = self.drones[index].cargo.total();
@@ -348,6 +426,22 @@ impl Operation {
             return true;
         }
 
+        // The homeward leg caches its field exactly like the outward one.
+        if let Some(step) = self.cached_step(index, RouteKey::Home, world) {
+            return match step {
+                Some(next) => {
+                    self.drones[index].move_to(next);
+                    self.drones[index].state = DroneState::Hauling;
+                    report.moved += 1;
+                    true
+                }
+                None => {
+                    self.drones[index].route = None;
+                    false
+                }
+            };
+        }
+
         let bounds = VoxelAabb::new(position, self.home)
             .expanded(12)
             .clamped_to_world();
@@ -355,11 +449,17 @@ impl Operation {
             return false;
         }
 
-        let field = FlowField::build(world, bounds, [flow::settle(world, self.home)]);
+        let field = FlowField::build(world, bounds, [drop_off]);
+        self.fields_built += 1;
         match field.step_from(world, position) {
             Some(next) => {
                 self.drones[index].move_to(next);
                 self.drones[index].state = DroneState::Hauling;
+                self.drones[index].route = Some(CachedRoute {
+                    key: RouteKey::Home,
+                    edits: world.edit_count(),
+                    field,
+                });
                 report.moved += 1;
                 true
             }
@@ -670,6 +770,113 @@ mod tests {
             operation.board.claimant(id).is_none(),
             "the job is still held by a drone that cannot do it"
         );
+    }
+
+    #[test]
+    fn a_long_approach_builds_one_field_not_one_per_step() {
+        // Finding A6. Travelling changes nothing about the world, so a whole
+        // leg should reuse one cached field; rebuilding a full BFS every step
+        // was the single biggest cost in the loop. The counter is the guard
+        // that keeps the cache honest.
+        let mut world = flat_world(60);
+        let region = VoxelAabb::new(BlockPos::new(30, 60, 0), BlockPos::new(32, 60, 2));
+        let start = BlockPos::new(-30, 61, 1);
+
+        let mut operation = Operation::new(start);
+        operation.add_drone(start);
+        operation.board.post(JobKind::Extract, region, 0);
+        let events = EventBus::new();
+
+        // Walk the ~60-block approach until the first dig happens.
+        let mut ticks = 0;
+        while operation.stockpile.total() + operation.drones[0].carrying() == 0 {
+            operation.tick(&mut world, &events);
+            ticks += 1;
+            assert!(ticks < 2_000, "never reached the work");
+        }
+
+        assert!(ticks > 40, "the approach was too short to prove anything");
+        assert!(
+            operation.fields_built <= 3,
+            "{} fields built over a {ticks}-tick approach; the route cache is not caching",
+            operation.fields_built
+        );
+    }
+
+    #[test]
+    fn a_region_floored_with_bedrock_still_completes() {
+        // Finding A1, half one: unbreakable blocks are not work. A job whose
+        // region contains bedrock must finish once everything that *can* come
+        // out has, rather than chewing the unbreakable block forever.
+        //
+        // A single surface layer, deliberately: a plain posted box with depth
+        // strands the drone in its own straight-sided hole, which is exactly
+        // why real excavations come from benched mine plans.
+        let mut world = flat_world(60);
+        let bedrock = world.registry().id_of("engine:bedrock").unwrap();
+        let region = VoxelAabb::new(BlockPos::new(0, 60, 0), BlockPos::new(2, 60, 2));
+        let unbreakable = BlockPos::new(1, 60, 1);
+        world.set_block(unbreakable, bedrock);
+
+        let start = BlockPos::new(-2, 61, 1);
+        let mut operation = Operation::new(start);
+        operation.add_drone(start);
+        operation.board.post(JobKind::Extract, region, 0);
+
+        let events = EventBus::new();
+        let (outcome, ticks) = operation.run(&mut world, &events, 20_000);
+
+        assert_eq!(
+            outcome,
+            RunOutcome::Finished,
+            "stalled after {ticks} ticks with the drone {:?}",
+            operation.drones[0].state
+        );
+        // The eight stone blocks came out; the bedrock did not, and the job
+        // still counts as done.
+        assert_eq!(operation.stockpile.count("engine:stone"), 8);
+        assert_eq!(world.block(unbreakable), bedrock);
+    }
+
+    #[test]
+    fn a_vetoed_block_is_skipped_and_the_job_is_never_falsely_completed() {
+        // Finding A1, half two: a mod veto is dynamic, so the drone learns the
+        // position, digs everything else, and *releases* the job rather than
+        // completing it — the block genuinely remains, and the visible stall is
+        // the honest outcome of "a mod forbids this dig".
+        let mut world = flat_world(60);
+        let forbidden = BlockPos::new(1, 60, 1);
+        let region = VoxelAabb::new(BlockPos::new(0, 60, 0), BlockPos::new(2, 60, 2));
+
+        let mut events = EventBus::new();
+        events.subscribe("guard", move |event: &mut vx_world::BlockBreakEvent| {
+            if event.position == forbidden {
+                event.cancel();
+            }
+        });
+
+        let start = BlockPos::new(-2, 61, 1);
+        let mut operation = Operation::new(start);
+        operation.add_drone(start);
+        let id = operation.board.post(JobKind::Extract, region, 0);
+
+        let (outcome, _) = operation.run(&mut world, &events, 20_000);
+
+        // Not Finished — and crucially not an endless loop: the run terminates
+        // as a visible stall with the job still on the board.
+        assert_eq!(outcome, RunOutcome::Stalled);
+        assert!(
+            operation.board.get(id).is_some(),
+            "the job was completed or lost while its block still stands"
+        );
+        assert!(world.is_solid(forbidden), "the veto was ignored");
+        // Everything the mod allowed came out.
+        let left: Vec<BlockPos> = region
+            .blocks()
+            .filter(|pos| world.is_solid(*pos))
+            .collect();
+        assert_eq!(left, vec![forbidden], "more than the vetoed block remains");
+        assert_eq!(operation.stockpile.total() + operation.drones[0].carrying(), 8);
     }
 
     #[test]

@@ -16,6 +16,10 @@ pub struct World {
     registry: BlockRegistry,
     generator: TerrainGenerator,
     chunks: HashMap<ChunkPos, Chunk>,
+    /// Bumped on every effective block change. Cheap cache invalidation for
+    /// anything derived from world contents — a consumer stores the count it
+    /// built against and rebuilds when it moves. Monotonic, never reset.
+    edit_count: u64,
 }
 
 impl World {
@@ -27,11 +31,21 @@ impl World {
             registry,
             generator: TerrainGenerator::new(seed, blocks),
             chunks: HashMap::new(),
+            edit_count: 0,
         }
     }
 
     pub fn registry(&self) -> &BlockRegistry {
         &self.registry
+    }
+
+    /// How many effective block edits this world has seen.
+    ///
+    /// The number itself means nothing; only "has it changed since I looked"
+    /// does. No-op writes (setting a block to what it already is) do not count,
+    /// matching the dirty-marking rule above.
+    pub fn edit_count(&self) -> u64 {
+        self.edit_count
     }
 
     pub fn generator(&self) -> &TerrainGenerator {
@@ -132,6 +146,7 @@ impl World {
         // like, so that chunk needs remeshing too.
         if previous != block {
             self.dirty_touching_neighbours(pos);
+            self.edit_count += 1;
         }
         Some(previous)
     }

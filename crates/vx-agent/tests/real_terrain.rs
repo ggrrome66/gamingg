@@ -10,50 +10,13 @@
 //! The seed and position are the ones the screenshots use, so a failure here
 //! and a bad screenshot are the same bug.
 
-use vx_agent::{options, MineMethod, Operation, RunOutcome, VoxelAabb};
+use vx_agent::{find_body, is_ore, options, MineMethod, Operation, RunOutcome, VoxelAabb};
 use vx_core::{BlockPos, ChunkPos, EventBus};
 use vx_world::World;
 
 /// The seed the game ships with, and a spot with a copper outcrop on it.
 const SEED: u64 = 2024;
 const OUTCROP: (i32, i32) = (146, 30);
-
-fn is_ore(world: &World, pos: BlockPos) -> bool {
-    world
-        .registry()
-        .get(world.block(pos))
-        .is_some_and(|def| def.name.ends_with("_ore"))
-}
-
-/// The ore body under the nearest visible outcrop, found the way a player finds
-/// one: by looking for ore on the surface.
-fn find_body(world: &World, at: (i32, i32), radius: i32) -> Option<VoxelAabb> {
-    let mut nearest: Option<(i64, BlockPos)> = None;
-    for dx in -radius..=radius {
-        for dz in -radius..=radius {
-            let (x, z) = (at.0 + dx, at.1 + dz);
-            let Some(clear) = world.surface_y(x, z) else {
-                continue;
-            };
-            let top = BlockPos::new(x, clear - 1, z);
-            if !is_ore(world, top) {
-                continue;
-            }
-            let distance = i64::from(dx) * i64::from(dx) + i64::from(dz) * i64::from(dz);
-            if nearest.is_none_or(|(best, _)| distance < best) {
-                nearest = Some((distance, top));
-            }
-        }
-    }
-
-    let (_, seed) = nearest?;
-    VoxelAabb::containing(
-        VoxelAabb::new(seed.offset([-8, -16, -8]), seed.offset([8, 1, 8]))
-            .clamped_to_world()
-            .blocks()
-            .filter(|pos| is_ore(world, *pos)),
-    )
-}
 
 fn world_around(at: (i32, i32), radius: i32) -> World {
     let mut world = World::new(SEED);

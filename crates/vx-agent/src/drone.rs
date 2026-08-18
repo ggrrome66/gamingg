@@ -34,6 +34,7 @@
 use vx_core::BlockPos;
 use vx_world::World;
 
+use crate::flow::FlowField;
 use crate::job::{DroneId, JobId};
 use crate::stockpile::Stockpile;
 
@@ -72,7 +73,71 @@ pub struct Drone {
     /// the number the mine planners generate excavations for.
     pub grade: i32,
     pub(crate) job: Option<JobId>,
+    /// Positions in the current job the drone tried to break and was refused —
+    /// a mod veto, in practice. Filtered out of everything so the drone moves
+    /// on instead of chewing the same block forever; kept per job (cleared when
+    /// a *different* job is claimed) so re-claiming the same job does not reset
+    /// the lesson.
+    pub(crate) denied: std::collections::HashSet<BlockPos>,
+    /// Which job `denied` belongs to.
+    pub(crate) denied_job: Option<JobId>,
+    /// The flow field this drone is currently following, and what it was built
+    /// against. Reused while the key and the world's edit count both match —
+    /// a travelling drone changes nothing, so one field serves the whole leg
+    /// instead of being rebuilt from scratch every single step.
+    pub(crate) route: Option<CachedRoute>,
 }
+
+/// What a cached route leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteKey {
+    /// Somewhere the given job can be worked from.
+    Work(JobId),
+    /// The stockpile drop-off.
+    Home,
+}
+
+/// A flow field plus the state it was valid for.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedRoute {
+    pub key: RouteKey,
+    /// [`vx_world::World::edit_count`] at build time. Any edit anywhere
+    /// invalidates — coarser than strictly needed, but an edit that matters
+    /// and one that does not are indistinguishable without tracking regions,
+    /// and rebuilding once per edit is already the win over once per tick.
+    pub edits: u64,
+    pub field: FlowField,
+}
+
+/// Offsets from a drone to the blocks it can cut, highest first.
+///
+/// The layer above first, then the drone's own layer. Nothing below: see the
+/// module note for why that restriction is load-bearing. The block directly
+/// underfoot is handled separately by [`Drone::may_undermine`], because whether
+/// it is safe depends on the world rather than on geometry.
+///
+/// Above before level matters within the list too: cutting a block at the
+/// drone's own level would leave whatever sits on it hanging, so the thing
+/// sitting on it goes first.
+///
+/// This list is the single source of truth for reach. [`Drone::reach`] applies
+/// it forwards to find blocks; [`stations_for`] applies it backwards to find
+/// the cells a given block can be cut *from*. Two separate versions of the same
+/// rule would drift, and the symptom would be a drone standing next to a block
+/// it was sent to dig and refusing to.
+///
+/// A `const` rather than a builder: it was a `Vec`-returning function once,
+/// which allocated afresh for every remaining block of every travel tick —
+/// thousands of heap allocations per frame to enumerate seventeen numbers
+/// known at compile time.
+pub const REACH_OFFSETS: [[i32; 3]; 17] = [
+    [-1, 1, -1], [0, 1, -1], [1, 1, -1],
+    [-1, 1, 0],  [0, 1, 0],  [1, 1, 0],
+    [-1, 1, 1],  [0, 1, 1],  [1, 1, 1],
+    [-1, 0, -1], [0, 0, -1], [1, 0, -1],
+    [-1, 0, 0],              [1, 0, 0],
+    [-1, 0, 1],  [0, 0, 1],  [1, 0, 1],
+];
 
 /// Carry capacity of a starting drone. Small enough that the haul back matters,
 /// large enough that a body is not a hundred round trips.
@@ -92,6 +157,9 @@ impl Drone {
             capacity: DEFAULT_CAPACITY,
             grade: DEFAULT_GRADE,
             job: None,
+            denied: std::collections::HashSet::new(),
+            denied_job: None,
+            route: None,
         }
     }
 
@@ -114,38 +182,7 @@ impl Drone {
         self.position = to;
     }
 
-    /// Offsets from a drone to the blocks it can cut, highest first.
-    ///
-    /// The layer above first, then the drone's own layer. Nothing below: see
-    /// the module note for why that restriction is load-bearing. The block
-    /// directly underfoot is handled separately by [`Drone::may_undermine`],
-    /// because whether it is safe depends on the world rather than on geometry.
-    ///
-    /// Above before level matters within the list too: cutting a block at the
-    /// drone's own level would leave whatever sits on it hanging, so the thing
-    /// sitting on it goes first.
-    ///
-    /// This list is the single source of truth for reach. [`Drone::reach`]
-    /// applies it forwards to find blocks; [`stations_for`] applies it
-    /// backwards to find the cells a given block can be cut *from*. Two
-    /// separate versions of the same rule would drift, and the symptom would be
-    /// a drone standing next to a block it was sent to dig and refusing to.
-    pub fn reach_offsets() -> Vec<[i32; 3]> {
-        let mut offsets = Vec::with_capacity(17);
-        for dy in [1, 0] {
-            for dz in -1..=1 {
-                for dx in -1..=1 {
-                    if [dx, dy, dz] == [0, 0, 0] {
-                        continue;
-                    }
-                    offsets.push([dx, dy, dz]);
-                }
-            }
-        }
-        offsets
-    }
-
-    /// May the block directly underfoot be cut?
+    /// May the block directly underfoot be cut?    /// May the block directly underfoot be cut?
     ///
     /// Only when there is solid ground immediately below it. Then removing it
     /// drops the drone exactly one block, which is a step it can climb back up.
@@ -157,7 +194,7 @@ impl Drone {
 
     /// Blocks this drone can cut from where it stands, in cutting order.
     pub fn reach(&self, world: &World) -> Vec<BlockPos> {
-        let mut cells: Vec<BlockPos> = Self::reach_offsets()
+        let mut cells: Vec<BlockPos> = REACH_OFFSETS
             .into_iter()
             .map(|offset| self.position.offset(offset))
             .collect();
@@ -181,9 +218,11 @@ impl Drone {
 
     /// The next block to cut inside `region` from where the drone stands.
     ///
-    /// Everything level with it and above first. Undermining is the last
-    /// resort and carries one extra condition: **nothing in the region may
-    /// still be left above the drone's own level.**
+    /// Everything level with it and above first, skipping anything unbreakable
+    /// (bedrock — see [`is_breakable`]) and anything in its `denied` set (a
+    /// veto it has already run into). Undermining is the last resort and
+    /// carries one extra condition: **nothing in the region may still be left
+    /// above the drone's own level.**
     ///
     /// That condition is the difference between an excavation that finishes and
     /// one that strands itself. Dropping a level removes the floor of the level
@@ -192,34 +231,52 @@ impl Drone {
     /// scan it costs is a whole-region sweep, but it only runs on the tick where
     /// the drone has genuinely run out of things to cut in front of it.
     pub fn next_cut(&self, world: &World, region: &crate::aabb::VoxelAabb) -> Option<BlockPos> {
-        let ahead = Self::reach_offsets()
+        let wanted =
+            |pos: &BlockPos| is_breakable(world, *pos) && !self.denied.contains(pos);
+
+        let ahead = REACH_OFFSETS
             .into_iter()
             .map(|offset| self.position.offset(offset))
-            .find(|pos| region.contains(*pos) && world.is_solid(*pos));
+            .find(|pos| region.contains(*pos) && wanted(pos));
         if ahead.is_some() {
             return ahead;
         }
 
         let below = self.position.offset([0, -1, 0]);
-        if !region.contains(below) || !world.is_solid(below) || !self.may_undermine(world) {
+        if !region.contains(below) || !wanted(&below) || !self.may_undermine(world) {
             return None;
         }
         let work_above = region
             .clamped_to_world()
             .blocks()
-            .any(|pos| pos.y > self.position.y && world.is_solid(pos));
+            .any(|pos| pos.y > self.position.y && is_breakable(world, pos));
         (!work_above).then_some(below)
     }
 }
 
+/// Is there a block here a drone could actually remove?
+///
+/// Solid, and with a hardness — blocks without one (bedrock) are unbreakable by
+/// definition, and treating them as work is how a drone ends up chewing the
+/// world floor until the end of time. Every scan that counts outstanding work
+/// uses this, so a job whose region overlaps bedrock completes once everything
+/// *breakable* in it is gone.
+pub fn is_breakable(world: &World, pos: BlockPos) -> bool {
+    let block = world.block(pos);
+    world
+        .registry()
+        .get(block)
+        .is_some_and(|def| def.solid && def.hardness.is_some())
+}
+
 /// Cells a drone could stand in and cut `block` from.
 ///
-/// The inverse of [`Drone::reach_offsets`], and the reason it is shared: this
+/// The inverse of [`REACH_OFFSETS`], and the reason it is shared: this
 /// is what tells a drone *where to drive to* in order to dig something, so if
 /// the two disagreed a drone would arrive somewhere it cannot work from and
 /// hand the job straight back.
 pub fn stations_for(world: &World, block: BlockPos) -> Vec<BlockPos> {
-    let mut cells: Vec<BlockPos> = Drone::reach_offsets()
+    let mut cells: Vec<BlockPos> = REACH_OFFSETS
         .into_iter()
         .map(|[dx, dy, dz]| block.offset([-dx, -dy, -dz]))
         .collect();
@@ -279,9 +336,22 @@ mod tests {
     #[test]
     fn reach_covers_the_drones_own_layer_and_the_one_above_it() {
         // Two 3x3 layers less the drone's own cell. Nothing below at all: that
-        // restriction is what keeps excavations self-consistent.
-        let offsets = Drone::reach_offsets();
+        // restriction is what keeps excavations self-consistent. Written out
+        // by hand as a const, so re-derive it here and make sure no offset was
+        // fat-fingered.
+        let offsets = REACH_OFFSETS;
         assert_eq!(offsets.len(), 17);
+        let mut expected = Vec::new();
+        for dy in [1, 0] {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if [dx, dy, dz] != [0, 0, 0] {
+                        expected.push([dx, dy, dz]);
+                    }
+                }
+            }
+        }
+        assert_eq!(offsets.to_vec(), expected, "the const drifted from its rule");
         assert!(!offsets.contains(&[0, 0, 0]), "it can dig its own cell");
         assert!(
             offsets.iter().all(|offset| offset[1] >= 0),
@@ -295,14 +365,14 @@ mod tests {
         // Cutting down-and-across looks like the natural way to descend, and it
         // is exactly what strands a drone: it removes the floor of every cell in
         // the notch, including the ones needed to advance the face.
-        let offsets = Drone::reach_offsets();
+        let offsets = REACH_OFFSETS;
         assert!(!offsets.contains(&[1, -1, 0]));
         assert!(!offsets.contains(&[0, -1, 1]));
     }
 
     #[test]
     fn reach_is_ordered_from_the_top_down() {
-        let heights: Vec<i32> = Drone::reach_offsets().iter().map(|offset| offset[1]).collect();
+        let heights: Vec<i32> = REACH_OFFSETS.iter().map(|offset| offset[1]).collect();
         assert!(
             heights.windows(2).all(|pair| pair[0] >= pair[1]),
             "reach is not ordered highest first: a face would be cut from underneath"

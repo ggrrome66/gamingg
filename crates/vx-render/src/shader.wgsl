@@ -50,7 +50,13 @@ struct InstanceInput {
     @location(5) model_1: vec4<f32>,
     @location(6) model_2: vec4<f32>,
     @location(7) model_3: vec4<f32>,
-    @location(8) tile: u32,
+    // Inverse-transpose of the model's upper 3x3, for normals. Computed on
+    // the CPU: rotating a normal by the raw model matrix is wrong the moment
+    // a transform mixes rotation with non-uniform scale.
+    @location(8) normal_0: vec4<f32>,
+    @location(9) normal_1: vec4<f32>,
+    @location(10) normal_2: vec4<f32>,
+    @location(11) tile: u32,
 };
 
 // Objects deliberately emit the same VertexOutput as terrain and share fs_main
@@ -66,11 +72,15 @@ fn vs_object(in: VertexInput, instance: InstanceInput) -> VertexOutput {
     );
     let world = model * vec4<f32>(in.position, 1.0);
 
+    let normal_matrix = mat3x3<f32>(
+        instance.normal_0.xyz,
+        instance.normal_1.xyz,
+        instance.normal_2.xyz,
+    );
+
     var out: VertexOutput;
     out.clip_position = camera.view_projection * world;
-    // Objects are translated and uniformly scaled, so the model matrix's upper
-    // 3x3 rotates the normal correctly without a separate normal matrix.
-    out.normal = normalize((model * vec4<f32>(in.normal, 0.0)).xyz);
+    out.normal = normalize(normal_matrix * in.normal);
     out.uv = in.uv;
     // The instance's tile wins; the cube's per-vertex tile is unused padding
     // inherited from sharing the terrain vertex layout.

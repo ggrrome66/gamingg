@@ -197,57 +197,6 @@ fn build_scene(
     (world, camera)
 }
 
-/// The ore body nearest to `(x, z)`, as a marked area.
-///
-/// Sweeps outward over surface columns looking for exposed ore — an outcrop —
-/// then takes the connected run of ore blocks under it. This is the same thing
-/// a player does by eye, which is the point: it exercises the real path rather
-/// than a hand-placed body.
-fn find_body(world: &World, at: (i32, i32), radius: i32) -> Option<VoxelAabb> {
-    let is_ore = |pos: vx_core::BlockPos| {
-        world
-            .registry()
-            .get(world.block(pos))
-            .is_some_and(|def| def.name.ends_with("_ore"))
-    };
-
-    let mut best: Option<(i64, vx_core::BlockPos)> = None;
-    for dx in -radius..=radius {
-        for dz in -radius..=radius {
-            let (x, z) = (at.0 + dx, at.1 + dz);
-            let Some(clear) = world.surface_y(x, z) else {
-                continue;
-            };
-            let top = vx_core::BlockPos::new(x, clear - 1, z);
-            if !is_ore(top) {
-                continue;
-            }
-            let distance = (dx as i64) * (dx as i64) + (dz as i64) * (dz as i64);
-            if best.is_none_or(|(nearest, _)| distance < nearest) {
-                best = Some((distance, top));
-            }
-        }
-    }
-
-    // Grow a box around the outcrop over the ore actually present beneath it.
-    let (_, seed) = best?;
-    let mut body: Option<VoxelAabb> = None;
-    let search = VoxelAabb::new(
-        seed.offset([-8, -16, -8]),
-        seed.offset([8, 1, 8]),
-    )
-    .clamped_to_world();
-    for pos in search.blocks() {
-        if is_ore(pos) {
-            body = Some(match body {
-                Some(box_) => box_.union(VoxelAabb::single(pos)),
-                None => VoxelAabb::single(pos),
-            });
-        }
-    }
-    body
-}
-
 /// Mine the nearest body and report what happened.
 fn dig_nearby(
     world: &mut World,
@@ -255,7 +204,7 @@ fn dig_nearby(
     choice: Dig,
     ticks: u64,
 ) -> Result<(Operation, MineMethod, vx_core::BlockPos, VoxelAabb), String> {
-    let body = find_body(world, at, 48)
+    let body = vx_agent::find_body(world, at, 48)
         .ok_or_else(|| format!("no ore outcrop within 48 blocks of {at:?}"))?;
 
     let plan = match choice {

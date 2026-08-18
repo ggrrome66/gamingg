@@ -124,6 +124,12 @@ impl Mining {
         // spike the frame it lands on.
         let ticks = (self.pending as u32).min(16);
         self.pending -= f64::from(ticks);
+        // And *discard* the rest of the backlog rather than keeping it: the
+        // first version only subtracted the ticks run, so a 30-second stall
+        // drained at the cap for seconds afterwards — a ~120x fast-forward,
+        // the very teleport the cap exists to prevent. Time lost to a stall
+        // stays lost; the drone simply pauses with the game.
+        self.pending = self.pending.min(1.0);
 
         for _ in 0..ticks {
             operation.tick(world, events);
@@ -290,5 +296,26 @@ mod tests {
         // No operation, so this only exercises the accumulator's bookkeeping.
         mining.update(&mut world, &events, Duration::from_secs(30));
         assert_eq!(mining.pending, 0.0, "ticks accrued with nothing to run");
+    }
+
+    #[test]
+    fn the_backlog_from_a_stall_is_discarded_not_drained() {
+        // Review finding A4: the cap alone kept the backlog and drained it at
+        // 16 ticks per frame — a ~120x fast-forward for seconds after a stall.
+        // Time lost to a stall must stay lost.
+        let mut mining = Mining {
+            operation: Some(Operation::new(BlockPos::new(0, 61, 0))),
+            ..Mining::default()
+        };
+
+        let mut world = World::new(1);
+        let events = EventBus::new();
+        mining.update(&mut world, &events, Duration::from_secs(30));
+
+        assert!(
+            mining.pending <= 1.0,
+            "{} ticks still queued after the stall frame; the next frames will fast-forward",
+            mining.pending
+        );
     }
 }

@@ -15,11 +15,11 @@ use vx_world::{Chunk, World};
 
 use crate::aabb::VoxelAabb;
 
-/// A world whose ground height is `height(world_x)` everywhere, air above.
+/// A world whose ground height is `height(world_x, world_z)` everywhere.
 ///
 /// `radius` is in chunks. Declines can need a long run-up, so tests that plan
 /// deep mines need a wide enough world for the portal to land inside it.
-pub fn shaped(radius: i32, height: impl Fn(i32) -> i32) -> World {
+pub fn shaped_xz(radius: i32, height: impl Fn(i32, i32) -> i32) -> World {
     let mut world = World::new(1);
     let stone = world
         .registry()
@@ -32,8 +32,8 @@ pub fn shaped(radius: i32, height: impl Fn(i32) -> i32) -> World {
             let mut chunk = Chunk::empty(pos);
             let origin = pos.origin();
             for x in 0..CHUNK_SIZE {
-                let top = height(origin.x + x);
                 for z in 0..CHUNK_SIZE {
+                    let top = height(origin.x + x, origin.z + z);
                     chunk.fill_column(x, z, 0, top + 1, stone);
                 }
             }
@@ -41,6 +41,11 @@ pub fn shaped(radius: i32, height: impl Fn(i32) -> i32) -> World {
         }
     }
     world
+}
+
+/// A world whose ground height depends on `world_x` only.
+pub fn shaped(radius: i32, height: impl Fn(i32) -> i32) -> World {
+    shaped_xz(radius, move |x, _| height(x))
 }
 
 /// Flat stone up to and including `floor`.

@@ -85,9 +85,37 @@ impl Object {
     fn instance(&self) -> ObjectInstance {
         ObjectInstance {
             model: self.model.to_cols_array_2d(),
+            normal: normal_matrix(self.model),
             tile: self.tile,
         }
     }
+}
+
+/// The matrix that transforms *normals* for `model`: the inverse-transpose of
+/// its upper 3x3, padded to three vec4 columns for the vertex layout.
+///
+/// Using the model matrix itself is only correct for translation, rotation and
+/// uniform scale. `Object::new` accepts arbitrary transforms, and the first
+/// elongated drone facing its travel direction — rotation times non-uniform
+/// scale — would have had its lighting visibly skewed. Computed on the CPU
+/// once per instance per frame, which is where a per-object constant belongs.
+///
+/// A singular matrix (zero scale on some axis) has no inverse; fall back to the
+/// raw 3x3 rather than poisoning the buffer with NaNs — a degenerate object is
+/// invisible anyway.
+fn normal_matrix(model: Mat4) -> [[f32; 4]; 3] {
+    let linear = glam::Mat3::from_mat4(model);
+    let inverse_transpose = if linear.determinant().abs() > 1.0e-8 {
+        linear.inverse().transpose()
+    } else {
+        linear
+    };
+    let column = |c: glam::Vec3| [c.x, c.y, c.z, 0.0];
+    [
+        column(inverse_transpose.x_axis),
+        column(inverse_transpose.y_axis),
+        column(inverse_transpose.z_axis),
+    ]
 }
 
 /// The per-instance data the GPU sees. Rebuilt every frame.
@@ -96,6 +124,9 @@ impl Object {
 pub struct ObjectInstance {
     /// Column-major, matching WGSL's `mat4x4<f32>`.
     pub model: [[f32; 4]; 4],
+    /// Inverse-transpose of the model's upper 3x3, one padded vec4 per column,
+    /// for transforming normals — see [`normal_matrix`].
+    pub normal: [[f32; 4]; 3],
     pub tile: u32,
 }
 
@@ -127,9 +158,25 @@ pub const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBuffe
             shader_location: 7,
             format: wgpu::VertexFormat::Float32x4,
         },
+        // The normal matrix, three more vec4 columns.
         wgpu::VertexAttribute {
             offset: 64,
             shader_location: 8,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 80,
+            shader_location: 9,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 96,
+            shader_location: 10,
+            format: wgpu::VertexFormat::Float32x4,
+        },
+        wgpu::VertexAttribute {
+            offset: 112,
+            shader_location: 11,
             format: wgpu::VertexFormat::Uint32,
         },
     ],
@@ -303,12 +350,12 @@ mod tests {
     fn the_instance_layout_matches_the_instance_struct() {
         // A mismatch scrambles every transform, which shows up as objects in
         // wild positions rather than as an error, so pin it explicitly.
-        assert_eq!(std::mem::size_of::<ObjectInstance>(), 68);
-        assert_eq!(INSTANCE_LAYOUT.array_stride, 68);
+        assert_eq!(std::mem::size_of::<ObjectInstance>(), 116);
+        assert_eq!(INSTANCE_LAYOUT.array_stride, 116);
         assert_eq!(INSTANCE_LAYOUT.step_mode, wgpu::VertexStepMode::Instance);
 
         let offsets: Vec<u64> = INSTANCE_LAYOUT.attributes.iter().map(|a| a.offset).collect();
-        assert_eq!(offsets, vec![0, 16, 32, 48, 64]);
+        assert_eq!(offsets, vec![0, 16, 32, 48, 64, 80, 96, 112]);
     }
 
     #[test]
@@ -434,6 +481,53 @@ mod tests {
 
         // And the bounds are genuinely wider than the unrotated box would be.
         assert!(object.bounds_max.x - object.bounds_min.x > 2.5);
+    }
+
+    #[test]
+    fn the_normal_matrix_keeps_normals_perpendicular_under_skewing_transforms() {
+        // Review finding A8. Rotation times non-uniform scale is exactly the
+        // transform a long drone facing its travel direction uses, and exactly
+        // where "just rotate the normal by the model matrix" breaks. The
+        // inverse-transpose must keep a transformed normal perpendicular to a
+        // transformed surface tangent.
+        let model = Mat4::from_rotation_y(0.7)
+            * Mat4::from_scale(Vec3::new(3.0, 1.0, 0.5))
+            * Mat4::from_rotation_x(0.3);
+        let columns = normal_matrix(model);
+        let normal_transform = glam::Mat3::from_cols(
+            Vec3::new(columns[0][0], columns[0][1], columns[0][2]),
+            Vec3::new(columns[1][0], columns[1][1], columns[1][2]),
+            Vec3::new(columns[2][0], columns[2][1], columns[2][2]),
+        );
+
+        // Several surface directions with their true normals.
+        let pairs = [
+            (Vec3::X, Vec3::Y),
+            (Vec3::Z, Vec3::Y),
+            (Vec3::Y, Vec3::X),
+            (Vec3::new(1.0, 0.0, 1.0).normalize(), Vec3::Y),
+        ];
+        let mut naive_broke_somewhere = false;
+        for (tangent, normal) in pairs {
+            let moved_tangent = model.transform_vector3(tangent);
+            let moved_normal = normal_transform * normal;
+            let alignment = moved_normal.normalize().dot(moved_tangent.normalize());
+            assert!(
+                alignment.abs() < 1.0e-5,
+                "normal drifted {alignment} off perpendicular for tangent {tangent:?}"
+            );
+
+            let naive = model.transform_vector3(normal);
+            naive_broke_somewhere |=
+                naive.normalize().dot(moved_tangent.normalize()).abs() > 1.0e-3;
+        }
+        // Prove the naive version really is wrong on this transform for at
+        // least one face, so the test cannot pass vacuously on one too tame
+        // to tell the two apart.
+        assert!(
+            naive_broke_somewhere,
+            "the raw model matrix survived every pair; pick a harsher transform"
+        );
     }
 
     #[test]

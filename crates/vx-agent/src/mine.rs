@@ -525,14 +525,34 @@ fn plan_pit(world: &World, target: VoxelAabb) -> Option<MinePlan> {
     }
 
     let volume = total_volume(&access, &extraction);
-    // On the rim, one block outside the widest bench: where a drone stands
-    // before driving down into the workings.
+
+    // The portal is *searched for*, not fabricated. The earlier version placed
+    // it arithmetically one block beyond the -z rim — and on ground rising
+    // that way the column is higher than the rim, the "portal" was inside the
+    // hill, and the drone spawned entombed. Instead: search every column of
+    // the pit's footprint (rim ring *and* interior — starting on top of rock
+    // that is about to be dug is fine, the pit is worked top-down) for ground
+    // within a drivable step of the rim, and stand the drone there.
+    //
+    // The column where the rim height is attained always qualifies, so a pit
+    // that passed the depth check always finds a portal; the `?` below only
+    // fires at the edge of the loaded world.
     let rim_setback = (rim - target.max.y).max(0) * setback;
-    let portal = BlockPos::new(
-        target.centre().x,
-        rim + 1,
-        workings.min.z - rim_setback - 1,
+    let edge = VoxelAabb::new(
+        BlockPos::new(workings.min.x - rim_setback - 1, rim, workings.min.z - rim_setback - 1),
+        BlockPos::new(workings.max.x + rim_setback + 1, rim, workings.max.z + rim_setback + 1),
     );
+    let centre = target.centre();
+    let portal = (edge.min.x..=edge.max.x)
+        .flat_map(|x| (edge.min.z..=edge.max.z).map(move |z| (x, z)))
+        .filter_map(|(x, z)| {
+            let ground = ground_height(world, x, z)?;
+            ((ground - rim).abs() <= crate::flow::STEP).then_some(BlockPos::new(x, ground + 1, z))
+        })
+        .min_by_key(|pos| {
+            let (dx, dz) = ((pos.x - centre.x) as i64, (pos.z - centre.z) as i64);
+            (dx * dx + dz * dz, pos.x, pos.z)
+        })?;
 
     Some(MinePlan {
         method: MineMethod::Pit,
@@ -812,6 +832,50 @@ mod tests {
         assert!(
             plan(&world, deep, 3, MineMethod::Decline).is_some(),
             "a decline should still work at any depth"
+        );
+    }
+
+    #[test]
+    fn the_pit_portal_is_found_on_the_ground_not_fabricated_into_it() {
+        // Finding A2. Ground rising toward -z is exactly where the old
+        // arithmetic portal ended up inside the hill, entombing the drone. The
+        // portal must now be a cell a drone can actually occupy.
+        let mut world = crate::fixture::shaped_xz(RADIUS, |_, z| (60 - z).clamp(30, 90));
+        let body = VoxelAabb::new(BlockPos::new(0, 52, 0), BlockPos::new(3, 55, 3));
+        ore_body(&mut world, body);
+
+        let pit = plan(&world, body, 3, MineMethod::Pit)
+            .expect("a shallow body on a gentle slope should still offer a pit");
+        let settled = crate::flow::settle(&world, pit.portal);
+        assert!(
+            crate::flow::is_standable(&world, settled),
+            "the pit portal at {:?} is not somewhere a drone can stand",
+            pit.portal
+        );
+    }
+
+    #[test]
+    fn a_body_under_a_steep_knoll_gets_a_pit_from_the_crown() {
+        // The other terrain the old arithmetic portal could not survive: a
+        // body just under the crown of a knoll falling away steeply on every
+        // side. No column *outside* the workings is anywhere near the rim, so
+        // the portal has to be allowed inside the footprint — the drone starts
+        // on top of rock it is about to dig, which is fine, because the pit is
+        // worked top-down.
+        let mut world = crate::fixture::shaped_xz(RADIUS, |x, z| {
+            let distance = x.abs().max(z.abs());
+            (66 - 3 * (distance - 2).max(0)).clamp(24, 66)
+        });
+        let body = VoxelAabb::new(BlockPos::new(-1, 60, -1), BlockPos::new(1, 62, 1));
+        ore_body(&mut world, body);
+
+        let pit = plan(&world, body, 3, MineMethod::Pit)
+            .expect("a shallow body under a knoll crown should still offer a pit");
+        let settled = crate::flow::settle(&world, pit.portal);
+        assert!(
+            crate::flow::is_standable(&world, settled),
+            "the pit portal at {:?} is not somewhere a drone can stand",
+            pit.portal
         );
     }
 

@@ -16,6 +16,7 @@
 //!   planning their own.
 //! - [`drone`] — one machine's position, cargo and reach.
 //! - [`operation`] — the tick that turns a plan into a hole in the ground.
+//! - [`prospect`] — finding ore by eye; the scanner grows from here.
 //! - [`stockpile`] — what came back, keyed by block name.
 
 pub mod aabb;
@@ -26,6 +27,7 @@ pub mod flow;
 pub mod job;
 pub mod mine;
 pub mod operation;
+pub mod prospect;
 pub mod stockpile;
 
 pub use aabb::VoxelAabb;
@@ -34,4 +36,5 @@ pub use flow::{is_standable, settle, FlowField, STEP, UNREACHABLE};
 pub use job::{DroneId, Job, JobBoard, JobId, JobKind};
 pub use mine::{options, plan, propose, MineMethod, MinePlan, PIT_MAX_DEPTH};
 pub use operation::{Operation, RunOutcome, TickReport};
+pub use prospect::{find_body, is_ore};
 pub use stockpile::Stockpile;

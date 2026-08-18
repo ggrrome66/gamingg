@@ -67,16 +67,25 @@ const DIRECTIONS: [[i32; 3]; 4] = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]
 
 /// Standable cells reachable from `pos` in one step.
 ///
-/// For each horizontal direction, the destination column is searched from the
-/// highest reachable level downward, so a drone prefers stepping up onto a
-/// ledge over walking under it.
+/// **Every** standable cell within `±STEP` in each neighbouring column, not
+/// just the topmost. Taking only the first found was a bug worth remembering:
+/// under an overhang a column holds standable cells at several heights, and
+/// "topmost only" made edges one-directional — A could step to B while B's
+/// search in A's column found a different cell, so BFS labelled cells reachable
+/// that could never be stepped to, and routes silently stopped short of their
+/// goals. Returning all candidates makes every edge symmetric by construction
+/// (|dy| ≤ STEP reads the same from both ends), which restores the invariant
+/// the module rests on: labelled reachable means walkable, and every route in
+/// is a route out.
 pub fn neighbours(world: &World, pos: BlockPos) -> impl Iterator<Item = BlockPos> + '_ {
-    DIRECTIONS.into_iter().filter_map(move |direction| {
+    DIRECTIONS.into_iter().flat_map(move |direction| {
         let column = pos.offset(direction);
+        // Highest first, so ties in `step_from` still prefer stepping up onto
+        // a ledge over walking under it.
         (-STEP..=STEP)
             .rev()
-            .map(|dy| column.offset([0, dy, 0]))
-            .find(|candidate| is_standable(world, *candidate))
+            .map(move |dy| column.offset([0, dy, 0]))
+            .filter(|candidate| is_standable(world, *candidate))
     })
 }
 
@@ -85,6 +94,7 @@ pub fn neighbours(world: &World, pos: BlockPos) -> impl Iterator<Item = BlockPos
 /// The bounds are the caller's cost control: the sweep visits every cell inside
 /// them, so a field spanning a whole world would be as slow as it sounds.
 /// Callers build fields around a work site, not around the map.
+#[derive(Debug, Clone)]
 pub struct FlowField {
     bounds: VoxelAabb,
     distance: Vec<u32>,
@@ -423,6 +433,59 @@ mod tests {
         assert!(field.is_reachable(BlockPos::new(3, ground, 0)));
         assert!(!field.is_reachable(BlockPos::new(4, ground, 0)));
         assert!(field.distance(BlockPos::new(40, ground, 0)).is_none());
+    }
+
+    #[test]
+    fn edges_stay_symmetric_under_an_overhang() {
+        // The regression that motivated returning every candidate per column
+        // rather than the topmost. A shelf splits a column into two standable
+        // cells; "topmost only" made the edge into the lower one one-way, so
+        // BFS could label a cell reachable that could not actually be stepped
+        // to, and a drone would stand beside its goal, Stuck.
+        let (mut world, ground) = flat_world(1, 60);
+        let stone = world.registry().id_of("engine:stone").unwrap();
+
+        // Column C: dig the floor out one, then roof it — standable both under
+        // the shelf (at ground-1) and on top of it (at ground+1).
+        let c = [5, 5];
+        world.set_block(BlockPos::new(c[0], ground - 1, c[1]), BlockId::AIR);
+        world.set_block(BlockPos::new(c[0], ground, c[1]), stone);
+
+        let under_shelf = BlockPos::new(c[0], ground - 1, c[1]);
+        let beside = BlockPos::new(c[0] - 1, ground, c[1]);
+        assert!(is_standable(&world, under_shelf));
+        assert!(is_standable(&world, beside));
+
+        let bounds = VoxelAabb::new(
+            BlockPos::new(-4, ground - 3, -4),
+            BlockPos::new(10, ground + 3, 10),
+        );
+        let field = FlowField::build(&world, bounds, [under_shelf]);
+
+        // The neighbouring cell must be labelled AND able to act on the label.
+        assert!(field.is_reachable(beside), "the cell beside the shelf is unreachable");
+        let route = field
+            .path_from(&world, beside)
+            .expect("no route from directly beside the goal");
+        assert_eq!(
+            route.last(),
+            Some(&under_shelf),
+            "the route stopped short of the goal: an edge exists one way only"
+        );
+
+        // And the general contract across the whole field: any cell with a
+        // positive distance can take a step. One dangling label anywhere means
+        // a drone can be sent somewhere it will stand and do nothing.
+        for pos in bounds.blocks() {
+            if let Some(distance) = field.distance(pos) {
+                if distance > 0 {
+                    assert!(
+                        field.step_from(&world, pos).is_some(),
+                        "{pos:?} is labelled distance {distance} but cannot step"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
