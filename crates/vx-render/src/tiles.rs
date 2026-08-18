@@ -25,8 +25,12 @@ pub mod slot {
     pub const BEDROCK: u32 = 6;
     pub const COPPER_ORE: u32 = 7;
     pub const CONTAINER: u32 = 8;
+    pub const HULL: u32 = 9;
+    pub const TREAD: u32 = 10;
+    pub const STEEL: u32 = 11;
+    pub const CAB: u32 = 12;
     /// Total generated tiles.
-    pub const COUNT: u32 = 9;
+    pub const COUNT: u32 = 13;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -102,6 +106,36 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.72, 0.74, 0.78], 0.0) // rivets
                     } else {
                         shade([0.52, 0.56, 0.62], noise * 0.08)
+                    }
+                }
+                slot::HULL => {
+                    // Rust-orange machine plate with a darker weld seam across
+                    // the middle, so big flat rig sides do not read as one
+                    // slab of paint.
+                    if y == TILE_SIZE / 2 {
+                        shade([0.55, 0.24, 0.10], noise * 0.05)
+                    } else {
+                        shade([0.76, 0.34, 0.13], noise * 0.10)
+                    }
+                }
+                slot::TREAD => {
+                    // Near-black rubber, ribbed.
+                    if x % 4 < 2 {
+                        shade([0.10, 0.10, 0.11], noise * 0.05)
+                    } else {
+                        shade([0.17, 0.17, 0.19], noise * 0.05)
+                    }
+                }
+                slot::STEEL => {
+                    // Bright brushed steel: horizontal grain.
+                    shade([0.72, 0.74, 0.78], jitter(tile ^ 0x77, 0, y) * 0.18 + noise * 0.04)
+                }
+                slot::CAB => {
+                    // Pale glassy blue-grey with a highlight streak.
+                    if x + y < 8 {
+                        shade([0.80, 0.88, 0.94], noise * 0.03)
+                    } else {
+                        shade([0.55, 0.66, 0.76], noise * 0.05)
                     }
                 }
                 // Unknown slots get magenta, the universal "missing texture".

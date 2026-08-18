@@ -16,11 +16,14 @@
 use std::time::Duration;
 
 use glam::Vec3;
-use vx_agent::{options, Fleet, FlierState, MineMethod, MinePlan, Operation, Sector, VoxelAabb};
+use vx_agent::{options, DroneState, Fleet, FlierState, MineMethod, MinePlan, Operation, Sector, VoxelAabb};
 use vx_core::{BlockPos, EventBus};
+use vx_agent::FleetReport;
 use vx_render::tiles::slot;
 use vx_render::Object;
 use vx_world::World;
+
+use crate::rig::{self, Rig};
 
 /// Drone ticks per second.
 ///
@@ -34,17 +37,14 @@ const GRADE: i32 = vx_agent::DEFAULT_GRADE;
 /// Edge length of the cubes drawn at the corners of a marked area.
 const MARKER_SIZE: f32 = 0.35;
 
-/// Edge length of a drone.
-const DRONE_SIZE: f32 = 0.8;
-
-/// Edge length of the flier.
-const FLIER_SIZE: f32 = 1.0;
-
 /// Edge length of a hovering ping marker.
 const PING_SIZE: f32 = 0.5;
 
+/// Radians per second the drill and rotor turn while working.
+const SPIN_RATE: f32 = 9.0;
+
 /// What the player is currently doing with the mining tools.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Mining {
     /// Corners picked so far. Two makes an area.
     corners: Vec<BlockPos>,
@@ -61,6 +61,33 @@ pub struct Mining {
     pending: f64,
     /// The air side: the flier, its surveys, and the base container.
     pub fleet: Fleet,
+    /// Nose directions, remembered so parked machines do not twitch.
+    drone_yaws: Vec<f32>,
+    flier_yaws: Vec<f32>,
+    /// Drill/rotor angle, advanced while machines work.
+    spin: f32,
+    /// The rig shapes, built once.
+    digger_rig: Rig,
+    flier_rig: Rig,
+}
+
+impl Default for Mining {
+    fn default() -> Self {
+        Mining {
+            corners: Vec::new(),
+            area: None,
+            plans: Vec::new(),
+            chosen: 0,
+            operation: None,
+            pending: 0.0,
+            fleet: Fleet::default(),
+            drone_yaws: Vec::new(),
+            flier_yaws: Vec::new(),
+            spin: 0.0,
+            digger_rig: Rig::digger(),
+            flier_rig: Rig::flier(),
+        }
+    }
 }
 
 impl Mining {
@@ -154,10 +181,45 @@ impl Mining {
     }
 
     /// Advance the excavation by however many ticks `elapsed` is worth.
-    pub fn update(&mut self, world: &mut World, events: &EventBus, elapsed: Duration) {
-        let Some(operation) = &mut self.operation else {
-            return;
-        };
+    ///
+    /// Returns the fleet's accumulated report, so the caller can turn work
+    /// into experience without the fleet knowing players exist.
+    pub fn update(&mut self, world: &mut World, events: &EventBus, elapsed: Duration) -> FleetReport {
+        // Machines that are working turn their drills and rotors.
+        let working = self
+            .operation
+            .as_ref()
+            .is_some_and(|operation| {
+                operation
+                    .drones
+                    .iter()
+                    .any(|drone| matches!(drone.state, DroneState::Digging(_)))
+            })
+            || self
+                .fleet
+                .fliers
+                .iter()
+                .any(|flier| flier.state != FlierState::Idle);
+        if working {
+            self.spin += elapsed.as_secs_f32() * SPIN_RATE;
+        }
+
+        let mut report = FleetReport::default();
+        if self.operation.is_none() {
+            // The fleet still flies with no dig running.
+            self.pending += elapsed.as_secs_f64() * TICK_RATE;
+            let ticks = (self.pending as u32).min(16);
+            self.pending -= f64::from(ticks);
+            self.pending = self.pending.min(1.0);
+            for _ in 0..ticks {
+                let tick = self.fleet.tick(world, &mut []);
+                report.delivered += tick.delivered;
+                report.sectors_completed += tick.sectors_completed;
+                report.pings_found += tick.pings_found;
+            }
+            self.remember_yaws();
+            return report;
+        }
 
         self.pending += elapsed.as_secs_f64() * TICK_RATE;
         // Cap the catch-up. After a long stall — loading, or a dragged window —
@@ -172,14 +234,69 @@ impl Mining {
         // stays lost; the drone simply pauses with the game.
         self.pending = self.pending.min(1.0);
 
-        for _ in 0..ticks {
-            operation.tick(world, events);
+        {
+            let operation = self.operation.as_mut().expect("checked above");
+            for _ in 0..ticks {
+                operation.tick(world, events);
+            }
         }
         for _ in 0..ticks {
             // The air side reads the world immutably and trades with the
             // mine's stockpile.
             let mines = self.operation.as_mut().map(std::slice::from_mut).unwrap_or(&mut []);
-            self.fleet.tick(world, mines);
+            let tick = self.fleet.tick(world, mines);
+            report.delivered += tick.delivered;
+            report.sectors_completed += tick.sectors_completed;
+            report.pings_found += tick.pings_found;
+        }
+        self.remember_yaws();
+        report
+    }
+
+    /// Update remembered nose directions from this tick's movement.
+    fn remember_yaws(&mut self) {
+        if let Some(operation) = &self.operation {
+            self.drone_yaws.resize(operation.drones.len(), 0.0);
+            for (yaw, drone) in self.drone_yaws.iter_mut().zip(&operation.drones) {
+                let delta = drone.position;
+                let previous = drone.previous_position;
+                if let Some(new) = rig::yaw_towards(
+                    (delta.x - previous.x) as f32,
+                    (delta.z - previous.z) as f32,
+                ) {
+                    *yaw = new;
+                }
+            }
+        }
+        self.flier_yaws.resize(self.fleet.fliers.len(), 0.0);
+        for (yaw, flier) in self.flier_yaws.iter_mut().zip(&self.fleet.fliers) {
+            if let Some(new) = rig::yaw_towards(
+                (flier.position.x - flier.previous_position.x) as f32,
+                (flier.position.z - flier.previous_position.z) as f32,
+            ) {
+                *yaw = new;
+            }
+        }
+    }
+
+    /// How far between the last tick and the next the visuals should sit.
+    fn tick_fraction(&self) -> f32 {
+        (self.pending as f32).clamp(0.0, 1.0)
+    }
+
+    /// Apply the player's current skill effects to the machines.
+    ///
+    /// Called by the app whenever levels change (and cheaply on every grant):
+    /// the fleet and drones never know skills exist, they just have stats.
+    pub fn apply_skills(&mut self, scan_depth: i32, drone_capacity: u64, flier_capacity: u64) {
+        self.fleet.scan_depth = scan_depth;
+        for flier in &mut self.fleet.fliers {
+            flier.capacity = flier_capacity;
+        }
+        if let Some(operation) = &mut self.operation {
+            for drone in &mut operation.drones {
+                drone.capacity = drone_capacity;
+            }
         }
     }
 
@@ -208,24 +325,37 @@ impl Mining {
             }
         }
 
+        // Machines are rigs, gliding between their tick positions.
+        let fraction = self.tick_fraction();
+        let lerp = |from: BlockPos, to: BlockPos| -> Vec3 {
+            let a = Vec3::new(from.x as f32 + 0.5, from.y as f32, from.z as f32 + 0.5);
+            let b = Vec3::new(to.x as f32 + 0.5, to.y as f32, to.z as f32 + 0.5);
+            a + (b - a) * fraction
+        };
+
         if let Some(operation) = &self.operation {
-            for drone in &operation.drones {
-                let base = Vec3::new(
-                    drone.position.x as f32 + 0.5,
-                    drone.position.y as f32,
-                    drone.position.z as f32 + 0.5,
-                );
-                objects.push(Object::standing(base, DRONE_SIZE, slot::BEDROCK));
+            for (index, drone) in operation.drones.iter().enumerate() {
+                let yaw = self.drone_yaws.get(index).copied().unwrap_or(0.0);
+                let spin = if matches!(drone.state, DroneState::Digging(_)) {
+                    self.spin
+                } else {
+                    0.0
+                };
+                objects.extend(self.digger_rig.objects(
+                    lerp(drone.previous_position, drone.position),
+                    yaw,
+                    spin,
+                ));
             }
         }
 
-        for flier in &self.fleet.fliers {
-            let centre = Vec3::new(
-                flier.position.x as f32 + 0.5,
-                flier.position.y as f32,
-                flier.position.z as f32 + 0.5,
-            );
-            objects.push(Object::standing(centre, FLIER_SIZE, slot::CONTAINER));
+        for (index, flier) in self.fleet.fliers.iter().enumerate() {
+            let yaw = self.flier_yaws.get(index).copied().unwrap_or(0.0);
+            objects.extend(self.flier_rig.objects(
+                lerp(flier.previous_position, flier.position),
+                yaw,
+                self.spin * 2.5,
+            ));
         }
 
         // Pings hover and read as copper, since copper is what they promise.
@@ -380,9 +510,11 @@ mod tests {
         let mut mining = Mining::default();
         let mut world = World::new(1);
         let events = EventBus::new();
-        // No operation, so this only exercises the accumulator's bookkeeping.
+        // No operation running — but the fleet still metes out its ticks
+        // through the same accumulator, so the invariant is the clamp, not
+        // emptiness.
         mining.update(&mut world, &events, Duration::from_secs(30));
-        assert_eq!(mining.pending, 0.0, "ticks accrued with nothing to run");
+        assert!(mining.pending <= 1.0, "backlog survived the stall frame");
     }
 
     #[test]

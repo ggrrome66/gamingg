@@ -23,11 +23,11 @@ pub const SECTOR_CHUNKS: i32 = 4;
 /// Side length of a scan sector, in blocks.
 pub const SECTOR_SIZE: i32 = SECTOR_CHUNKS * CHUNK_SIZE;
 
-/// How far below the surface the scanner can sense ore.
+/// How far below the surface a stock scanner senses ore.
 ///
 /// Depth-0 hits are outcrops anyone can eyeball; depth 1 to `SCAN_DEPTH` is
-/// what the scanner is *for*. Bodies deeper than this stay invisible until a
-/// scanner upgrade raises it — the same shape as the drone's grade stat.
+/// what the scanner is *for*. The fleet carries its own (upgradeable) depth —
+/// the Prospecting skill raises it — and this constant is the level-1 value.
 pub const SCAN_DEPTH: i32 = 24;
 
 /// One square of the scan grid, in sector coordinates.
@@ -84,10 +84,10 @@ pub struct Ping {
 /// scanner then reflects the world *as it is* — a mined-out body honestly
 /// stops pinging, and player-placed ore pings — and the cost is a bounded
 /// `SCAN_DEPTH` walk per column.
-pub(crate) fn column_hit(world: &World, x: i32, z: i32) -> Option<(i32, i32)> {
+pub(crate) fn column_hit(world: &World, x: i32, z: i32, max_depth: i32) -> Option<(i32, i32)> {
     let clear = world.surface_y(x, z)?;
     let top = clear - 1;
-    (0..=SCAN_DEPTH)
+    (0..=max_depth)
         .find(|depth| is_ore(world, BlockPos::new(x, top - depth, z)))
         .map(|depth| (depth, clear + 2))
 }
@@ -156,7 +156,7 @@ pub(crate) fn cluster_pings(hits: &HashMap<(i32, i32), (i32, i32)>) -> Vec<Ping>
 pub fn scan_columns(world: &World, sector: Sector) -> Vec<Ping> {
     let hits: HashMap<(i32, i32), (i32, i32)> = sector
         .columns()
-        .filter_map(|(x, z)| column_hit(world, x, z).map(|hit| ((x, z), hit)))
+        .filter_map(|(x, z)| column_hit(world, x, z, SCAN_DEPTH).map(|hit| ((x, z), hit)))
         .collect();
     cluster_pings(&hits)
 }

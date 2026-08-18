@@ -6,6 +6,7 @@
 //! a window and to an offscreen image in tests.
 
 pub mod camera;
+pub mod font;
 pub mod frustum;
 pub mod gpu;
 pub mod headless;
@@ -25,7 +26,7 @@ pub use frustum::Frustum;
 pub use gpu::{GpuContext, GpuError, WindowSurface, DEPTH_FORMAT};
 pub use mesh_buffer::{ChunkMesh, VERTEX_LAYOUT};
 pub use object::{Object, ObjectBatch, ObjectInstance, INSTANCE_LAYOUT};
-pub use overlay::{OverlayPass, OverlayRect};
+pub use overlay::{OverlayPass, OverlayRect, OVERLAY_SLOTS};
 pub use tiles::TileTextures;
 
 /// Sky colour, used to clear each frame.
@@ -287,9 +288,11 @@ impl Renderer {
         self.objects.live_count()
     }
 
-    /// Put a 2D picture on screen at `rect` until cleared. See [`OverlayPass`].
+    /// Put a 2D picture on screen at `rect`, in one of the overlay slots,
+    /// until cleared. See [`OverlayPass`].
     pub fn set_overlay(
         &mut self,
+        slot: usize,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         size: (u32, u32),
@@ -298,15 +301,15 @@ impl Renderer {
     ) {
         let screen = (self.width, self.height);
         self.overlay
-            .set_picture(device, queue, size, pixels, rect, screen);
+            .set_picture(slot, device, queue, size, pixels, rect, screen);
     }
 
-    pub fn clear_overlay(&mut self) {
-        self.overlay.clear();
+    pub fn clear_overlay(&mut self, slot: usize) {
+        self.overlay.clear(slot);
     }
 
-    pub fn has_overlay(&self) -> bool {
-        self.overlay.is_set()
+    pub fn has_overlay(&self, slot: usize) -> bool {
+        self.overlay.is_set(slot)
     }
 
     pub fn loaded_chunk_count(&self) -> usize {

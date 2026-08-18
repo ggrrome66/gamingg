@@ -9,8 +9,11 @@
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
 mod controller;
+mod hud;
 mod map;
 mod mining;
+mod rig;
+mod skills;
 mod streaming;
 
 use std::sync::Arc;
@@ -18,6 +21,12 @@ use std::time::Instant;
 
 use controller::{FlyController, MovementMode, WalkController};
 use map::MapState;
+use rig::Rig;
+use skills::Skills;
+
+/// Overlay slot assignments: the minimap and the HUD.
+const MAP_SLOT: usize = 0;
+const HUD_SLOT: usize = 1;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -50,6 +59,8 @@ struct Options {
     dig: Option<Dig>,
     /// Drone ticks to run before capturing, when digging.
     ticks: u64,
+    /// Frame the first drone up close instead of the whole excavation.
+    close: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -70,6 +81,7 @@ fn parse_args() -> Result<Options, String> {
         at: (0, 0),
         dig: None,
         ticks: 20_000,
+        close: false,
     };
 
     let mut args = std::env::args().skip(1);
@@ -111,6 +123,7 @@ fn parse_args() -> Result<Options, String> {
                     }
                 });
             }
+            "--close" => options.close = true,
             "--ticks" => {
                 options.ticks = value()?
                     .parse()
@@ -136,6 +149,7 @@ fn parse_args() -> Result<Options, String> {
                      --at <x,z>          world position to view from (screenshot)\n  \
                      --dig <method>      find ore near --at and mine it before capturing\n  \
                                          (auto, adit, decline or pit)\n  \
+                     --close             frame the first drone up close (with --dig)\n  \
                      --ticks <n>         drone ticks to run when digging\n  \
                      --width <n>         window or image width\n  \
                      --height <n>        window or image height"
@@ -254,17 +268,44 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         let (operation, _, portal, workings) =
             dig_nearby(&mut world, options.at, choice, options.ticks)?;
 
-        // Frame the whole excavation: stand off from its centre and look at it.
-        let centre = glam::Vec3::new(
-            workings.centre().x as f32,
-            workings.max.y as f32,
-            workings.centre().z as f32,
-        );
-        let span = workings.size();
-        let stand_off = (span[0].max(span[2]) as f32 * 1.4).max(24.0);
-        camera.position = centre
-            + glam::Vec3::new(stand_off * 0.7, stand_off * 0.8, stand_off * 0.7);
-        look_at(&mut camera, centre);
+        // Frame the shot: the whole excavation from a stand-off, or — with
+        // `--close` — the first drone filling the frame, drill and all.
+        if options.close {
+            let drone = operation
+                .drones
+                .first()
+                .ok_or("no drone to frame up close")?;
+            let subject = glam::Vec3::new(
+                drone.position.x as f32 + 0.5,
+                drone.position.y as f32 + 0.4,
+                drone.position.z as f32 + 0.5,
+            );
+            // Stand toward the portal — the one direction guaranteed open,
+            // because the drone drove in through it.
+            let doorway = glam::Vec3::new(
+                portal.x as f32 + 0.5 - subject.x,
+                0.0,
+                portal.z as f32 + 0.5 - subject.z,
+            );
+            let out = if doorway.length() > 1.0 {
+                doorway.normalize()
+            } else {
+                glam::Vec3::new(0.7, 0.0, 0.7).normalize()
+            };
+            camera.position = subject + out * 3.2 + glam::Vec3::Y * 1.2;
+            look_at(&mut camera, subject);
+        } else {
+            let centre = glam::Vec3::new(
+                workings.centre().x as f32,
+                workings.max.y as f32,
+                workings.centre().z as f32,
+            );
+            let span = workings.size();
+            let stand_off = (span[0].max(span[2]) as f32 * 1.4).max(24.0);
+            camera.position = centre
+                + glam::Vec3::new(stand_off * 0.7, stand_off * 0.8, stand_off * 0.7);
+            look_at(&mut camera, centre);
+        }
         let _ = portal;
 
         // Sweep the sector too, so the capture shows the whole loop: the
@@ -291,31 +332,33 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
         remesh_all(&context, &mut renderer, &mut world);
         renderer.update_camera(&context.queue, &camera);
-        let mut objects: Vec<vx_render::Object> = operation
-            .drones
-            .iter()
-            .map(|drone| {
-                vx_render::Object::standing(
-                    glam::Vec3::new(
-                        drone.position.x as f32 + 0.5,
-                        drone.position.y as f32,
-                        drone.position.z as f32 + 0.5,
-                    ),
-                    0.8,
-                    vx_render::tiles::slot::BEDROCK,
-                )
-            })
-            .collect();
+
+        // The machines wear their rigs, mid-dig: drills rolled to a visible
+        // angle, noses yawed toward the workings so the shot reads as work.
+        let digger = Rig::digger();
+        let mut objects: Vec<vx_render::Object> = Vec::new();
+        for drone in &operation.drones {
+            let position = glam::Vec3::new(
+                drone.position.x as f32 + 0.5,
+                drone.position.y as f32,
+                drone.position.z as f32 + 0.5,
+            );
+            let toward = workings.centre();
+            let yaw = rig::yaw_towards(
+                toward.x as f32 + 0.5 - position.x,
+                toward.z as f32 + 0.5 - position.z,
+            )
+            .unwrap_or(0.0);
+            objects.extend(digger.objects(position, yaw, 0.9));
+        }
+        let flier_rig = Rig::flier();
         for flier in &fleet.fliers {
-            objects.push(vx_render::Object::standing(
-                glam::Vec3::new(
-                    flier.position.x as f32 + 0.5,
-                    flier.position.y as f32,
-                    flier.position.z as f32 + 0.5,
-                ),
-                1.0,
-                vx_render::tiles::slot::CONTAINER,
-            ));
+            let position = glam::Vec3::new(
+                flier.position.x as f32 + 0.5,
+                flier.position.y as f32,
+                flier.position.z as f32 + 0.5,
+            );
+            objects.extend(flier_rig.objects(position, 0.0, 2.1));
         }
         for ping in &pings {
             let centre = glam::Vec3::new(
@@ -329,7 +372,47 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                 vx_render::tiles::slot::COPPER_ORE,
             ));
         }
+        // The player's handheld drill rides the camera, exactly as in play.
+        let camera_forward = camera.forward();
+        let camera_right = camera.right();
+        let drill_position =
+            camera.position + camera_forward * 0.85 + camera_right * 0.42 - glam::Vec3::Y * 0.38;
+        let drill_yaw = rig::yaw_towards(camera_forward.x, camera_forward.z).unwrap_or(0.0);
+        objects.extend(Rig::hand_drill().objects_pitched(
+            drill_position,
+            drill_yaw,
+            camera.pitch,
+            0.7,
+        ));
+
         renderer.set_objects(&context.device, &context.queue, &objects);
+
+        // The HUD panel, with a few levels earned so the capture shows the
+        // skill sheet doing its job.
+        let mut hud_skills = Skills::new();
+        hud_skills.add_xp(skills::MINING, 4_000);
+        hud_skills.add_xp(skills::PROSPECTING, 1_200);
+        hud_skills.add_xp(skills::LOGISTICS, 600);
+        hud_skills.add_xp(skills::MINING, 40);
+        let hud_pixels = hud::render_hud(&hud::HudContent {
+            skills: &hud_skills,
+            status: Some(format!("MINING {} JOBS LEFT", operation.board.len())),
+            drilling: Some(0.64),
+            level_up: None,
+        });
+        renderer.set_overlay(
+            HUD_SLOT,
+            &context.device,
+            &context.queue,
+            (hud::HUD_WIDTH, hud::HUD_HEIGHT),
+            &hud_pixels,
+            vx_render::OverlayRect {
+                x: 10.0,
+                y: height as f32 - hud::HUD_HEIGHT as f32 * hud::HUD_SCALE - 10.0,
+                width: hud::HUD_WIDTH as f32 * hud::HUD_SCALE,
+                height: hud::HUD_HEIGHT as f32 * hud::HUD_SCALE,
+            },
+        );
 
         // And the minimap in the corner, exactly as the game draws it: every
         // loaded chunk counts as explored, the surveyed sector shades in, and
@@ -367,6 +450,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         let margin = 10.0;
         let panel = map::MAP_SIZE as f32;
         renderer.set_overlay(
+            MAP_SLOT,
             &context.device,
             &context.queue,
             (map::MAP_SIZE, map::MAP_SIZE),
@@ -463,6 +547,16 @@ struct Active {
     mining: Mining,
     /// The fog-of-war minimap.
     map: MapState,
+    /// The player's skill sheet.
+    skills: Skills,
+    /// The block being drilled and how far through it the bit has got.
+    digging: Option<(vx_core::BlockPos, f32)>,
+    /// A recent level-up, shown on the HUD for a moment.
+    level_up: Option<(String, u32, Instant)>,
+    /// The handheld drill's shape, built once.
+    hand_rig: Rig,
+    /// The viewmodel drill's accumulated rotation.
+    drill_spin: f32,
 }
 
 struct App {
@@ -474,6 +568,8 @@ struct App {
     fly: FlyController,
     walk: WalkController,
     input: InputState,
+    /// The left button is held: the drill is running.
+    drill_held: bool,
     last_frame: Instant,
     // Frame timing for the title bar readout.
     frames: u32,
@@ -489,6 +585,7 @@ impl App {
             world_name,
             active: None,
             fly: FlyController::default(),
+            drill_held: false,
             walk: WalkController::default(),
             input: InputState::new(),
             last_frame: Instant::now(),
@@ -554,12 +651,44 @@ impl App {
             }
         }
 
+        // The player's drill runs before streaming too, for the same reason
+        // the drones dig first: edits land in this frame's remesh.
+        self.update_drilling(dt);
+        let Some(active) = &mut self.active else { return };
+
         // Drones dig before streaming, so the chunks their edits dirty get
         // re-meshed in the same frame rather than the next one.
-        active.mining.update(
+        let report = active.mining.update(
             &mut active.world,
             &active.events,
             std::time::Duration::from_secs_f32(dt),
+        );
+
+        // The fleet's work becomes the player's experience.
+        if report.sectors_completed > 0 || report.pings_found > 0 {
+            let xp = u64::from(report.sectors_completed) * skills::SWEEP_XP
+                + u64::from(report.pings_found) * skills::PING_XP;
+            if let Some(level) = active.skills.add_xp(skills::PROSPECTING, xp) {
+                active.level_up = Some((skills::PROSPECTING.to_string(), level, Instant::now()));
+            }
+        }
+        if report.delivered > 0 {
+            let xp = report.delivered * skills::DELIVERY_XP;
+            if let Some(level) = active.skills.add_xp(skills::LOGISTICS, xp) {
+                active.level_up = Some((skills::LOGISTICS.to_string(), level, Instant::now()));
+            }
+        }
+        // Levels feed straight back into the machines' stats.
+        active.mining.apply_skills(
+            skills::scan_depth(active.skills.level(skills::PROSPECTING)),
+            skills::capacity(
+                vx_agent::DEFAULT_CAPACITY,
+                active.skills.level(skills::LOGISTICS),
+            ),
+            skills::capacity(
+                vx_agent::DEFAULT_FLIER_CAPACITY,
+                active.skills.level(skills::LOGISTICS),
+            ),
         );
 
         // Keep chunks in step with where the camera is.
@@ -588,10 +717,35 @@ impl App {
             .update_camera(&active.context.queue, &active.camera);
         // After the camera, because objects are culled against the frustum it
         // just refreshed.
-        let objects = active.mining.objects();
+        let mut objects = active.mining.objects();
+
+        // The held drill, drawn in camera space so it rides the view. The bit
+        // spins up while it is cutting and idles otherwise; a slight bob sells
+        // the vibration.
+        active.drill_spin += dt * if active.digging.is_some() { 22.0 } else { 1.6 };
+        let camera_forward = active.camera.forward();
+        let camera_right = active.camera.right();
+        let bob = if active.digging.is_some() {
+            (active.drill_spin * 0.9).sin() * 0.02
+        } else {
+            0.0
+        };
+        let drill_position = active.camera.position + camera_forward * 0.85
+            + camera_right * 0.42
+            + glam::Vec3::Y * (-0.38 + bob);
+        let drill_yaw = rig::yaw_towards(camera_forward.x, camera_forward.z).unwrap_or(0.0);
+        objects.extend(active.hand_rig.objects_pitched(
+            drill_position,
+            drill_yaw,
+            active.camera.pitch,
+            active.drill_spin,
+        ));
+
         active
             .renderer
             .set_objects(&active.context.device, &active.context.queue, &objects);
+        self.refresh_hud();
+        let Some(active) = &mut self.active else { return };
 
         use wgpu::CurrentSurfaceTexture as Acquired;
 
@@ -647,9 +801,20 @@ impl App {
     /// How far the player can reach to break or place, in blocks.
     const REACH: f32 = 6.0;
 
-    /// Break whatever the player is looking at.
-    fn break_target(&mut self) {
+    /// Run the drill for one frame, if it is held on something drillable.
+    ///
+    /// Hold-to-dig: progress accumulates while the bit stays on one block and
+    /// resets when the aim moves — like lifting a real tool. The break itself
+    /// still goes through `break_block`, so events fire and a mod's veto works
+    /// exactly as it does for the drones.
+    fn update_drilling(&mut self, dt: f32) {
+        let drilling = self.drill_held && self.input.mouse_captured;
         let Some(active) = &mut self.active else { return };
+        if !drilling {
+            active.digging = None;
+            return;
+        }
+
         let Some(hit) = raycast_solid(
             &active.world,
             active.world.registry(),
@@ -657,14 +822,53 @@ impl App {
             active.camera.forward(),
             Self::REACH,
         ) else {
+            active.digging = None;
             return;
         };
+
+        // Hardness is the block's resistance; no hardness (bedrock) means the
+        // bit just skates.
+        let Some(hardness) = active
+            .world
+            .registry()
+            .get(hit.id)
+            .and_then(|def| def.hardness)
+        else {
+            active.digging = None;
+            return;
+        };
+
+        let power = skills::drill_power(active.skills.level(skills::MINING));
+        let step = dt * power / hardness.max(0.05);
+
+        match &mut active.digging {
+            Some((target, progress)) if *target == hit.block => {
+                *progress += step;
+                if *progress < 1.0 {
+                    return;
+                }
+            }
+            other => {
+                *other = Some((hit.block, step.min(1.0)));
+                if step < 1.0 {
+                    return;
+                }
+            }
+        }
+
+        // Through: break it, learn from it.
+        active.digging = None;
         match break_block(&mut active.world, &active.events, hit.block) {
             Err(error) => log::debug!("could not break {:?}: {error}", hit.block),
             Ok(_) => {
+                let xp = (hardness * skills::MINING_XP_PER_HARDNESS) as u64;
+                if let Some(level) = active.skills.add_xp(skills::MINING, xp) {
+                    active.level_up = Some((skills::MINING.to_string(), level, Instant::now()));
+                }
+
                 // Breaking the base container un-declares the base. The pile
-                // it held is spilled into the mine's... nowhere yet — it is
-                // logged, and stage 7's inventory gives it somewhere to go.
+                // it held is set aside for now; stage 7's inventory gives it
+                // somewhere to go.
                 let was_base = active
                     .mining
                     .fleet
@@ -749,7 +953,7 @@ impl App {
                 if let Some(active) = &mut self.active {
                     active.map.visible = !active.map.visible;
                     if !active.map.visible {
-                        active.renderer.clear_overlay();
+                        active.renderer.clear_overlay(MAP_SLOT);
                     } else {
                         active.map.invalidate();
                     }
@@ -840,6 +1044,41 @@ impl App {
         }
     }
 
+    /// Rebuild and upload the HUD panel. Cheap enough to run every frame,
+    /// which the fast-moving drill bar wants anyway.
+    fn refresh_hud(&mut self) {
+        let Some(active) = &mut self.active else { return };
+
+        let level_up = active.level_up.as_ref().and_then(|(skill, level, at)| {
+            (at.elapsed().as_secs_f32() < 2.5).then(|| (skill.clone(), *level))
+        });
+        let content = hud::HudContent {
+            skills: &active.skills,
+            status: active.mining.status(),
+            drilling: active.digging.map(|(_, progress)| progress),
+            level_up,
+        };
+        let pixels = hud::render_hud(&content);
+
+        let (_, screen_height) = active.renderer.size();
+        let margin = 12.0;
+        let width = hud::HUD_WIDTH as f32 * hud::HUD_SCALE;
+        let height = hud::HUD_HEIGHT as f32 * hud::HUD_SCALE;
+        active.renderer.set_overlay(
+            HUD_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (hud::HUD_WIDTH, hud::HUD_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: margin,
+                y: screen_height as f32 - height - margin,
+                width,
+                height,
+            },
+        );
+    }
+
     /// Rebuild and upload the minimap overlay, on the redraw throttle.
     fn refresh_minimap(&mut self) {
         let Some(active) = &mut self.active else { return };
@@ -896,6 +1135,7 @@ impl App {
         let margin = 12.0;
         let panel = map::MAP_SIZE as f32;
         active.renderer.set_overlay(
+            MAP_SLOT,
             &active.context.device,
             &active.context.queue,
             (map::MAP_SIZE, map::MAP_SIZE),
@@ -923,6 +1163,9 @@ impl App {
         match active.map.save(save.root()) {
             Ok(()) => log::info!("saved the map ({} explored chunks)", active.map.explored_count()),
             Err(error) => log::error!("could not save the map: {error}"),
+        }
+        if let Err(error) = active.skills.save(save.root()) {
+            log::error!("could not save the skill sheet: {error}");
         }
     }
 
@@ -1048,8 +1291,10 @@ impl ApplicationHandler for App {
         renderer.update_camera(&context.queue, &camera);
 
         let mut map = MapState::new();
+        let mut skills = Skills::new();
         if let Some(save) = &save {
             map.load(save.root());
+            skills.load(save.root());
         }
 
         self.active = Some(Active {
@@ -1072,6 +1317,11 @@ impl ApplicationHandler for App {
                 mining
             },
             map,
+            skills,
+            digging: None,
+            level_up: None,
+            hand_rig: Rig::hand_drill(),
+            drill_spin: 0.0,
         });
 
         self.last_frame = Instant::now();
@@ -1130,14 +1380,18 @@ impl ApplicationHandler for App {
                 }
             }
 
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button,
-                ..
-            } => {
-                // The first click captures the pointer; once captured, clicks
-                // edit the world. Without that, the click that focuses the
-                // window would also punch a hole in the terrain.
+            WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Released {
+                    if button == MouseButton::Left {
+                        // Letting go stops the drill mid-block; progress on
+                        // that block is abandoned, like lifting a real tool.
+                        self.drill_held = false;
+                    }
+                    return;
+                }
+                // The first click captures the pointer; once captured, the
+                // held left button runs the drill. Without the capture step,
+                // the click that focuses the window would also start cutting.
                 if !self.input.mouse_captured {
                     if button == MouseButton::Left {
                         self.set_capture(true);
@@ -1145,7 +1399,7 @@ impl ApplicationHandler for App {
                     return;
                 }
                 match button {
-                    MouseButton::Left => self.break_target(),
+                    MouseButton::Left => self.drill_held = true,
                     MouseButton::Right => self.place_at_target(),
                     _ => {}
                 }

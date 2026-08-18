@@ -36,7 +36,7 @@ pub mod stockpile;
 
 pub use aabb::VoxelAabb;
 pub use drone::{Drone, DroneState, DEFAULT_CAPACITY, DEFAULT_GRADE};
-pub use fleet::{Base, Fleet};
+pub use fleet::{Base, Fleet, FleetReport};
 pub use flier::{Flier, FlierState, CLEARANCE, DEFAULT_FLIER_CAPACITY};
 pub use flow::{is_standable, settle, FlowField, STEP, UNREACHABLE};
 pub use job::{DroneId, Job, JobBoard, JobId, JobKind};

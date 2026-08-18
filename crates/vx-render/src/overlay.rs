@@ -33,22 +33,27 @@ struct RectUniform {
     _pad: [f32; 2],
 }
 
-/// The picture currently on screen.
+/// How many independent overlay pictures a frame can carry. Slot 0 is the
+/// minimap and slot 1 the HUD by convention in the app; the pass itself does
+/// not care.
+pub const OVERLAY_SLOTS: usize = 4;
+
+/// One picture on screen: its texture, its rectangle uniform, and the bind
+/// group tying them together.
 struct Picture {
     _texture: wgpu::Texture,
+    uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     width: u32,
     height: u32,
 }
 
-/// The overlay pipeline plus whatever picture is currently set.
+/// The overlay pipeline plus whatever pictures are currently set.
 pub struct OverlayPass {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    uniform: wgpu::Buffer,
-    picture: Option<Picture>,
-    rect: OverlayRect,
+    slots: [Option<Picture>; OVERLAY_SLOTS],
 }
 
 impl OverlayPass {
@@ -133,40 +138,31 @@ impl OverlayPass {
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("overlay sampler"),
-            // Nearest: the minimap is one pixel per column and should stay
-            // crisp when scaled, exactly like the block textures.
+            // Nearest: the minimap is one pixel per column and pixel text
+            // should stay crisp when scaled, exactly like the block textures.
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
-        });
-
-        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("overlay rect"),
-            size: std::mem::size_of::<RectUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         OverlayPass {
             pipeline,
             layout,
             sampler,
-            uniform,
-            picture: None,
-            rect: OverlayRect {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 0.0,
-            },
+            slots: Default::default(),
         }
     }
 
     /// Put `pixels` (tightly packed RGBA, `width * height * 4` bytes) on
-    /// screen at `rect`, on a target `screen` pixels big. Reuses the texture
-    /// while the size is unchanged.
+    /// screen at `rect` in slot `slot`, on a target `screen` pixels big.
+    /// Reuses the slot's texture while the size is unchanged.
+    ///
+    /// Eight arguments and every one earns its seat: this is the single
+    /// plumbing point between CPU images and the screen.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_picture(
         &mut self,
+        slot: usize,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         size: (u32, u32),
@@ -180,19 +176,8 @@ impl OverlayPass {
             (width * height * 4) as usize,
             "overlay pixel buffer does not match its declared size"
         );
-        self.rect = rect;
-        queue.write_buffer(
-            &self.uniform,
-            0,
-            bytemuck::bytes_of(&RectUniform {
-                rect: [rect.x, rect.y, rect.width, rect.height],
-                screen: [screen.0 as f32, screen.1 as f32],
-                _pad: [0.0; 2],
-            }),
-        );
 
-        let recreate = self
-            .picture
+        let recreate = self.slots[slot]
             .as_ref()
             .is_none_or(|picture| picture.width != width || picture.height != height);
         if recreate {
@@ -211,13 +196,19 @@ impl OverlayPass {
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("overlay rect"),
+                size: std::mem::size_of::<RectUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("overlay bind group"),
                 layout: &self.layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: self.uniform.as_entire_binding(),
+                        resource: uniform.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -229,15 +220,25 @@ impl OverlayPass {
                     },
                 ],
             });
-            self.picture = Some(Picture {
+            self.slots[slot] = Some(Picture {
                 _texture: texture,
+                uniform,
                 bind_group,
                 width,
                 height,
             });
         }
 
-        let picture = self.picture.as_ref().expect("just ensured");
+        let picture = self.slots[slot].as_ref().expect("just ensured");
+        queue.write_buffer(
+            &picture.uniform,
+            0,
+            bytemuck::bytes_of(&RectUniform {
+                rect: [rect.x, rect.y, rect.width, rect.height],
+                screen: [screen.0 as f32, screen.1 as f32],
+                _pad: [0.0; 2],
+            }),
+        );
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &picture._texture,
@@ -259,20 +260,25 @@ impl OverlayPass {
         );
     }
 
-    /// Stop drawing any overlay.
-    pub fn clear(&mut self) {
-        self.picture = None;
+    /// Stop drawing the picture in `slot`.
+    pub fn clear(&mut self, slot: usize) {
+        self.slots[slot] = None;
     }
 
-    pub fn is_set(&self) -> bool {
-        self.picture.is_some()
+    pub fn is_set(&self, slot: usize) -> bool {
+        self.slots[slot].is_some()
     }
 
-    /// Record the draw, if a picture is set. Call last in the pass.
+    /// Record the draws, lowest slot first. Call last in the pass.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        let Some(picture) = &self.picture else { return };
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &picture.bind_group, &[]);
-        pass.draw(0..6, 0..1);
+        let mut bound = false;
+        for picture in self.slots.iter().flatten() {
+            if !bound {
+                pass.set_pipeline(&self.pipeline);
+                bound = true;
+            }
+            pass.set_bind_group(0, &picture.bind_group, &[]);
+            pass.draw(0..6, 0..1);
+        }
     }
 }

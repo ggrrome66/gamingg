@@ -46,12 +46,38 @@ struct Survey {
     complete: bool,
 }
 
+/// What one fleet tick achieved — the hooks player progression feeds on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FleetReport {
+    /// Blocks unloaded into the base this tick.
+    pub delivered: u64,
+    /// Sector sweeps that finished this tick.
+    pub sectors_completed: u32,
+    /// Pings known in the sectors that finished this tick.
+    pub pings_found: u32,
+}
+
 /// The fleet: fliers, the base, and everything the scanner has learned.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Fleet {
     pub fliers: Vec<Flier>,
     pub base: Option<Base>,
+    /// How deep the scanner senses, in blocks below the surface. Starts at
+    /// [`crate::prospect::SCAN_DEPTH`]; the app raises it as the player's
+    /// Prospecting level does.
+    pub scan_depth: i32,
     surveys: HashMap<Sector, Survey>,
+}
+
+impl Default for Fleet {
+    fn default() -> Self {
+        Fleet {
+            fliers: Vec::new(),
+            base: None,
+            scan_depth: crate::prospect::SCAN_DEPTH,
+            surveys: HashMap::new(),
+        }
+    }
 }
 
 impl Fleet {
@@ -128,18 +154,26 @@ impl Fleet {
             .map(|(sector, _)| *sector)
     }
 
-    /// Advance every flier one tick.
-    pub fn tick(&mut self, world: &World, mines: &mut [Operation]) {
+    /// Advance every flier one tick, reporting what happened.
+    pub fn tick(&mut self, world: &World, mines: &mut [Operation]) -> FleetReport {
+        let mut report = FleetReport::default();
         for index in 0..self.fliers.len() {
-            self.tick_flier(index, world, mines);
+            self.tick_flier(index, world, mines, &mut report);
         }
+        report
     }
 
-    fn tick_flier(&mut self, index: usize, world: &World, mines: &mut [Operation]) {
+    fn tick_flier(
+        &mut self,
+        index: usize,
+        world: &World,
+        mines: &mut [Operation],
+        report: &mut FleetReport,
+    ) {
         match self.fliers[index].state {
             FlierState::Idle => self.consider_ferrying(index, mines),
             FlierState::Scanning { sector, waypoint } => {
-                self.advance_scan(index, world, sector, waypoint)
+                self.advance_scan(index, world, sector, waypoint, report)
             }
             FlierState::ToPickup { mine } => {
                 // The mine may have been dismantled between dispatch and
@@ -164,6 +198,7 @@ impl Fleet {
                 let target = (base.position.x, base.position.z);
                 if self.fliers[index].fly_towards(world, target) {
                     let cargo = std::mem::take(&mut self.fliers[index].cargo);
+                    report.delivered += cargo.total();
                     for (name, count) in cargo.entries() {
                         base.stockpile.add(name.to_string(), count);
                     }
@@ -213,10 +248,20 @@ impl Fleet {
     }
 
     /// One tick of a sweep: fly to the next waypoint, scan the swath there.
-    fn advance_scan(&mut self, index: usize, world: &World, sector: Sector, waypoint: usize) {
+    fn advance_scan(
+        &mut self,
+        index: usize,
+        world: &World,
+        sector: Sector,
+        waypoint: usize,
+        report: &mut FleetReport,
+    ) {
         let path = sweep_path(sector);
         let Some(&target) = path.get(waypoint) else {
-            self.surveys.entry(sector).or_default().complete = true;
+            let survey = self.surveys.entry(sector).or_default();
+            survey.complete = true;
+            report.sectors_completed += 1;
+            report.pings_found += cluster_pings(&survey.hits).len() as u32;
             self.fliers[index].state = FlierState::Idle;
             return;
         };
@@ -226,6 +271,7 @@ impl Fleet {
         }
 
         // Over the waypoint: the swath under the flight line is now covered.
+        let scan_depth = self.scan_depth;
         let survey = self.surveys.entry(sector).or_default();
         let (min_x, min_z) = sector.min_column();
         let size = crate::prospect::SECTOR_SIZE;
@@ -233,7 +279,7 @@ impl Fleet {
             let inside = (min_x..min_x + size).contains(&column.0)
                 && (min_z..min_z + size).contains(&column.1);
             if inside && survey.covered.insert(column) {
-                if let Some(hit) = column_hit(world, column.0, column.1) {
+                if let Some(hit) = column_hit(world, column.0, column.1, scan_depth) {
                     survey.hits.insert(column, hit);
                 }
             }
@@ -335,6 +381,54 @@ mod tests {
         assert_eq!(pings.len(), 1, "found more than the overflown body: {pings:?}");
         assert!(pings[0].position.z < 32, "the late body pinged before being overflown");
         assert!(!fleet.is_surveyed(Sector { x: 0, z: 0 }));
+    }
+
+    #[test]
+    fn a_deeper_scanner_finds_what_the_stock_one_misses() {
+        // The Prospecting upgrade hook, proved end to end: same world, same
+        // sweep, different instrument.
+        let mut world = flat(5, 60);
+        // Body top at 30: depth 30 below the surface at 60 — past the stock
+        // 24, within an upgraded 36.
+        let body = VoxelAabb::new(BlockPos::new(20, 25, 20), BlockPos::new(24, 30, 24));
+        ore_body(&mut world, body);
+
+        let mut stock = fleet_over(&world);
+        stock.dispatch_scan(Sector { x: 0, z: 0 });
+        run_until_idle(&mut stock, &world, &mut [], 5_000);
+        assert!(stock.pings().is_empty(), "the stock scanner should miss depth 30");
+
+        let mut upgraded = fleet_over(&world);
+        upgraded.scan_depth = 36;
+        upgraded.dispatch_scan(Sector { x: 0, z: 0 });
+        run_until_idle(&mut upgraded, &world, &mut [], 5_000);
+        let pings = upgraded.pings();
+        assert_eq!(pings.len(), 1, "the upgraded scanner missed it too");
+        assert_eq!(pings[0].depth, 30);
+    }
+
+    #[test]
+    fn the_report_counts_exactly_what_lands_in_the_base() {
+        // The Logistics XP source must match reality, or levels drift from
+        // work done.
+        let world = flat(6, 60);
+        let mut fleet = fleet_over(&world);
+        fleet.set_base(BlockPos::new(-25, 61, -25));
+
+        let mut mine = Operation::new(BlockPos::new(30, 61, 30));
+        mine.stockpile.add("engine:copper_ore", 150);
+        let mut mines = [mine];
+
+        let mut reported = 0u64;
+        for _ in 0..10_000 {
+            reported += fleet.tick(&world, &mut mines).delivered;
+            if mines[0].stockpile.is_empty() && fleet.fliers[0].carrying() == 0 {
+                break;
+            }
+        }
+        let landed = fleet.base.as_ref().unwrap().stockpile.total();
+        assert_eq!(reported, landed, "the report and the base pile disagree");
+        assert_eq!(landed, 150);
     }
 
     #[test]

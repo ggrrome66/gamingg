@@ -687,16 +687,19 @@ fn the_overlay_draws_only_when_set_and_vanishes_when_cleared() {
     renderer.update_camera(&context.queue, &camera);
 
     let bare = capture_frame(&context, &renderer, WIDTH, HEIGHT);
-    assert!(!renderer.has_overlay());
+    assert!(!renderer.has_overlay(0));
 
-    // A solid magenta square, hard to miss.
+    // Two slots at once — a magenta square and a green one — because the HUD
+    // and the minimap will always be up together.
     let size = 32u32;
-    let pixels: Vec<u8> = (0..size * size).flat_map(|_| [255, 0, 255, 255]).collect();
+    let magenta: Vec<u8> = (0..size * size).flat_map(|_| [255, 0, 255, 255]).collect();
+    let green: Vec<u8> = (0..size * size).flat_map(|_| [0, 255, 0, 255]).collect();
     renderer.set_overlay(
+        0,
         &context.device,
         &context.queue,
         (size, size),
-        &pixels,
+        &magenta,
         vx_render::OverlayRect {
             x: 8.0,
             y: 8.0,
@@ -704,14 +707,34 @@ fn the_overlay_draws_only_when_set_and_vanishes_when_cleared() {
             height: 64.0,
         },
     );
+    renderer.set_overlay(
+        1,
+        &context.device,
+        &context.queue,
+        (size, size),
+        &green,
+        vx_render::OverlayRect {
+            x: 120.0,
+            y: 8.0,
+            width: 64.0,
+            height: 64.0,
+        },
+    );
     let overlaid = capture_frame(&context, &renderer, WIDTH, HEIGHT);
     assert_ne!(bare.pixels, overlaid.pixels, "the overlay drew nothing");
-    // The quad is where the rect says, in top-left pixel coordinates.
+    // Each quad is where its rect says, in top-left pixel coordinates.
     assert_eq!(overlaid.pixel(40, 40)[0..3], [255, 0, 255]);
-    // And outside it, the frame is untouched.
+    assert_eq!(overlaid.pixel(150, 40)[0..3], [0, 255, 0]);
+    // And outside them, the frame is untouched.
     assert_eq!(overlaid.pixel(200, 200), bare.pixel(200, 200));
 
-    renderer.clear_overlay();
+    // Clearing one slot leaves the other.
+    renderer.clear_overlay(0);
+    let half = capture_frame(&context, &renderer, WIDTH, HEIGHT);
+    assert_eq!(half.pixel(40, 40), bare.pixel(40, 40));
+    assert_eq!(half.pixel(150, 40)[0..3], [0, 255, 0]);
+
+    renderer.clear_overlay(1);
     let cleared = capture_frame(&context, &renderer, WIDTH, HEIGHT);
     assert_eq!(bare.pixels, cleared.pixels, "clearing did not fully remove the overlay");
 }

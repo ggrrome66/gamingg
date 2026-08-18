@@ -17,25 +17,34 @@ art exists.
 
 ## Status
 
-M3 stage 4 is in. The world has real relief, meshes across all cores, draws
+M3 stage 5 is in. The world has real relief, meshes across all cores, draws
 only what the camera can see, and hides copper ore in the rock with occasional
 outcrops breaking the surface. Mark a body and the game works out how to mine
 it — a level adit into a hillside, a diagonal decline, or a benched open pit —
 and a ground drone cuts the excavation, drives in, digs the ore out and hauls
 it to the mine mouth. A flying drone sweeps sectors and drops pings on ore
-buried up to 24 blocks down, and once you place a container it ferries every
-pile home automatically. A fog-of-war minimap paints in as you walk — and as
-the flier sweeps — with live dots for you, the drones, the pings and the base.
-You can walk on it, build in it, and it survives quitting.
+buried underground, and once you place a container it ferries every pile home
+automatically. A fog-of-war minimap paints in as you walk — and as the flier
+sweeps — with live dots for you, the drones, the pings and the base.
+
+The machines now look like machines: the ground drone is a squat rust-orange
+digger rig with a spinning nose drill and chunky treads, the flier carries a
+rotor, and both glide between ticks and turn to face their travel. You hold a
+compact boring drill instead of breaking blocks by clicking — hold the button
+and it chews through by hardness, faster as your Mining level climbs. Skills
+(Mining, Prospecting, Logistics) level RuneScape-style: prospecting deepens
+the flier's scanner, logistics grows every cargo hold, and it is all drawn on
+a bitmap-font HUD with XP bars and a level-up shout. You can walk on it,
+build in it, and it survives quitting — skills included.
 
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
 | `vx-world` | Chunk storage, worldgen, ore, raycast, physics, editing, saves | Done |
 | `vx-mesh` | Greedy meshing | Done |
-| `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlay, offscreen capture | Done |
+| `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
-| `vx-app` | Window, walk/fly controls, streaming, `gamingg` binary | Done |
+| `vx-app` | Window, walk/fly controls, streaming, HUD, rigs, skills, `gamingg` binary | Done |
 | `vx-agent` | Job board, flow fields, mine planning, scanner, flier + fleet | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
@@ -53,8 +62,14 @@ You can walk on it, build in it, and it survives quitting.
   the blocks actually present would cull more.
 - Ore uses one tile for every block, so a large exposed body shows a visibly
   repeating pattern. Real art or per-block texture variation fixes it.
-- Drones are drawn as plain cubes, and the mining readout goes to the log rather
-  than the screen. Text rendering is a later milestone.
+- Rig parts are lit like everything else but cast no shadows and have no
+  animation beyond spin and yaw — no suspension, no articulation.
+- The viewmodel drill is drawn in world space at a camera offset, so it can
+  clip into a wall you stand against. A real fix renders it in a separate
+  near-scaled pass; cosmetic until then.
+- Skill effects apply on the next frame's `apply_skills`, so a capacity raise
+  reaches existing drones mid-run. Deliberate — retroactive upgrades feel
+  good — but it means capacity is not per-drone state anywhere.
 - A drone's grade shapes the ramps it cuts but is not yet a limit on what it can
   drive: the flow field allows one block of climb per step, so a 1:1 staircase is
   traversable by anything. Making grade a real constraint needs a field that
@@ -144,7 +159,7 @@ can cut standing on its own floor. A three-block corridor needs somebody a block
 off the ground to cut the roof, and on a level tunnel there is nowhere to stand.
 
 **The scanner samples real blocks, not the deposit function.** For each surface
-column it walks up to 24 blocks down looking for ore, then clusters adjacent
+column it walks up to 24 blocks down (deeper as Prospecting levels), then clusters adjacent
 hits into one ping per body. Reading the pure deposit lattice would have been
 cheaper and always right about generated terrain — and wrong about everything
 else: a mined-out body must honestly stop pinging, and player-placed ore must
@@ -165,6 +180,42 @@ pass — any RGBA image at any screen rectangle, no depth test — and headless
 captures and the culling tests never set one, so every pixel-equality
 guarantee stands byte-for-byte. The same pass is deliberately the first brick
 of the terminal screen and anything else that is a flat picture.
+
+**The font is data, the HUD is pixels.** Text is a hand-set 5×7 bitmap —
+A–Z, digits, punctuation, seven bytes a glyph — stamped into any RGBA buffer.
+The HUD composites a small panel on the CPU exactly the way the minimap does
+and ships it through a second overlay slot; the renderer never learns what a
+glyph is. The same font is the terminal screen's and the shop's, later.
+
+**A rig is data too: a handful of cuboids.** Machines are parts — centre,
+size, tile, maybe a spin axis — turned into instanced objects each frame, so
+they ride the existing one-draw-call path and per-object frustum culling with
+zero new render code. The digger reads Motherload-ish on purpose: squat
+rust-orange hull, pale cab, chunky treads, tapered steel drill that spins
+while she cuts. The *vibe* is borrowed; every pixel is procedural and ours.
+Rigs face +X and yaw to their travel; positions interpolate between
+simulation ticks so machines glide instead of teleporting block to block.
+The inverse-transpose normal fix from the review round is what keeps these
+rotated, stretched parts lit correctly — this is the consumer it was fixed
+for.
+
+**The player's drill is the pickaxe role without the pickaxe.** Hold to dig:
+progress accrues at `drill_power / hardness` per second against the block
+under the crosshair, resets when you look away, and the break at 100% goes
+through the same cancellable event path as a click ever did — a mod's veto
+still holds. It is an original *compact boring drill*: the tunnel-company
+name on the real one is a live trademark, so ours has none. Bedrock has no
+hardness and stays undrillable.
+
+**Skills are name-keyed entries, not an enum.** `"mining"`, `"prospecting"`,
+`"logistics"` today; the Skyrim/Fallout-breadth combat and faction skills
+planned for the village era are *rows in the same table*, not code changes —
+the same reasoning as namespaced block names. The XP curve is the classic
+each-level-costs-~10%-more shape with our own constants, levels 1–99,
+precomputed once. Effects are small pure functions: Mining speeds the hand
+drill, Prospecting deepens the flier's scan, Logistics grows every cargo
+hold. `player.dat` persists XP by name and a corrupt file logs and starts
+fresh — progress must never take the world down with it.
 
 **The map's only state is the explored set.** Worldgen is a pure function of
 `(seed, position)`, so explored-but-unloaded terrain is recomputed from the
@@ -234,7 +285,8 @@ Controls:
 | `Space` | Jump (walk) / rise (fly) |
 | `Left Shift` | Descend (fly) |
 | `Left Ctrl` | Sprint |
-| Click | Capture the mouse; once captured, break a block |
+| Click | Capture the mouse |
+| Hold left button | Run the drill — harder rock takes longer |
 | Right click | Place the selected block |
 | `1`–`5` | Choose stone, dirt, grass, sand or the base container |
 | `M` | Mark a corner of an ore body (two marks make an area) |
@@ -269,6 +321,9 @@ cargo run --release -p vx-app -- --screenshot ore.ppm --at 146,30
 # find the nearest outcrop, mine it out, and photograph the workings
 cargo run --release -p vx-app -- --screenshot mine.ppm --at 146,30 --dig auto
 cargo run --release -p vx-app -- --screenshot pit.ppm --at 146,30 --dig pit
+
+# same, but framed close on the digger rig itself
+cargo run --release -p vx-app -- --screenshot rig.ppm --at 146,30 --dig auto --close
 ```
 
 `--dig` runs a whole excavation headlessly against generated terrain — then
