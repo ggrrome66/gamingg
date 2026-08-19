@@ -92,6 +92,14 @@ impl<'a> Cursor<'a> {
         Ok(u64::from_le_bytes(self.take_array()?))
     }
 
+    pub fn take_f32(&mut self) -> Result<f32> {
+        // NaN and infinity pass through here on purpose: this layer only
+        // guarantees the bytes exist. What a non-finite value *means* is the
+        // caller's decision — the player decoder, for one, treats a NaN pose
+        // as "respawn" rather than refusing the whole file.
+        Ok(f32::from_le_bytes(self.take_array()?))
+    }
+
     /// Read a count and check it against a hard cap *and* against how many
     /// bytes could possibly still supply that many items.
     ///
@@ -224,6 +232,22 @@ mod tests {
         let bytes = u32::MAX.to_le_bytes();
         let mut cursor = Cursor::new(&bytes);
         assert!(cursor.take_count("blocks", usize::MAX, 8).is_err());
+    }
+
+    #[test]
+    fn floats_round_trip_including_the_awkward_ones() {
+        let values = [0.0f32, -1.5, f32::MAX, f32::NAN, f32::INFINITY];
+        let mut bytes = Vec::new();
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut cursor = Cursor::new(&bytes);
+        for expected in values {
+            let got = cursor.take_f32().unwrap();
+            // Bit-exact, which also covers NaN (NaN != NaN by value).
+            assert_eq!(got.to_bits(), expected.to_bits());
+        }
+        assert!(cursor.take_f32().is_err(), "read past the end");
     }
 
     #[test]

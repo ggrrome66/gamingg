@@ -29,10 +29,12 @@
 
 pub mod chunk_format;
 pub mod cursor;
+pub mod player_format;
 pub mod region;
 pub mod world_store;
 
 pub use chunk_format::{decode, encode, ChunkFormatError, DecodedChunk, CHUNK_FORMAT_VERSION};
 pub use cursor::{Cursor, CursorError};
+pub use player_format::{decode_player, encode_player, PlayerFormatError, PlayerRecord, PLAYER_FORMAT_VERSION};
 pub use region::{Region, RegionError, REGION_SIZE};
 pub use world_store::{is_safe_world_name, SaveError, WorldMeta, WorldStore, LEVEL_FORMAT_VERSION};

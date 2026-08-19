@@ -676,6 +676,28 @@ impl App {
             }
         }
 
+        // The player rides along with every save. In fly mode the body is
+        // stale — flight moves the camera directly — so derive feet from the
+        // eyes; on the next walk toggle that is exactly where they land.
+        let position = match active.mode {
+            MoveMode::Walk => active.body.position,
+            MoveMode::Fly => {
+                active.camera.position - glam::Vec3::new(0.0, self.walker.eye_height, 0.0)
+            }
+        };
+        let record = vx_save::PlayerRecord {
+            position: position.into(),
+            yaw: active.camera.yaw,
+            pitch: active.camera.pitch,
+            flying: active.mode == MoveMode::Fly,
+            inventory: active.inventory.clone(),
+            drill: active.drill.clone(),
+            respawn: false,
+        };
+        if let Err(error) = store.store_player(&record, active.world.items()) {
+            log::error!("could not save player data: {error}");
+        }
+
         match store.flush() {
             Ok(0) => {}
             Ok(written) => {
@@ -985,6 +1007,20 @@ impl ApplicationHandler for App {
 
         let seed = store.as_ref().map_or(self.seed, |store| store.seed());
         let world = World::new(seed);
+
+        // The saved player, if this world has one. A corrupt record starts a
+        // fresh player and says so; the world's chunks are unaffected, which
+        // is the point of the separate file.
+        let restored = store.as_ref().and_then(|store| {
+            match store.load_player(world.items()) {
+                Ok(record) => record,
+                Err(error) => {
+                    log::error!("could not load player data ({error}); starting fresh");
+                    None
+                }
+            }
+        });
+
         let streamer = ChunkStreamer::new(StreamingConfig::default());
         let camera = Camera {
             position: glam::Vec3::new(0.0, 90.0, 0.0),
@@ -1022,6 +1058,31 @@ impl ApplicationHandler for App {
             if let Some(surface_y) = active.world.surface_y(0, 0) {
                 active.camera.position.y = surface_y as f32 + 2.0;
                 active.body.position = glam::Vec3::new(0.5, surface_y as f32, 0.5);
+            }
+
+            // Saved state wins over the fresh defaults — except a pose the
+            // decoder flagged as unusable, which keeps the derived spawn.
+            if let Some(record) = restored {
+                if !record.respawn {
+                    active.body.position = glam::Vec3::from(record.position);
+                    active.camera.yaw = record.yaw;
+                    active.camera.pitch = record.pitch;
+                    active.camera.clamp_pitch();
+                    active.camera.position = active.body.position
+                        + glam::Vec3::new(0.0, self.walker.eye_height, 0.0);
+                }
+                active.inventory = record.inventory;
+                active.drill = record.drill;
+                active.mode = if record.flying {
+                    MoveMode::Fly
+                } else {
+                    MoveMode::Walk
+                };
+                log::info!(
+                    "restored player: drill tier {}, {} stacks carried",
+                    active.drill.tier(),
+                    active.inventory.occupied().count()
+                );
             }
         }
 

@@ -166,6 +166,30 @@ impl Inventory {
         Some(item)
     }
 
+    /// Put a stack into a specific empty slot, for restoring a saved layout.
+    ///
+    /// This is the only way to write a slot directly, and it validates so the
+    /// caller cannot break the invariants the rest of the file maintains: the
+    /// slot must exist and be empty, the count must be non-zero, and it is
+    /// clamped to the item's ceiling — a save file claiming a stack of four
+    /// billion loads as one full stack, not an overflow.
+    ///
+    /// Returns whether the stack was placed.
+    pub fn place_stack(&mut self, index: usize, stack: ItemStack, registry: &ItemRegistry) -> bool {
+        if stack.count == 0 {
+            return false;
+        }
+        let Some(slot) = self.slots.get_mut(index) else {
+            return false;
+        };
+        if slot.is_some() {
+            return false;
+        }
+        let count = stack.count.min(registry.max_stack(stack.item));
+        *slot = Some(ItemStack::new(stack.item, count));
+        true
+    }
+
     /// Every occupied slot, for the UI.
     pub fn occupied(&self) -> impl Iterator<Item = (usize, ItemStack)> + '_ {
         self.slots
@@ -319,6 +343,28 @@ mod tests {
         assert_eq!(inventory.slot(0), None);
         // Out-of-range slots are a None, not a panic.
         assert_eq!(inventory.take_one(999), None);
+    }
+
+    #[test]
+    fn place_stack_validates_everything_a_save_file_could_lie_about() {
+        let (registry, stone, coal) = registry();
+        let mut inventory = Inventory::player();
+
+        // A hostile count is clamped to the ceiling, not trusted.
+        assert!(inventory.place_stack(0, ItemStack::new(stone, u32::MAX), &registry));
+        assert_eq!(inventory.slot(0), Some(ItemStack::new(stone, 64)));
+
+        // Occupied, out-of-range and zero-count are all refused.
+        assert!(!inventory.place_stack(0, ItemStack::new(coal, 1), &registry));
+        assert_eq!(inventory.slot(0), Some(ItemStack::new(stone, 64)), "overwritten");
+        assert!(!inventory.place_stack(999, ItemStack::new(coal, 1), &registry));
+        assert!(!inventory.place_stack(1, ItemStack::new(coal, 0), &registry));
+        assert_eq!(inventory.count_of(coal), 0);
+
+        // An unknown item id stacks to one, so a stale save cannot pile it.
+        let stale = vx_core::ItemId(9_999);
+        assert!(inventory.place_stack(2, ItemStack::new(stale, 50), &registry));
+        assert_eq!(inventory.slot(2), Some(ItemStack::new(stale, 1)));
     }
 
     #[test]

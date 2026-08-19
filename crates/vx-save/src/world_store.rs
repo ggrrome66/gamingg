@@ -13,6 +13,7 @@ use crate::region::{region_file_name, region_of, slot_of, Region, RegionError};
 const LEVEL_MAGIC: [u8; 4] = *b"VXLV";
 pub const LEVEL_FORMAT_VERSION: u16 = 2;
 const LEVEL_FILE: &str = "level.dat";
+const PLAYER_FILE: &str = "player.dat";
 const REGION_DIR: &str = "region";
 
 /// Longest world name accepted.
@@ -50,6 +51,12 @@ pub enum SaveError {
         z: i32,
         #[source]
         source: ChunkFormatError,
+    },
+    #[error("{path}: {source}")]
+    Player {
+        path: PathBuf,
+        #[source]
+        source: crate::player_format::PlayerFormatError,
     },
 }
 
@@ -316,6 +323,43 @@ impl WorldStore {
         }
     }
 
+    /// Load the saved player, or `None` if this world has never had one.
+    ///
+    /// A structurally corrupt record is an error the caller should treat as
+    /// "start a fresh player": the world's chunks are unaffected, which is
+    /// the point of keeping the player in its own file.
+    pub fn load_player(
+        &self,
+        items: &vx_core::ItemRegistry,
+    ) -> Result<Option<crate::PlayerRecord>, SaveError> {
+        let path = self.root.join(PLAYER_FILE);
+        match std::fs::read(&path) {
+            Ok(bytes) => crate::decode_player(&bytes, items)
+                .map(Some)
+                .map_err(|source| SaveError::Player { path, source }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(SaveError::Io { path, source }),
+        }
+    }
+
+    /// Write the player out, through a temporary file and a rename, so a
+    /// crash mid-save keeps the previous record rather than half of one.
+    pub fn store_player(
+        &self,
+        record: &crate::PlayerRecord,
+        items: &vx_core::ItemRegistry,
+    ) -> Result<(), SaveError> {
+        let path = self.root.join(PLAYER_FILE);
+        let temporary = path.with_extension("dat.tmp");
+        std::fs::write(&temporary, crate::encode_player(record, items)).map_err(|source| {
+            SaveError::Io {
+                path: temporary.clone(),
+                source,
+            }
+        })?;
+        std::fs::rename(&temporary, &path).map_err(|source| SaveError::Io { path, source })
+    }
+
     /// Drop cached regions with nothing pending, to bound memory as the
     /// player travels.
     pub fn evict_clean_regions(&mut self) {
@@ -572,6 +616,45 @@ mod tests {
             results.iter().any(|r| r.is_err()) || results.iter().any(|r| matches!(r, Ok(Some(_)))),
             "corruption should surface as an error on the affected chunk only"
         );
+    }
+
+    #[test]
+    fn the_player_round_trips_through_its_own_file() {
+        let dir = TempDir::new("player");
+        let mut blocks = vx_core::BlockRegistry::new();
+        let (_, items, kit) = vx_world::items::register_all(&mut blocks);
+        let store = WorldStore::open(dir.path(), "w", 1, GENERATOR_VERSION).unwrap();
+
+        // Never saved: no record, and not an error.
+        assert!(store.load_player(&items).unwrap().is_none());
+
+        let mut inventory = vx_world::Inventory::player();
+        inventory.insert(kit.raw_gold, 5, &items);
+        let mut drill = vx_world::Drill::new();
+        drill.upgrade();
+        let record = crate::PlayerRecord {
+            position: [1.5, 80.0, -2.5],
+            yaw: 0.7,
+            pitch: -0.1,
+            flying: true,
+            inventory,
+            drill,
+            respawn: false,
+        };
+
+        store.store_player(&record, &items).unwrap();
+        let loaded = store.load_player(&items).unwrap().unwrap();
+        assert_eq!(loaded, record);
+
+        // The atomic-rename temporary must not linger.
+        assert!(!dir.path().join("w").join("player.dat.tmp").exists());
+
+        // A corrupt file is an error, not a panic — and not a world problem.
+        std::fs::write(dir.path().join("w").join(PLAYER_FILE), b"garbage").unwrap();
+        assert!(matches!(
+            store.load_player(&items),
+            Err(SaveError::Player { .. })
+        ));
     }
 
     #[test]

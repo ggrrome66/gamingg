@@ -76,8 +76,6 @@ foundation is solid rather than being designed around up front.
   player in a hole they cannot dig out of.
 - The inventory cannot be rearranged: stacks sit where insertion put them,
   and there is no way to move an item into a specific hotbar slot.
-- Nothing persists the inventory yet: quit and rejoin starts you empty again.
-  It needs a player-data section in the save, which is a format bump.
 - Walking cannot step up a full block automatically; jumping is the mechanism.
   There are no stairs or slabs yet for a lower step to matter.
 - Fall damage does not exist, so the punishment for a long drop is the climb
@@ -159,6 +157,15 @@ pure function of `(seed, position)`, so an untouched chunk can be recreated
 exactly and is never written. Only chunks somebody actually modified reach the
 disk, which is why streaming across a world you have not built in produces an
 empty save. `Chunk` tracks that separately from its mesh-dirty flag.
+
+**The player saves to its own file, with its own failure posture.**
+`player.dat` carries pose, mode, inventory and drill — items and modules by
+namespaced name, like everything persisted. A chunk that fails to decode is
+regenerated from the seed; a player cannot be, so semantic oddities are
+sanitised rather than fatal: hostile stack counts load clamped, unknown items
+are dropped with a warning, a non-finite position flags a respawn while the
+inventory and drill — the parts a player would actually miss — survive. Only
+structural damage rejects the file, and then the world is untouched.
 
 **Reading a save is a trust boundary.** Save files can be truncated by a crash,
 corrupted on disk, or crafted deliberately, so `vx-save` treats every byte as

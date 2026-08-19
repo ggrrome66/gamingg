@@ -61,6 +61,14 @@ impl ModuleKind {
         }
     }
 
+    /// Resolve a module from its item's namespaced name. This is the identity
+    /// that persists: numeric ids shift with the mod set, names do not.
+    pub fn from_name(name: &str) -> Option<ModuleKind> {
+        ModuleKind::ALL
+            .into_iter()
+            .find(|kind| kind.item_name() == name)
+    }
+
     /// Resolve the installing item against a registry.
     pub fn item(self, items: &ItemRegistry) -> Option<ItemId> {
         items.id_of(self.item_name())
@@ -112,6 +120,26 @@ impl Drill {
 
     pub fn tier(&self) -> u8 {
         self.tier
+    }
+
+    /// Rebuild a drill from saved parts, holding every invariant against a
+    /// file that may lie.
+    ///
+    /// The tier is clamped into range, and modules are fitted through
+    /// [`Drill::install`], so a module aimed at a locked or duplicate slot is
+    /// dropped rather than trusted. A legitimate save always round-trips;
+    /// only impossible states are discarded.
+    pub fn restore(tier: u8, fitted: &[(usize, ModuleKind)]) -> Drill {
+        let mut drill = Drill {
+            tier: tier.clamp(1, MAX_TIER),
+            modules: [None; MAX_MODULE_SLOTS],
+        };
+        for (slot, kind) in fitted {
+            if drill.install(*slot, *kind).is_err() {
+                log::warn!("saved drill module in slot {slot} could not be fitted; dropped");
+            }
+        }
+        drill
     }
 
     /// Raise the tier by one, up to the ceiling. Returns whether it moved.
@@ -341,6 +369,36 @@ mod tests {
 
         assert!(drill.reach() > base);
         assert!(drill.reach() <= 9.0, "reach reached {}", drill.reach());
+    }
+
+    #[test]
+    fn restore_holds_every_invariant_against_a_lying_save() {
+        // Tier is clamped both ways.
+        assert_eq!(Drill::restore(0, &[]).tier(), 1);
+        assert_eq!(Drill::restore(200, &[]).tier(), MAX_TIER);
+
+        // A module aimed at a slot the tier has not unlocked is dropped.
+        let drill = Drill::restore(1, &[(0, ModuleKind::Speed), (3, ModuleKind::Fortune)]);
+        assert_eq!(drill.module(0), Some(ModuleKind::Speed));
+        assert_eq!(drill.module(3), None, "a locked slot accepted a module");
+
+        // Duplicate slot claims keep the first, and absurd slots are ignored.
+        let drill = Drill::restore(
+            MAX_TIER,
+            &[(0, ModuleKind::Reach), (0, ModuleKind::Speed), (99, ModuleKind::Speed)],
+        );
+        assert_eq!(drill.module(0), Some(ModuleKind::Reach));
+
+        // A legitimate save round-trips exactly.
+        let mut original = Drill::new();
+        original.upgrade();
+        original.install(0, ModuleKind::Fortune).unwrap();
+        original.install(1, ModuleKind::Speed).unwrap();
+        let fitted: Vec<_> = original
+            .slots()
+            .filter_map(|(slot, module, _)| module.map(|kind| (slot, kind)))
+            .collect();
+        assert_eq!(Drill::restore(original.tier(), &fitted), original);
     }
 
     #[test]
