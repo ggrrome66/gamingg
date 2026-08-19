@@ -17,7 +17,32 @@ art exists.
 
 ## Status
 
-M3 stage 9a is in — engine work rather than new toys, and it started by finding
+M3 stage 9b is in — **the towns are in business.** Every town keeps books now:
+a mining camp pulls ore and stone out of the ground and burns through timber, a
+refinery eats that ore and turns out **copper bars** worth far more than what
+went into them, and a depot chews through finished goods and ships them onward.
+So somewhere always has too much of something and somewhere else always wants
+it.
+
+Prices move with that. Ore is cheap at a mine tripping over it and dear at a
+refinery that needs it — and a counter now knows which town it stands in, so
+walk in and dump forty loads on a small market and you will watch the price fall
+out from under you. That is not a random walk; it is what happens when you flood
+a place.
+
+**The towns haul to each other on their own**, whether you are watching or not,
+which slowly closes the very gap you were making money on. And you can put your
+own drones on the same routes: walk up to the mast, pick a run, send a load out
+of your pile, and get paid at the far end when it lands.
+
+A load in the air is not simulated — it left here at this tick and lands there
+at that one, so where it is right now is a sum. A hundred of them crossing the
+map cost nothing, and when one passes near you it is drawn as a real machine.
+Same story for the towns: one two kilometres away is not ticking away in the
+background, it just knows when it was last looked at and works out the gap in
+one go when you finally walk in the door.
+
+Before that, stage 9a — engine work rather than new toys, and it started by finding
 a real bug. `World::block` reports unloaded chunks as air, and drones read the
 world through it, so a machine working near the edge of the streamed-in set saw
 air where there was rock. That made its decisions depend on which chunks were
@@ -127,7 +152,7 @@ build in it, and it survives quitting — skills included.
 | `vx-mesh` | Greedy meshing + crossed-quad plants, packed into 8-byte quads | Done |
 | `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
-| `vx-app` | Window, walk/fly/third-person camera, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, handheld, beacon board, command journal, `gamingg` binary | Done |
+| `vx-app` | Window, walk/fly/third-person camera, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, handheld, beacon board, town economy, command journal, `gamingg` binary | Done |
 | `vx-agent` | Job board, flow fields, mine planning, scanner, flier + fleet, manual piloting | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
@@ -164,10 +189,19 @@ build in it, and it survives quitting — skills included.
 - Only the town you are standing in has people in it. Distant towns are
   architecture until you arrive — deliberate, to keep the frame budget flat
   however many exist, but it means nothing happens in a town you are not in.
-- Towns do not trade with each other yet. The beacon network is the wire; the
-  traffic over it is the next stage.
-- Freight is checked against the base pile and settled at a console — no
-  vehicle actually carries it, and no contract can fail or expire.
+- **The town books are not covered by `--replay`.** The network's reach follows
+  the player, and where the player stood is not in the journal, so a replay
+  rebuilds the ground but not the markets. Journalling the network's windows
+  would close it and is not done.
+- The economy only runs for towns within radio range of the player. That is the
+  level-of-detail — the simulation is as wide as it needs to be — but it does
+  mean a far corner of the frontier is frozen until somebody goes near it.
+- Routing is greedy nearest-deficit matching rather than a real min-cost flow.
+  Fine at a few dozen towns; revisit if the traffic disappoints.
+- One load in the air at a time per dispatch window, and no contract can fail,
+  expire, or be robbed.
+- Villagers do not react to their town's fortunes — a boom town and a starving
+  one look identical on the ground.
 - There is no artificial light. Night is genuinely dark outside, and a lamp
   block is the obvious next thing the sun uniform wants.
 - Leaves do not decay when a trunk is felled by the player's drill (drones
@@ -615,6 +649,9 @@ cargo run --release -p vx-app -- --screenshot town.ppm --at 0,22 --dawn
 
 # the beacon console, work posted and one contract already taken
 cargo run --release -p vx-app -- --screenshot board.ppm --at 0,4 --board
+
+# the beacon console, now with the town's prices and what it is short of
+cargo run --release -p vx-app -- --screenshot market.ppm --at 0,4 --board
 
 # rebuild a saved world from its journal and check it against the ground on disk
 cargo run --release -p vx-app -- --replay --world myworld

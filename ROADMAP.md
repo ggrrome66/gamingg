@@ -81,6 +81,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 6.5 | `229a299` | Starting village, villagers, trading shop, trees |
 | 7 | `42fb8ab` | Third person, drone piloting, NPC senses |
 | 8 | `f050c16` | Day/night, container towns on a lattice, the beacon network |
+| 9b | `dbfe091` | Town books, moving prices, inter-town freight, player trade runs, copper bars |
 | 9a | `b77aedc` | Residency pinning, content hashes, the command journal, seed tree, body ids, a real crew, 8-byte packed quads |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
@@ -168,35 +169,40 @@ drones finally exercising the job board's contention paths, and geometry packed
 from 168 bytes a quad down to 8 — chunk-local, with the vertices synthesised in
 the shader, verified by a byte-identical capture.
 
----
+**9b — The trade network.** What stage 8's masts were for. Towns keep books,
+derived from their site until something touches them; they produce, consume and
+price by speciality, and they ship surpluses to neighbours that are short. A
+counter now asks its own town what it pays, so ore is cheap at a mine and dear
+at a refinery, and a big sale moves the price. `engine:copper_bar` makes it a
+chain rather than a gradient. One shipment record serves town freight and the
+player's alike, and a load in the air is a lerp rather than a simulation — free
+by the hundred, and drawable as a real machine when one passes close.
 
-## In flight — Stage 9b: the trade network
-
-Towns get stockpiles and prices that differ between them; they broadcast what
-they need over the network stage 8 built; trade drones run routes. The
-game-of-life economy — a shortage in one town becoming a run on another — is
-the point, and it is the first thing in the game where the world changes while
-the player is not looking.
-
-The approach is settled and comes from the design report's economy chapter,
-which is genuinely excellent: **fast-forward-on-read** town state (integrate
-only when something asks), a **discrete-event queue** so idle towns cost
-nothing, **damped tâtonnement** with capped iterations to solve clearing prices
-rather than nudge them, **net buy/sell pressure** pricing so shocks are legible,
-**Leontief input-output** for what a town must import, and **min-cost flow** for
-who ships to whom. Region-rollup LOD from the start: detail near the player,
-aggregates far away.
-
-Groundwork already in place: `postings_for` derives a board from a town and its
-neighbours, `Ledger` records what the player did about it, `towns_near` answers
-"who can this mast hear" without loading a chunk, and the command journal is the
-shape the economy's own event log wants. What 9b adds is state that *persists
-per town* — the first thing in the world that is not a pure function of the seed
-— and the rule for how it changes.
+Both the books and the network catch up in fixed quantised windows, which is the
+round's central care: these flows clamp, and once a clamp binds, one big step
+and many small ones disagree — so the world would otherwise depend on when the
+player happened to look. Two tests hold that line, and both were verified by
+breaking the code and watching them fail.
 
 ---
 
-## Also outstanding from 9a
+## In flight — Stage 10: the fuel loop
+
+Machines stop being perpetual. Drones and fliers burn something to work, that
+something has to be made and carried, and running dry somewhere awkward becomes
+a problem you have to go and solve.
+
+It sits here because everything it needs now exists: markets price goods, the
+network moves them, the journal records dispatches, and the beacon posts work. A
+fuel is one more good on an economy that already knows how to make shortages —
+which is the point, because a fuel shortage is the first one that can stop you.
+
+Also wanted, from this round's leavings: **journalling the network's dispatch
+windows**, so `--replay` covers the books as well as the ground.
+
+---
+
+## Also outstanding
 
 **Rebasing the floating origin.** Chunk geometry is chunk-local now, so the
 precision wall is out of the mesh data — but nothing shifts the origin as the
@@ -208,11 +214,14 @@ so the journal is currently an oracle rather than a disk win. The keyframe
 machinery is in place; turning it on is worth doing after the oracle has run
 against real sessions for a while.
 
+**A real min-cost flow.** Trade routing is greedy nearest-deficit matching. At a
+few dozen towns it picks the runs a proper solver would; worth revisiting only
+if the traffic it produces reads as dull.
+
 ## The arc beyond
 
 | Stage | What | Why here |
 |---|---|---|
-| 10 | Fuel loop | Rods drain machines; the shop already sells, so this closes a loop rather than opening one |
 | 11 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
 | 12 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
 | 13 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
