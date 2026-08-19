@@ -47,6 +47,10 @@ pub struct TerrainBlocks {
     pub catwalk: BlockId,
     pub mast: BlockId,
     pub beacon: BlockId,
+    /// What a refinery makes. Worth far more than the ore and stone it eats,
+    /// which is what turns the trade network into a chain rather than a
+    /// gradient.
+    pub copper_bar: BlockId,
 }
 
 impl TerrainBlocks {
@@ -104,6 +108,10 @@ impl TerrainBlocks {
             // The beacon is the town's link to the network, and like the shop
             // counter it is not something a drill or a drone gets to dismantle.
             beacon: register(BlockDef::uniform("engine:beacon", 26).with_hardness(None)),
+            // Soft for metal — a stack of bars is stacked, not welded.
+            copper_bar: register(
+                BlockDef::uniform("engine:copper_bar", 27).with_hardness(Some(2.5)),
+            ),
         }
     }
 
@@ -130,6 +138,7 @@ impl TerrainBlocks {
             catwalk: registry.id_of("engine:catwalk")?,
             mast: registry.id_of("engine:mast")?,
             beacon: registry.id_of("engine:beacon")?,
+            copper_bar: registry.id_of("engine:copper_bar")?,
         })
     }
 }

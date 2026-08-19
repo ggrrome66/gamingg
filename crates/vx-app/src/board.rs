@@ -16,6 +16,7 @@ use vx_render::font::{self, LINE_HEIGHT};
 use vx_world::town::TownSite;
 
 use crate::beacon::{Ledger, Posting, Task};
+use crate::economy::{self, Market};
 use crate::shop::display_name;
 use crate::wallet::Wallet;
 
@@ -39,12 +40,16 @@ pub enum Row {
     Accept(u64),
     /// On offer here, but already on your sheet.
     Taken(u64),
+    /// Put a load of your own on the network: this good, to that town.
+    Ship { good: usize, to: (i32, i32) },
 }
 
 impl Row {
-    pub fn id(&self) -> u64 {
+    /// The posting this row is about, if it is about one at all.
+    pub fn id(&self) -> Option<u64> {
         match self {
-            Row::HandIn(id) | Row::Accept(id) | Row::Taken(id) => *id,
+            Row::HandIn(id) | Row::Accept(id) | Row::Taken(id) => Some(*id),
+            Row::Ship { .. } => None,
         }
     }
 }
@@ -77,6 +82,30 @@ impl Board {
     /// The rows this console shows: work due here first, because arriving
     /// with a full pack and having to scroll past adverts would be rude.
     pub fn rows(here: (i32, i32), postings: &[Posting], ledger: &Ledger) -> Vec<Row> {
+        Board::rows_with_runs(here, postings, ledger, &[])
+    }
+
+    /// The board's rows, plus any trade runs this town is offering.
+    ///
+    /// `runs` is what the network will carry from here and where to — computed
+    /// by the caller, which is the only place that knows the neighbours' books.
+    pub fn rows_with_runs(
+        here: (i32, i32),
+        postings: &[Posting],
+        ledger: &Ledger,
+        runs: &[(usize, (i32, i32))],
+    ) -> Vec<Row> {
+        let mut rows = Board::postings_rows(here, postings, ledger);
+        for (good, to) in runs {
+            rows.push(Row::Ship {
+                good: *good,
+                to: *to,
+            });
+        }
+        rows
+    }
+
+    fn postings_rows(here: (i32, i32), postings: &[Posting], ledger: &Ledger) -> Vec<Row> {
         let mut rows: Vec<Row> = ledger
             .due_at(here)
             .iter()
@@ -88,7 +117,7 @@ impl Board {
             }
             if ledger.is_accepted(posting.id) {
                 // A posting settled at its issuer is already listed above.
-                if !rows.iter().any(|row| row.id() == posting.id) {
+                if !rows.iter().any(|row| row.id() == Some(posting.id)) {
                     rows.push(Row::Taken(posting.id));
                 }
             } else {
@@ -96,6 +125,59 @@ impl Board {
             }
         }
         rows
+    }
+
+    /// The row the cursor is on.
+    pub fn selected(&self, rows: &[Row]) -> Option<Row> {
+        rows.get(self.cursor).cloned()
+    }
+
+    /// Put a load of the player's own on the network.
+    ///
+    /// Takes the goods out of the base pile — exactly as the shop does — and
+    /// hands them to [`crate::economy::Economy::ship`]. Nothing is paid here:
+    /// a run pays at the far end, on arrival, which is what makes it a journey
+    /// rather than a transaction.
+    pub fn ship(
+        &mut self,
+        here: &TownSite,
+        good: usize,
+        to: (i32, i32),
+        pile: Option<&mut Stockpile>,
+        economy: &mut crate::economy::Economy,
+        now: u64,
+    ) {
+        let name = economy::GOODS[good];
+        let Some(pile) = pile else {
+            self.feedback = Some("NO BASE PILE".into());
+            return;
+        };
+        let held = pile.count(name);
+        if held < economy::PLAYER_LOAD {
+            self.feedback = Some(format!(
+                "NEED {} {}, HAVE {held}",
+                economy::PLAYER_LOAD,
+                crate::shop::display_name(name)
+            ));
+            return;
+        }
+
+        let taken = pile.take(name, economy::PLAYER_LOAD);
+        economy.ship(crate::economy::Shipment {
+            from: here.centre,
+            to,
+            good,
+            amount: taken as f32,
+            depart: now,
+            arrive: now + crate::economy::Shipment::travel_ticks(here.centre, to),
+            owner: crate::economy::Owner::Player,
+        });
+        self.feedback = Some(format!(
+            "{} AWAY TO {} {}",
+            crate::shop::display_name(name),
+            to.0,
+            to.1
+        ));
     }
 
     pub fn move_cursor(&mut self, delta: i32, rows: usize) {
@@ -127,6 +209,11 @@ impl Board {
         };
 
         match row {
+            // Handled by `ship`, which needs the network and the pile rather
+            // than the ledger. The caller checks for it before calling here.
+            Row::Ship { .. } => {
+                self.feedback = Some("PICK A LOAD AND PRESS ENTER".into());
+            }
             Row::Taken(_) => {
                 self.feedback = Some("ALREADY ON YOUR SHEET".into());
             }
@@ -217,6 +304,8 @@ pub fn render_board(
     postings: &[Posting],
     ledger: &Ledger,
     walletbook: &Wallet,
+    market: &Market,
+    runs: &[(usize, (i32, i32))],
 ) -> Vec<u8> {
     let mut pixels = vec![0u8; (BOARD_WIDTH * BOARD_HEIGHT * 4) as usize];
     for texel in pixels.chunks_exact_mut(4) {
@@ -245,9 +334,25 @@ pub fn render_board(
         here.centre.1
     );
     font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, DIM, &place);
-    y += LINE_HEIGHT as i32 + 3;
+    y += LINE_HEIGHT as i32;
 
-    let rows = Board::rows(here.centre, postings, ledger);
+    // What this town is paying, and what it is short of. The reason to walk in
+    // here rather than sell everything at home.
+    for (good, name) in economy::GOODS.iter().enumerate() {
+        let short = if market.wants(good) { " WANTED" } else { "" };
+        let line = format!(
+            "{} {} CR - HAS {}{short}",
+            crate::shop::display_name(name),
+            market.price(good),
+            market.stock(good).round() as u64
+        );
+        let colour = if market.wants(good) { ACCENT } else { DIM };
+        font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, colour, &line);
+        y += LINE_HEIGHT as i32;
+    }
+    y += 3;
+
+    let rows = Board::rows_with_runs(here.centre, postings, ledger, runs);
     if rows.is_empty() {
         font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, DIM, "NO WORK POSTED");
         y += LINE_HEIGHT as i32;
@@ -257,13 +362,33 @@ pub fn render_board(
         if selected {
             font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, ACCENT, ">");
         }
+        // A trade run is not a posting; it draws its own line and moves on.
+        if let Row::Ship { good, to } = row {
+            let label = format!(
+                "SHIP {} TO {} {}",
+                crate::shop::display_name(economy::GOODS[*good]),
+                to.0,
+                to.1
+            );
+            let colour = if selected { GOOD } else { DIM };
+            font::draw_text(&mut pixels, BOARD_WIDTH, margin + 10, y, 1, colour, &label);
+            y += LINE_HEIGHT as i32;
+            let pay = format!("{} A LOAD, PAID ON ARRIVAL", market.price(*good));
+            font::draw_text(&mut pixels, BOARD_WIDTH, margin + 18, y, 1, DIM, &pay);
+            y += LINE_HEIGHT as i32;
+            continue;
+        }
+
+        let Some(id) = row.id() else { continue };
         let posting = postings
             .iter()
-            .find(|posting| posting.id == row.id())
-            .or_else(|| ledger.get(row.id()));
+            .find(|posting| posting.id == id)
+            .or_else(|| ledger.get(id));
         let Some(posting) = posting else { continue };
 
         let (prefix, colour) = match row {
+            // Drawn above and skipped; kept exhaustive rather than unreachable.
+            Row::Ship { .. } => ("SHIP", GOOD),
             Row::HandIn(_) => ("SIGN", GOOD),
             Row::Accept(_) => ("TAKE", if selected { TEXT } else { DIM }),
             Row::Taken(_) => ("HELD", DIM),
@@ -454,7 +579,7 @@ mod tests {
         assert_eq!(rows.first(), Some(&Row::HandIn(job.id)));
         // And it is listed once, not once as due and once as held.
         assert_eq!(
-            rows.iter().filter(|row| row.id() == job.id).count(),
+            rows.iter().filter(|row| row.id() == Some(job.id)).count(),
             1,
             "a posting was listed twice"
         );
@@ -488,12 +613,13 @@ mod tests {
         let mut board = Board::new();
         board.open_at_beacon();
         let wallet = Wallet::new();
+        let market = economy::Economy::new().market(&home, 0).clone();
 
         let mut ledger = Ledger::new();
         ledger.accept(&haul);
 
-        let a = render_board(&board, &home, &postings, &ledger, &wallet);
-        let b = render_board(&board, &home, &postings, &ledger, &wallet);
+        let a = render_board(&board, &home, &postings, &ledger, &wallet, &market, &[]);
+        let b = render_board(&board, &home, &postings, &ledger, &wallet, &market, &[]);
         assert_eq!(a.len(), (BOARD_WIDTH * BOARD_HEIGHT * 4) as usize);
         assert_eq!(a, b);
 
@@ -501,7 +627,7 @@ mod tests {
         // pair of coordinates.
         assert!(!ledger.knows(haul.settles_at()));
         ledger.visit(haul.settles_at());
-        let found = render_board(&board, &home, &postings, &ledger, &wallet);
+        let found = render_board(&board, &home, &postings, &ledger, &wallet, &market, &[]);
         assert_ne!(a, found, "discovering the target left the board unchanged");
     }
 
@@ -559,5 +685,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_trade_run_takes_the_goods_and_puts_them_in_the_air() {
+        // The player's side of the network: goods leave the base pile now and
+        // are paid for at the far end on arrival, which is what makes a run a
+        // journey rather than a transaction.
+        let home = town::home_site();
+        let away = frontier()
+            .into_iter()
+            .find(|site| site.centre != home.centre)
+            .expect("the fixture frontier has only one town");
+
+        let mut economy = crate::economy::Economy::new();
+        let mut board = Board::new();
+        board.open_at_beacon();
+
+        let mut pile = Stockpile::new();
+        pile.add("engine:copper_ore", crate::economy::PLAYER_LOAD * 2);
+
+        board.ship(
+            &home,
+            crate::economy::ORE,
+            away.centre,
+            Some(&mut pile),
+            &mut economy,
+            0,
+        );
+
+        assert_eq!(
+            pile.count("engine:copper_ore"),
+            crate::economy::PLAYER_LOAD,
+            "a run took the wrong amount out of the pile"
+        );
+        assert_eq!(economy.shipments().len(), 1, "nothing went into the air");
+        let load = &economy.shipments()[0];
+        assert_eq!(load.owner, crate::economy::Owner::Player);
+        assert_eq!(load.from, home.centre);
+        assert_eq!(load.to, away.centre);
+        assert!(load.arrive > load.depart, "a run arrived before it left");
+    }
+
+    #[test]
+    fn a_run_with_nothing_to_carry_takes_nothing() {
+        let home = town::home_site();
+        let away = frontier()
+            .into_iter()
+            .find(|site| site.centre != home.centre)
+            .unwrap();
+        let mut economy = crate::economy::Economy::new();
+        let mut board = Board::new();
+        board.open_at_beacon();
+
+        // Short of a full load: nothing moves, and it says why.
+        let mut pile = Stockpile::new();
+        pile.add("engine:copper_ore", crate::economy::PLAYER_LOAD - 1);
+        board.ship(
+            &home,
+            crate::economy::ORE,
+            away.centre,
+            Some(&mut pile),
+            &mut economy,
+            0,
+        );
+        assert_eq!(pile.count("engine:copper_ore"), crate::economy::PLAYER_LOAD - 1);
+        assert!(economy.shipments().is_empty(), "an empty run went out");
+        assert!(board.feedback.is_some(), "a refused run said nothing");
+
+        // And with no base at all it reports rather than panics.
+        board.ship(&home, crate::economy::ORE, away.centre, None, &mut economy, 0);
+        assert_eq!(board.feedback.as_deref(), Some("NO BASE PILE"));
     }
 }

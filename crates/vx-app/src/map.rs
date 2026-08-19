@@ -57,6 +57,8 @@ pub mod colour {
     /// Where an accepted posting wants you — drawn whether or not the ground
     /// around it has ever been seen.
     pub const CONTRACT: [u8; 4] = [255, 90, 140, 255];
+    /// A load on the trade network, yours or a town's.
+    pub const TRADE: [u8; 4] = [255, 214, 90, 255];
 }
 
 /// The map's persistent and per-session state.

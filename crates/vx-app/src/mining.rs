@@ -308,6 +308,12 @@ impl Mining {
         self.advance(world, events, ticks)
     }
 
+    /// How far the machines' rotors and drills have turned. Shared so anything
+    /// else that draws a machine spins in step with the fleet.
+    pub fn spin(&self) -> f32 {
+        self.spin
+    }
+
     /// The marked area, if two corners are down. What the journal records as
     /// the dispatch, since the plan itself is derivable from it.
     pub fn area(&self) -> Option<VoxelAabb> {

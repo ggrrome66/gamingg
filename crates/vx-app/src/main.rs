@@ -14,6 +14,7 @@ mod board;
 mod clock;
 mod controller;
 mod device;
+mod economy;
 mod hud;
 mod journal;
 mod map;
@@ -68,6 +69,20 @@ const DEFAULT_SEED: u64 = 2024;
 /// posting can send you, and costs nothing to widen — the towns inside it are
 /// derived, not loaded.
 const RADIO_RANGE: i32 = 2_000;
+
+/// An open beacon console: the town, the work it is broadcasting, and the
+/// trade runs it will pay somebody to carry.
+type Console = (
+    vx_world::town::TownSite,
+    Vec<beacon::Posting>,
+    Vec<(usize, (i32, i32))>,
+);
+
+/// How near a trade load has to pass before it is drawn as a real machine.
+const CARAVAN_SIGHT: f32 = 220.0;
+
+/// How high above the ground a load flies.
+const CARAVAN_ALTITUDE: f32 = 26.0;
 
 /// Re-run town discovery once the player has moved this far since the last
 /// check. The lattice is cheap, but not free, and nobody discovers a town by
@@ -309,6 +324,13 @@ fn run_replay(options: &Options) -> Result<(), String> {
         "rebuilt {} chunks in {:.2}s, hash {rebuilt:#018x}",
         world.loaded_chunk_count(),
         started.elapsed().as_secs_f32()
+    );
+    // The books are not rebuilt by a replay — the network's reach follows the
+    // player, and where the player stood is not in the journal. Reported so
+    // nobody mistakes an empty economy for a matching one.
+    println!(
+        "town books are not covered by replay (hash {:#018x} of an unrun network)",
+        economy::Economy::new().books_hash()
     );
 
     // Only a journal that reaches all the way back to an empty world can be
@@ -720,7 +742,11 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         let mut panel = shop::Shop::new();
         panel.open_at_counter();
         panel.feedback = Some("SOLD 60 COPPER ORE FOR 480 CR".into());
-        let pixels = shop::render_shop(&panel, Some(&pile), &walletbook);
+        let here = vx_world::town::home_site();
+        let market = economy::Economy::new()
+            .market(&here, 0)
+            .clone();
+        let pixels = shop::render_shop(&panel, Some(&pile), &walletbook, &here, &market);
         let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
         let panel_height = shop::SHOP_HEIGHT as f32 * shop::SHOP_SCALE;
         renderer.set_overlay(
@@ -754,7 +780,9 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         walletbook.earn(1_240);
         let mut panel = board::Board::new();
         panel.open_at_beacon();
-        let pixels = board::render_board(&panel, &here, &postings, &ledger, &walletbook);
+        let market = economy::Economy::new().market(&here, 0).clone();
+        let pixels =
+            board::render_board(&panel, &here, &postings, &ledger, &walletbook, &market, &[]);
         let panel_width = board::BOARD_WIDTH as f32 * board::BOARD_SCALE;
         let panel_height = board::BOARD_HEIGHT as f32 * board::BOARD_SCALE;
         renderer.set_overlay(
@@ -882,6 +910,8 @@ struct Active {
     player_rig: Rig,
     /// The handheld drill's shape, built once.
     hand_rig: Rig,
+    /// The body a trade load borrows when one passes close enough to see.
+    trade_rig: Rig,
     /// The viewmodel drill's accumulated rotation.
     drill_spin: f32,
     /// The town's inhabitants.
@@ -900,11 +930,18 @@ struct Active {
     ledger: beacon::Ledger,
     /// Every order given since the last keyframe, and the clock it is kept in.
     journal: CommandLog,
+    /// Town markets: what each place holds, makes and charges.
+    economy: economy::Economy,
+    /// The town whose counter is open. `TownSite` is `Copy`, so this can be
+    /// taken out and handed to the shop beside a mutable borrow of the books.
+    counter: Option<vx_world::town::TownSite>,
     /// The town whose beacon is open, and the work it is broadcasting.
     /// Derived when the console opens, not stored in the world.
-    console: Option<(vx_world::town::TownSite, Vec<beacon::Posting>)>,
+    console: Option<Console>,
     /// The column discovery last ran at.
     last_scan: (i32, i32),
+    /// The dispatch window the trade network was last run for.
+    last_network: u64,
 }
 
 struct App {
@@ -1216,6 +1253,39 @@ impl App {
             }
         }
 
+        // The towns do business. Once a dispatch window, not once a frame:
+        // the network only looks for work every four in-game minutes, and the
+        // one real cost here is gathering who is within radio range.
+        let now = active.journal.tick();
+        let window = now / economy::DISPATCH_EVERY;
+        if window != active.last_network {
+            active.last_network = window;
+            let column = (
+                active.player.position.x.floor() as i32,
+                active.player.position.z.floor() as i32,
+            );
+            let reachable = active.world.generator().towns_near(column, RADIO_RANGE);
+            for landed in active.economy.run(&reachable, now) {
+                // A load of the player's that has arrived: paid at the far
+                // town's price, which is the whole reason to have sent it.
+                let Some(site) = reachable.iter().find(|site| site.centre == landed.to) else {
+                    continue;
+                };
+                let paid = landed.amount.round() as u64
+                    * active.economy.market(site, now).price(landed.good);
+                active.wallet.earn(paid);
+                active.greeting = Some((
+                    format!(
+                        "{} DELIVERED AT {}. +{paid} CR",
+                        shop::display_name(economy::GOODS[landed.good]),
+                        site.name
+                    ),
+                    Instant::now(),
+                ));
+                log::info!("a run landed at {}: {paid} credits", site.name);
+            }
+        }
+
         self.refresh_minimap();
         let Some(active) = &mut self.active else { return };
 
@@ -1230,6 +1300,28 @@ impl App {
         // just refreshed.
         let mut objects = active.mining.objects();
         objects.extend(active.villagers.objects(&active.villager_rigs));
+
+        // Trade traffic. A load in the air is not simulated — where it is now
+        // is a sum — so drawing one costs a lerp and a height lookup, and only
+        // for the handful close enough to see. Everything else on the network
+        // stays pure bookkeeping.
+        let eye = active.camera.position;
+        let now = active.journal.tick();
+        for load in active.economy.shipments() {
+            let (x, z) = load.position_at(now);
+            let (dx, dz) = (x - eye.x, z - eye.z);
+            if dx * dx + dz * dz > CARAVAN_SIGHT * CARAVAN_SIGHT {
+                continue;
+            }
+            let ground = active
+                .world
+                .generator()
+                .height_at(x.floor() as i32, z.floor() as i32);
+            let at = glam::Vec3::new(x, ground as f32 + CARAVAN_ALTITUDE, z);
+            let heading = (load.to.1 - load.from.1) as f32;
+            let yaw = ((load.to.0 - load.from.0) as f32).atan2(-heading);
+            objects.extend(active.trade_rig.objects(at, yaw, active.mining.spin()));
+        }
 
         // The held drill, drawn in camera space so it rides the view. The bit
         // spins up while it is cutting and idles otherwise; a slight bob sells
@@ -1517,15 +1609,37 @@ impl App {
             let Some(active) = &mut self.active else { return };
             // Taken out and put back so the console's own data can be lent to
             // `confirm` alongside a mutable borrow of the ledger beside it.
-            let Some((here, postings)) = active.console.take() else {
+            let Some((here, postings, runs)) = active.console.take() else {
                 active.board.close();
                 return;
             };
+            let rows = board::Board::rows_with_runs(here.centre, &postings, &active.ledger, &runs);
             match code {
                 KeyCode::ArrowUp | KeyCode::ArrowDown => {
-                    let rows = board::Board::rows(here.centre, &postings, &active.ledger).len();
                     let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
-                    active.board.move_cursor(delta, rows);
+                    active.board.move_cursor(delta, rows.len());
+                }
+                // A trade run settles against the network and the base pile,
+                // not against the ledger, so it takes a different path.
+                KeyCode::Enter | KeyCode::NumpadEnter
+                    if matches!(
+                        active.board.selected(&rows),
+                        Some(board::Row::Ship { .. })
+                    ) =>
+                {
+                    let Some(board::Row::Ship { good, to }) = active.board.selected(&rows) else {
+                        unreachable!("just matched a trade run")
+                    };
+                    let now = active.journal.tick();
+                    let pile = active
+                        .mining
+                        .fleet
+                        .base
+                        .as_mut()
+                        .map(|base| &mut base.stockpile);
+                    active
+                        .board
+                        .ship(&here, good, to, pile, &mut active.economy, now);
                 }
                 KeyCode::Enter | KeyCode::NumpadEnter => {
                     // Snapshot the sweep record first: the closure and the
@@ -1553,7 +1667,7 @@ impl App {
                 }
                 _ => {}
             }
-            active.console = Some((here, postings));
+            active.console = Some((here, postings, runs));
             return;
         }
 
@@ -1569,7 +1683,11 @@ impl App {
                         .base
                         .as_ref()
                         .map(|base| &base.stockpile);
-                    let rows = shop::Shop::rows(pile, &active.wallet).len();
+                    let market = active
+                        .counter
+                        .map(|site| active.economy.market(&site, active.journal.tick()).clone());
+                    let Some(market) = market else { return };
+                    let rows = shop::Shop::rows(pile, &active.wallet, &market).len();
                     let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
                     active.shop.move_cursor(delta, rows);
                 }
@@ -1580,7 +1698,10 @@ impl App {
                         .base
                         .as_mut()
                         .map(|base| &mut base.stockpile);
-                    active.shop.confirm(pile, &mut active.wallet);
+                    let Some(site) = active.counter else { return };
+                    let now = active.journal.tick();
+                    let market = active.economy.market_mut(&site, now);
+                    active.shop.confirm(pile, &mut active.wallet, market);
                 }
                 KeyCode::KeyE | KeyCode::Escape => {
                     active.shop.close();
@@ -1750,7 +1871,25 @@ impl App {
             return;
         };
         match active.world.registry().get_or_air(hit.id).name.as_str() {
-            "engine:counter" => active.shop.open_at_counter(),
+            "engine:counter" => {
+                // A counter is a *local* market now, so it has to know which
+                // town it stands in — derived from where it is, exactly as the
+                // beacon console below does it.
+                let column = (hit.block.x, hit.block.z);
+                match active
+                    .world
+                    .generator()
+                    .towns_near(column, vx_world::town::REACH)
+                    .into_iter()
+                    .next()
+                {
+                    Some(site) => {
+                        active.counter = Some(site);
+                        active.shop.open_at_counter();
+                    }
+                    None => log::warn!("a counter at {column:?} with no town behind it"),
+                }
+            }
             "engine:beacon" => {
                 let column = (hit.block.x, hit.block.z);
                 let Some(site) = active
@@ -1765,8 +1904,22 @@ impl App {
                 };
                 let neighbours = active.world.generator().towns_near(site.centre, RADIO_RANGE);
                 let postings = beacon::postings_for(&site, &neighbours);
+                // What this town will pay somebody to carry, and where to: the
+                // goods it is sitting on that a neighbour is short of.
+                let now = active.journal.tick();
+                let mut runs = Vec::new();
+                for good in 0..economy::GOODS.len() {
+                    let Some(target) = neighbours
+                        .iter()
+                        .filter(|other| other.centre != site.centre)
+                        .find(|other| active.economy.market(other, now).wants(good))
+                    else {
+                        continue;
+                    };
+                    runs.push((good, target.centre));
+                }
                 active.ledger.visit(site.centre);
-                active.console = Some((site, postings));
+                active.console = Some((site, postings, runs));
                 active.board.open_at_beacon();
             }
             _ => {}
@@ -1944,7 +2097,9 @@ impl App {
             .base
             .as_ref()
             .map(|base| &base.stockpile);
-        let pixels = shop::render_shop(&active.shop, pile, &active.wallet);
+        let Some(site) = active.counter else { return };
+        let market = active.economy.market(&site, active.journal.tick()).clone();
+        let pixels = shop::render_shop(&active.shop, pile, &active.wallet, &site, &market);
         let (width, height) = active.renderer.size();
         let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
         let panel_height = shop::SHOP_HEIGHT as f32 * shop::SHOP_SCALE;
@@ -1969,16 +2124,21 @@ impl App {
         if !active.board.open {
             return;
         }
-        let Some((here, postings)) = &active.console else {
+        // Taken out so the books can be borrowed mutably alongside it.
+        let Some((here, postings, runs)) = active.console.take() else {
             return;
         };
+        let market = active.economy.market(&here, active.journal.tick()).clone();
         let pixels = board::render_board(
             &active.board,
-            here,
-            postings,
+            &here,
+            &postings,
             &active.ledger,
             &active.wallet,
+            &market,
+            &runs,
         );
+        active.console = Some((here, postings, runs));
         let (width, height) = active.renderer.size();
         let panel_width = board::BOARD_WIDTH as f32 * board::BOARD_SCALE;
         let panel_height = board::BOARD_HEIGHT as f32 * board::BOARD_SCALE;
@@ -2109,6 +2269,18 @@ impl App {
                 radius: 2,
             });
         }
+        // Trade traffic, wherever it is. Watching a load crawl across the map
+        // toward a town you sold to is half the pleasure of the network.
+        let now = active.journal.tick();
+        for load in active.economy.shipments() {
+            let (x, z) = load.position_at(now);
+            markers.push(map::Marker {
+                x: x as i32,
+                z: z as i32,
+                colour: map::colour::TRADE,
+                radius: 1,
+            });
+        }
         // Contract pins draw over the fog on purpose: a posting can name a
         // town you have never seen, and going to find it is the job.
         for pin in active.ledger.pins() {
@@ -2187,6 +2359,10 @@ impl App {
         }
         if let Err(error) = active.journal.save(save.root()) {
             log::error!("could not save the command journal: {error}");
+        }
+        match active.economy.save(save.root()) {
+            Ok(()) => log::info!("saved {} town markets", active.economy.tracked()),
+            Err(error) => log::error!("could not save the town books: {error}"),
         }
     }
 
@@ -2317,6 +2493,7 @@ impl ApplicationHandler for App {
         let mut clock = TimeOfDay::default();
         let mut ledger = beacon::Ledger::new();
         let mut journal = CommandLog::new();
+        let mut economy = economy::Economy::new();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -2324,6 +2501,7 @@ impl ApplicationHandler for App {
             clock = clock::load(save.root());
             ledger.load(save.root());
             journal = CommandLog::load(save.root());
+            economy.load(save.root());
         }
 
         self.active = Some(Active {
@@ -2358,6 +2536,7 @@ impl ApplicationHandler for App {
             resuming: false,
             player_rig: Rig::player(),
             hand_rig: Rig::hand_drill(),
+            trade_rig: Rig::flier(),
             drill_spin: 0.0,
             villagers: Villagers::new(),
             villager_rigs: Villagers::rigs(),
@@ -2367,9 +2546,12 @@ impl ApplicationHandler for App {
             board: board::Board::new(),
             ledger,
             journal,
+            economy,
+            counter: None,
             console: None,
             // Deliberately absurd, so the first frame always scans.
             last_scan: (i32::MAX, i32::MAX),
+            last_network: u64::MAX,
         });
 
         self.last_frame = Instant::now();

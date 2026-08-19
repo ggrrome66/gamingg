@@ -43,8 +43,9 @@ pub mod slot {
     pub const CATWALK: u32 = 24;
     pub const MAST: u32 = 25;
     pub const BEACON: u32 = 26;
+    pub const COPPER_BAR: u32 = 27;
     /// Total generated tiles.
-    pub const COUNT: u32 = 27;
+    pub const COUNT: u32 = 28;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -287,6 +288,21 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.30, 0.32, 0.36], noise * 0.05)
                     } else {
                         shade([0.18, 0.19, 0.22], noise * 0.06)
+                    }
+                }
+                slot::COPPER_BAR => {
+                    // Stacked ingots: bright bar faces with dark seams between
+                    // them, so a pallet of them reads as many rather than one.
+                    let seam = y % 5 == 0 || (x + (y / 5) * 3) % 8 == 0;
+                    if seam {
+                        shade([0.28, 0.16, 0.10], noise * 0.05)
+                    } else {
+                        // Lighter along the top of each bar, for a rounded look.
+                        let lift = if y % 5 == 1 { 0.10 } else { 0.0 };
+                        shade(
+                            [0.85 + lift, 0.48 + lift * 0.6, 0.22 + lift * 0.3],
+                            noise * 0.07,
+                        )
                     }
                 }
                 // Unknown slots get magenta, the universal "missing texture".
