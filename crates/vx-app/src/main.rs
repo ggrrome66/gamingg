@@ -97,6 +97,8 @@ struct Options {
     /// Replay the saved world's command journal and report the ground it
     /// rebuilds, instead of opening a window.
     replay: bool,
+    /// Drones a dispatch puts on the job.
+    drones: u32,
     /// Frame the capture over the player's shoulder, body in shot.
     third_person: bool,
     /// Draw the handheld's fleet roster over the capture.
@@ -127,6 +129,7 @@ fn parse_args() -> Result<Options, String> {
         shop: false,
         board: false,
         replay: false,
+        drones: mining::DEFAULT_CREW,
         third_person: false,
         device: false,
         time: TimeOfDay::START.fraction(),
@@ -175,6 +178,11 @@ fn parse_args() -> Result<Options, String> {
             "--shop" => options.shop = true,
             "--board" => options.board = true,
             "--replay" => options.replay = true,
+            "--drones" => {
+                options.drones = value()?
+                    .parse()
+                    .map_err(|_| "--drones must be a number".to_string())?
+            }
             "--third-person" => options.third_person = true,
             "--device" => options.device = true,
             "--night" => options.time = TimeOfDay::MIDNIGHT.fraction(),
@@ -214,6 +222,7 @@ fn parse_args() -> Result<Options, String> {
                      --close             frame the first drone up close (with --dig)\n  \
                      --shop              draw the supply shop panel over the capture\n  \
                      --board             draw the beacon console over the capture\n  \
+                     --drones <n>        drones a dispatch puts on the job (default 3)\n  \
                      --replay            replay the saved world's journal and report the\n  \
                                          ground it rebuilds, then exit\n  \
                      --third-person      frame over the player's shoulder, body in shot\n  \
@@ -822,6 +831,7 @@ fn run_windowed(options: &Options) -> Result<(), String> {
         options.width,
         options.height,
         options.world.clone(),
+        options.drones,
     );
     event_loop
         .run_app(&mut app)
@@ -902,6 +912,8 @@ struct App {
     width: u32,
     height: u32,
     world_name: String,
+    /// Drones a dispatch puts on the job.
+    crew: u32,
     active: Option<Active>,
     fly: FlyController,
     walk: WalkController,
@@ -915,12 +927,13 @@ struct App {
 }
 
 impl App {
-    fn new(seed: u64, width: u32, height: u32, world_name: String) -> Self {
+    fn new(seed: u64, width: u32, height: u32, world_name: String, crew: u32) -> Self {
         App {
             seed,
             width,
             height,
             world_name,
+            crew,
             active: None,
             fly: FlyController::default(),
             drill_held: false,
@@ -1708,7 +1721,11 @@ impl App {
                 if let Some(area) = area {
                     active.journal.record(Command::Dispatch { area, method });
                 }
-                log::info!("digging: {}", method.name());
+                log::info!(
+                    "digging: {} with a crew of {}",
+                    method.name(),
+                    active.mining.crew()
+                );
             }
             None => log::info!("nothing marked to dig"),
         }
@@ -2325,6 +2342,7 @@ impl ApplicationHandler for App {
             selected: 0,
             mining: {
                 let mut mining = Mining::default();
+                mining.set_crew(self.crew);
                 mining.ensure_flier(camera.position);
                 mining
             },

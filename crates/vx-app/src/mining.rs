@@ -46,6 +46,12 @@ const PING_SIZE: f32 = 0.5;
 /// Radians per second the drill and rotor turn while working.
 const SPIN_RATE: f32 = 9.0;
 
+/// Drones a dispatch puts on the job by default.
+///
+/// Small enough that a hole still reads as a hole rather than a scrum, big
+/// enough that the job board's claim-and-release paths actually run.
+pub const DEFAULT_CREW: u32 = 3;
+
 /// What the player is currently doing with the mining tools.
 #[derive(Debug)]
 pub struct Mining {
@@ -70,6 +76,8 @@ pub struct Mining {
     /// Ticks the last `update` turned its elapsed time into. What the command
     /// journal records, because wall time is not reproducible and this is.
     last_ticks: u32,
+    /// Drones a dispatch puts on the job.
+    crew: u32,
     drone_yaws: Vec<f32>,
     flier_yaws: Vec<f32>,
     /// Drill/rotor angle, advanced while machines work.
@@ -122,6 +130,7 @@ impl Default for Mining {
             operation: None,
             pinned: Vec::new(),
             last_ticks: 0,
+            crew: DEFAULT_CREW,
             pending: 0.0,
             fleet: Fleet::default(),
             drone_yaws: Vec::new(),
@@ -214,7 +223,12 @@ impl Mining {
         self.pinned = world.pin_span(span.min, span.max);
 
         let mut operation = Operation::new(start);
-        operation.add_drone(start);
+        // A crew, not a single machine. The job board has always been built for
+        // contention — claims, releases, nearest-first — and until now exactly
+        // one drone ever existed, so none of that ever ran.
+        for _ in 0..self.crew.max(1) {
+            operation.add_drone(start);
+        }
         operation.post_plan(&plan);
         self.operation = Some(operation);
         Some(plan.method)
@@ -298,6 +312,15 @@ impl Mining {
     /// the dispatch, since the plan itself is derivable from it.
     pub fn area(&self) -> Option<VoxelAabb> {
         self.area
+    }
+
+    /// How many drones a dispatch puts on the job.
+    pub fn set_crew(&mut self, crew: u32) {
+        self.crew = crew.max(1);
+    }
+
+    pub fn crew(&self) -> u32 {
+        self.crew
     }
 
     /// Ticks the last [`Mining::update`] ran. Recorded by the journal.

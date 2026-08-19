@@ -962,6 +962,101 @@ mod tests {
         );
     }
 
+    /// Run one excavation with `crew` drones for `ticks` and report what came
+    /// of it. Kept short: the claim invariant is checked every tick, and at
+    /// sixty-four drones an unoptimised build feels every one of them.
+    fn dig_with_crew(crew: u32, ticks: u32) -> (u64, u64, usize) {
+        let mut world = World::new(2024);
+        world.load_around(vx_core::ChunkPos::new(0, 0), 2);
+        let ground = world.generator().height_at(4, 4);
+        let body = VoxelAabb::new(
+            BlockPos::new(1, ground - 8, 1),
+            BlockPos::new(7, ground - 5, 7),
+        );
+
+        let scouted = crate::working_span(body, body.min);
+        world.pin_span(scouted.min, scouted.max);
+        let plan = mine::plan(&world, body, 3, MineMethod::Pit).expect("no pit plan");
+        let start = flow::settle(&world, plan.portal);
+        let span = crate::working_span(plan.span(), start);
+        world.pin_span(span.min, span.max);
+
+        let mut operation = Operation::new(start);
+        for _ in 0..crew {
+            operation.add_drone(start);
+        }
+        operation.post_plan(&plan);
+
+        let events = EventBus::new();
+        for _ in 0..ticks {
+            operation.tick(&mut world, &events);
+
+            // The invariant the board has never had to keep: one job, one
+            // drone. Checked every tick rather than at the end, because a
+            // double-claim that resolves itself would otherwise go unseen.
+            let mut claimed: Vec<crate::JobId> = operation
+                .drones
+                .iter()
+                .filter_map(|drone| match drone.state {
+                    DroneState::Travelling(job) | DroneState::Digging(job) => Some(job),
+                    _ => None,
+                })
+                .collect();
+            let before = claimed.len();
+            claimed.sort_by_key(|job| job.0);
+            claimed.dedup_by_key(|job| job.0);
+            assert_eq!(
+                before,
+                claimed.len(),
+                "two drones of a crew of {crew} claimed the same job"
+            );
+        }
+
+        // Hash the excavation, not the whole pinned span: the span includes
+        // the haul-route margin, which is hundreds of thousands of untouched
+        // blocks and dominates the test's runtime for no extra coverage.
+        let cut = plan.span();
+        (
+            vx_world::region_hash(&world, cut.min, cut.max),
+            operation.accounted_blocks(),
+            operation.drones.len(),
+        )
+    }
+
+    #[test]
+    fn a_crew_never_double_claims_and_stays_deterministic() {
+        // The job board was built for a swarm — claims, releases, nearest-first
+        // — and until now exactly one drone ever existed, so none of it ran.
+        // `dig_with_crew` asserts the one-job-one-drone invariant every tick.
+        //
+        // Tick counts are per crew size on purpose: contention shows up in the
+        // first few dozen ticks, when every drone is scrambling for the same
+        // outermost access cuts, so sixty-four of them need very few. Progress
+        // and determinism need a run long enough to dig, but only a handful of
+        // machines. Sixty-four drones for six hundred ticks would be four
+        // times this test's whole runtime and prove nothing extra.
+        let (_, dug_1, count_1) = dig_with_crew(1, 250);
+        let (hash_8, dug_8, count_8) = dig_with_crew(8, 250);
+        let (_, dug_64, count_64) = dig_with_crew(64, 40);
+
+        assert_eq!((count_1, count_8, count_64), (1, 8, 64));
+        assert!(dug_1 > 0 && dug_8 > 0 && dug_64 > 0, "nobody dug anything");
+
+        // A bigger crew clears more of the same hole in the same time — not a
+        // different hole, and never less of one.
+        assert!(
+            dug_8 >= dug_1,
+            "eight drones ({dug_8}) moved less than one ({dug_1})"
+        );
+
+        // And a crew size is reproducible: same seed, same count, same ground.
+        assert_eq!(
+            hash_8,
+            dig_with_crew(8, 250).0,
+            "a crew of eight is not deterministic"
+        );
+    }
+
     #[test]
     fn digging_is_deterministic() {
         // Same seed, same plan, same tick count, same hole. Without this the
