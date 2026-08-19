@@ -18,7 +18,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use vx_mesh::{Mesh, Vertex};
+use vx_mesh::Vertex;
 use wgpu::util::DeviceExt;
 
 use crate::frustum::Frustum;
@@ -182,6 +182,29 @@ pub const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBuffe
     ],
 };
 
+/// Plain vertex geometry for an object.
+///
+/// Terrain is packed quads now, but an object is a handful of cuboids drawn
+/// with a model matrix per instance rather than a chunk of blocks on a lattice,
+/// so there is nothing for the packing to exploit and the old vertex form is
+/// simply the right shape here.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CubeMesh {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+}
+
+impl CubeMesh {
+    /// Each quad is four vertices and six indices.
+    pub fn quad_count(&self) -> usize {
+        self.indices.len() / 6
+    }
+
+    pub fn triangle_count(&self) -> usize {
+        self.indices.len() / 3
+    }
+}
+
 /// Geometry for a unit cube spanning `0..1` on every axis.
 ///
 /// Wound to match the greedy mesher exactly — counter-clockwise seen from
@@ -189,8 +212,8 @@ pub const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBuffe
 /// treats terrain and objects identically. Getting this backwards produces a
 /// cube that is invisible from outside and solid from within, which is a
 /// genuinely confusing thing to debug.
-pub fn unit_cube(tile: u32) -> Mesh {
-    let mut mesh = Mesh::default();
+pub fn unit_cube(tile: u32) -> CubeMesh {
+    let mut mesh = CubeMesh::default();
 
     for face in vx_core::Face::ALL {
         let d = face.axis();

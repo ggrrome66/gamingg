@@ -211,58 +211,67 @@ impl PackedQuad {
     }
 }
 
-/// Renderable geometry for one chunk.
+/// Renderable geometry for one chunk: packed quads, chunk-local.
+///
+/// There is no vertex or index data here any more. The renderer uploads these
+/// eight-byte quads directly and the vertex shader synthesises the six vertices
+/// of each quad's two triangles from `vertex_index`, so building four vertices
+/// and six indices on the CPU would be work thrown away.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mesh {
-    pub vertices: Vec<Vertex>,
-    pub indices: Vec<u32>,
-    /// The same geometry as packed quads, chunk-local.
     pub quads: Vec<PackedQuad>,
 }
 
 impl Mesh {
     pub fn is_empty(&self) -> bool {
-        self.indices.is_empty()
+        self.quads.is_empty()
     }
 
-    /// Number of quads. Each is two triangles, so six indices.
     pub fn quad_count(&self) -> usize {
-        self.indices.len() / 6
+        self.quads.len()
     }
 
+    /// Each quad is two triangles.
     pub fn triangle_count(&self) -> usize {
-        self.indices.len() / 3
+        self.quads.len() * 2
     }
 
-    /// Append one quad, given its four corners in winding order.
+    /// Expand into the vertex and index arrays the GPU used to be given.
     ///
-    /// Takes the packed form too, and the two are held to the same geometry by
-    /// `packed_quads_reproduce_the_vertex_geometry`. Once the renderer reads
-    /// quads the vertex half goes away; until then both exist so the change can
-    /// be proved before it is relied on.
-    fn push_quad(
-        &mut self,
-        packed: PackedQuad,
-        corners: [[f32; 3]; 4],
-        normal: [f32; 3],
-        size: [f32; 2],
-        tile: u32,
-    ) {
-        self.quads.push(packed);
-        let base = self.vertices.len() as u32;
-        let [w, h] = size;
-        let uvs = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
-
-        for (corner, uv) in corners.into_iter().zip(uvs) {
-            self.vertices.push(Vertex {
-                position: corner,
-                normal,
-                uv,
-                tile,
-            });
+    /// Nothing in the render path calls this — the shader does the same work
+    /// from packed quads. It exists because geometry is far easier to *check*
+    /// as explicit triangles than as bit fields, so the mesher's tests read
+    /// through it, and any future tool that wants real triangles (an exporter,
+    /// a collision bake) has them without reimplementing the unpacking.
+    ///
+    /// `origin` is the chunk's corner, added back because packed positions are
+    /// chunk-local.
+    pub fn to_vertices(&self, origin: [i32; 3]) -> (Vec<Vertex>, Vec<u32>) {
+        let mut vertices = Vec::with_capacity(self.quads.len() * 4);
+        let mut indices = Vec::with_capacity(self.quads.len() * 6);
+        for quad in &self.quads {
+            let base = vertices.len() as u32;
+            let normal = quad.normal();
+            let tile = quad.tile();
+            for (corner, uv) in quad.corners().into_iter().zip(quad.uvs()) {
+                vertices.push(Vertex {
+                    position: [
+                        corner[0] + origin[0] as f32,
+                        corner[1] + origin[1] as f32,
+                        corner[2] + origin[2] as f32,
+                    ],
+                    normal,
+                    uv,
+                    tile,
+                });
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        (vertices, indices)
+    }
+
+    fn push_quad(&mut self, packed: PackedQuad) {
+        self.quads.push(packed);
     }
 }
 
@@ -324,47 +333,12 @@ fn mesh_cross_blocks(
                     continue;
                 }
                 let tile = def.texture(Face::PosX) as u32;
-                let (fx, fy, fz) = (
-                    (origin[0] + x) as f32,
-                    (origin[1] + y) as f32,
-                    (origin[2] + z) as f32,
-                );
-                // Lit as if lying flat: plants take the ground's light, and
-                // neither diagonal ever shows a dark "back of the leaf".
-                let up = [0.0, 1.0, 0.0];
-                // Corners run top-left, top-right, bottom-right, bottom-left
-                // so v grows downward — texture row 0 is the top of the
-                // blades.
-                let diagonals = [
-                    [
-                        [fx, fy + 1.0, fz],
-                        [fx + 1.0, fy + 1.0, fz + 1.0],
-                        [fx + 1.0, fy, fz + 1.0],
-                        [fx, fy, fz],
-                    ],
-                    [
-                        [fx + 1.0, fy + 1.0, fz],
-                        [fx, fy + 1.0, fz + 1.0],
-                        [fx, fy, fz + 1.0],
-                        [fx + 1.0, fy, fz],
-                    ],
-                ];
-                for (diagonal, corners) in diagonals.into_iter().enumerate() {
-                    mesh.push_quad(
-                        PackedQuad::cross(diagonal * 2, x, y, z, tile),
-                        corners,
-                        up,
-                        [1.0, 1.0],
-                        tile,
-                    );
-                    let reversed = [corners[3], corners[2], corners[1], corners[0]];
-                    mesh.push_quad(
-                        PackedQuad::cross(diagonal * 2 + 1, x, y, z, tile),
-                        reversed,
-                        up,
-                        [1.0, 1.0],
-                        tile,
-                    );
+                for diagonal in 0..2 {
+                    // Each diagonal is pushed twice with reversed winding: the
+                    // terrain pipeline culls back faces, so a plant must carry
+                    // its own back or vanish from half the compass.
+                    mesh.push_quad(PackedQuad::cross(diagonal * 2, x, y, z, tile));
+                    mesh.push_quad(PackedQuad::cross(diagonal * 2 + 1, x, y, z, tile));
                 }
             }
         }
@@ -388,7 +362,6 @@ fn mesh_face_direction(
 
     let (du, dv, dd) = (DIMS[u], DIMS[v], DIMS[d]);
     let offset = face.offset();
-    let normal = face.normal();
 
     let mut mask: Vec<Option<BlockId>> = vec![None; (du * dv) as usize];
 
@@ -424,53 +397,15 @@ fn mesh_face_direction(
             // The quad sits on the far side of the voxel for positive faces.
             let plane = slice + i32::from(face.is_positive());
 
-            // Corner (a, b) in the (u, v) plane, as a world position.
-            let corner = |a: i32, b: i32| {
-                let mut local = [0i32; 3];
-                local[d] = plane;
-                local[u] = a;
-                local[v] = b;
-                [
-                    (origin[0] + local[0]) as f32,
-                    (origin[1] + local[1]) as f32,
-                    (origin[2] + local[2]) as f32,
-                ]
-            };
-
-            let (u0, v0, u1, v1) = (iu, iv, iu + w, iv + h);
-            // Counter-clockwise seen from outside. Reversed for negative
-            // faces, whose outward direction is -d.
-            let corners = if face.is_positive() {
-                [
-                    corner(u0, v0),
-                    corner(u1, v0),
-                    corner(u1, v1),
-                    corner(u0, v1),
-                ]
-            } else {
-                [
-                    corner(u0, v0),
-                    corner(u0, v1),
-                    corner(u1, v1),
-                    corner(u1, v0),
-                ]
-            };
-
-            mesh.push_quad(
-                PackedQuad::face(
-                    Face::ALL.iter().position(|other| *other == face).unwrap() as u32,
-                    plane,
-                    iu,
-                    iv,
-                    w,
-                    h,
-                    tile,
-                ),
-                corners,
-                normal,
-                [w as f32, h as f32],
+            mesh.push_quad(PackedQuad::face(
+                Face::ALL.iter().position(|other| *other == face).unwrap() as u32,
+                plane,
+                iu,
+                iv,
+                w,
+                h,
                 tile,
-            );
+            ));
         });
     }
 }
@@ -558,8 +493,47 @@ mod tests {
         LocalPos::new(x, y, z).expect("test coordinates in range")
     }
 
-    fn mesh_of(chunk: &Chunk, registry: &BlockRegistry) -> Mesh {
-        build_mesh(&SoloChunkView(chunk), registry, [0, 0, 0])
+    /// A mesh plus its expanded triangles.
+    ///
+    /// Geometry is far easier to assert about as explicit corners than as bit
+    /// fields, so the tests read through `Mesh::to_vertices` — the same
+    /// unpacking the vertex shader does, which is why checking it here is
+    /// checking what the GPU draws.
+    struct Geometry {
+        vertices: Vec<Vertex>,
+        indices: Vec<u32>,
+        quads: Vec<PackedQuad>,
+    }
+
+    impl Geometry {
+        fn quad_count(&self) -> usize {
+            self.quads.len()
+        }
+
+        fn triangle_count(&self) -> usize {
+            self.quads.len() * 2
+        }
+
+        fn is_empty(&self) -> bool {
+            self.quads.is_empty()
+        }
+    }
+
+    fn expand(mesh: &Mesh, origin: [i32; 3]) -> Geometry {
+        let (vertices, indices) = mesh.to_vertices(origin);
+        Geometry {
+            vertices,
+            indices,
+            quads: mesh.quads.clone(),
+        }
+    }
+
+    fn mesh_at(chunk: &Chunk, registry: &BlockRegistry, origin: [i32; 3]) -> Geometry {
+        expand(&build_mesh(&SoloChunkView(chunk), registry, origin), origin)
+    }
+
+    fn mesh_of(chunk: &Chunk, registry: &BlockRegistry) -> Geometry {
+        mesh_at(chunk, registry, [0, 0, 0])
     }
 
     /// Recompute a triangle's normal from its winding, to check the geometry
@@ -815,7 +789,7 @@ mod tests {
         let mut chunk = Chunk::empty(ChunkPos::new(2, 0));
         chunk.set(local(0, 40, 0), fixture.stone);
 
-        let mesh = build_mesh(&SoloChunkView(&chunk), &fixture.registry, [32, 0, 0]);
+        let mesh = mesh_at(&chunk, &fixture.registry, [32, 0, 0]);
 
         let min_x = mesh
             .vertices
@@ -847,61 +821,75 @@ mod tests {
     }
 
     #[test]
-    fn packed_quads_reproduce_the_vertex_geometry_exactly() {
-        // The gate for replacing vertices with quads. Unpacking a quad has to
-        // give back the same four corners, the same normal and the same uvs the
-        // mesher wrote as vertices — with the chunk origin added back, since
-        // packed positions are chunk-local and vertex positions are not.
-        // All four shapes in one chunk — opaque, translucent, non-solid and a
-        // plant — so every quad kind is exercised. Meshed far from the origin
-        // as well as at it, because chunk-local is the whole point: the packed
-        // form must not know or care where its chunk sits.
+    fn unpacking_a_quad_gives_the_corners_it_was_built_from() {
+        // The vertex shader does this same arithmetic, so these expectations
+        // are what the GPU draws. Written out by hand rather than compared
+        // against another implementation, or the two could agree on being
+        // wrong together.
+        //
+        // Kind 3 is PosY, whose plane axis is Y and whose (u, v) are (Z, X).
+        let top = PackedQuad::face(3, 8, 1, 2, 3, 4, 7);
+        assert_eq!(top.normal(), [0.0, 1.0, 0.0]);
+        assert_eq!(
+            top.corners(),
+            [
+                [2.0, 8.0, 1.0],
+                [2.0, 8.0, 4.0],
+                [6.0, 8.0, 4.0],
+                [6.0, 8.0, 1.0],
+            ]
+        );
+        assert_eq!(
+            top.uvs(),
+            [[0.0, 0.0], [3.0, 0.0], [3.0, 4.0], [0.0, 4.0]]
+        );
+
+        // Kind 0 is NegX, which winds the other way so its outward face is -X.
+        let west = PackedQuad::face(0, 5, 0, 0, 1, 1, 2);
+        assert_eq!(west.normal(), [-1.0, 0.0, 0.0]);
+        assert_eq!(
+            west.corners(),
+            [
+                [5.0, 0.0, 0.0],
+                [5.0, 0.0, 1.0],
+                [5.0, 1.0, 1.0],
+                [5.0, 1.0, 0.0],
+            ]
+        );
+
+        // A plant's second winding is its first one backwards, which is how it
+        // survives backface culling from either side.
+        let front = PackedQuad::cross(0, 3, 9, 4, 5);
+        let back = PackedQuad::cross(1, 3, 9, 4, 5);
+        let forward = front.corners();
+        assert_eq!(
+            back.corners(),
+            [forward[3], forward[2], forward[1], forward[0]]
+        );
+        assert_eq!(front.normal(), [0.0, 1.0, 0.0], "plants light as if flat");
+    }
+
+    #[test]
+    fn expanding_a_mesh_places_it_at_its_chunk_origin() {
+        // Packed positions are chunk-local; the origin is added back once,
+        // here and in the shader, instead of being baked into every vertex.
         let f = fixture();
-        let at = |pos: ChunkPos| {
-            let mut chunk = Chunk::empty(pos);
-            for x in 0..4 {
-                for z in 0..4 {
-                    chunk.fill_column(x, z, 0, 3, f.stone);
-                }
-            }
-            chunk.set(local(1, 3, 1), f.glass);
-            chunk.set(local(2, 3, 2), f.water);
-            chunk.set(local(3, 3, 3), f.plant);
-            chunk
-        };
+        let mut chunk = Chunk::empty(ChunkPos::new(1, -2));
+        chunk.set(local(0, 40, 0), f.stone);
+        let mesh = build_mesh(&SoloChunkView(&chunk), &f.registry, [16, 0, -32]);
 
-        for pos in [ChunkPos::new(0, 0), ChunkPos::new(1, -2), ChunkPos::new(-16, 32)] {
-            let chunk = at(pos);
-            let corner = pos.origin();
-            let origin = [corner.x, corner.y, corner.z];
-            let mesh = build_mesh(&SoloChunkView(&chunk), &f.registry, origin);
-            assert!(!mesh.quads.is_empty(), "nothing was meshed at {origin:?}");
-            assert_eq!(
-                mesh.quads.len(),
-                mesh.quad_count(),
-                "a quad went missing between the two representations"
-            );
-
-            for (index, quad) in mesh.quads.iter().enumerate() {
-                let corners = quad.corners();
-                let uvs = quad.uvs();
-                let normal = quad.normal();
-                for corner in 0..4 {
-                    let vertex = mesh.vertices[index * 4 + corner];
-                    let expected = [
-                        corners[corner][0] + origin[0] as f32,
-                        corners[corner][1] + origin[1] as f32,
-                        corners[corner][2] + origin[2] as f32,
-                    ];
-                    assert_eq!(
-                        vertex.position, expected,
-                        "quad {index} corner {corner} moved at origin {origin:?}"
-                    );
-                    assert_eq!(vertex.normal, normal, "quad {index} normal");
-                    assert_eq!(vertex.uv, uvs[corner], "quad {index} corner {corner} uv");
-                    assert_eq!(vertex.tile, quad.tile(), "quad {index} tile");
-                }
-            }
+        let (local_vertices, _) = mesh.to_vertices([0, 0, 0]);
+        let (world_vertices, _) = mesh.to_vertices([16, 0, -32]);
+        for (near, far) in local_vertices.iter().zip(&world_vertices) {
+            assert_eq!(far.position[0], near.position[0] + 16.0);
+            assert_eq!(far.position[1], near.position[1]);
+            assert_eq!(far.position[2], near.position[2] - 32.0);
+        }
+        // And every packed coordinate stays inside its own chunk.
+        for quad in &mesh.quads {
+            assert!((0..=256).contains(&quad.plane()));
+            assert!((0..=256).contains(&quad.iu()));
+            assert!((0..=256).contains(&quad.iv()));
         }
     }
 

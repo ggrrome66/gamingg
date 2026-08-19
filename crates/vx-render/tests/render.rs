@@ -176,8 +176,6 @@ fn the_camera_looking_up_sees_only_sky() {
 /// where it lands in the world.
 fn facing_quad(plane: i32, iu: i32, iv: i32, w: i32, h: i32, tile: u32) -> vx_mesh::Mesh {
     vx_mesh::Mesh {
-        vertices: Vec::new(),
-        indices: Vec::new(),
         // Kind 5 is PosZ in `Face::ALL` order.
         quads: vec![vx_mesh::PackedQuad::face(5, plane, iu, iv, w, h, tile)],
     }
