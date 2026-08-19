@@ -17,7 +17,33 @@ art exists.
 
 ## Status
 
-M3 stage 8 is in. The sun moves. A day runs twenty real minutes and the light,
+M3 stage 9a is in — engine work rather than new toys, and it started by finding
+a real bug. `World::block` reports unloaded chunks as air, and drones read the
+world through it, so a machine working near the edge of the streamed-in set saw
+air where there was rock. That made its decisions depend on which chunks were
+resident, and residency follows *your camera* — so the same dispatch could dig
+a different hole depending on where you happened to stand. Operations now pin
+the ground they will read, and a test digs the same body with four chunks
+resident and with none and holds the results identical. It fails without the
+pins.
+
+That fix unlocked the round's real idea. Ask who edits this world: you break a
+few hundred blocks by hand; one drone moves tens of thousands, and moves exactly
+the same ones every time. Writing that to disk is writing down the output of a
+deterministic function whose input was one line. So the game now keeps a
+**command journal** — mine that area this way, run this many ticks — and
+replaying it re-derives every block those orders produced. A fixture mine of
+several hundred blocks is described by fewer than a dozen entries.
+
+The prize is `--replay`, which rebuilds a saved world from its journal and
+compares content hashes against the ground on disk. It needs no GPU and no
+window, and it covers worldgen, the agents and the editing path at once.
+
+Also in: a **crew** of drones instead of one — the job board was built for
+contention and had never run any of it — plus the seed tree and a body id on
+every chunk, so a planet is additive later rather than a rewrite.
+
+Before that, stage 8: The sun moves. A day runs twenty real minutes and the light,
 the sky and the fog all turn with it — golden hour, dusk, real dark, dawn —
 with the hour on the HUD and saved beside the world, so you come back to the
 time you left. The townsfolk keep those hours: at sundown they walk home,
@@ -88,11 +114,11 @@ build in it, and it survives quitting — skills included.
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
-| `vx-world` | Chunk storage, worldgen, ore, town lattice, flora, raycast, line of sight, physics, editing, saves | Done |
+| `vx-world` | Chunk storage, worldgen, ore, town lattice, flora, raycast, line of sight, physics, editing, content hashes, saves | Done |
 | `vx-mesh` | Greedy meshing + crossed-quad plants | Done |
 | `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
-| `vx-app` | Window, walk/fly/third-person camera, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, handheld, beacon board, `gamingg` binary | Done |
+| `vx-app` | Window, walk/fly/third-person camera, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, handheld, beacon board, command journal, `gamingg` binary | Done |
 | `vx-agent` | Job board, flow fields, mine planning, scanner, flier + fleet, manual piloting | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
@@ -148,11 +174,25 @@ build in it, and it survives quitting — skills included.
   drive: the flow field allows one block of climb per step, so a 1:1 staircase is
   traversable by anything. Making grade a real constraint needs a field that
   tracks how far a drone has run since it last climbed.
-- Only one drone. The job board is built for a swarm and nothing exercises it
-  yet.
+- The command journal records world edits and dispatches, not the whole session:
+  the fleet, surveys, the base and piloting are not in it yet, so `--replay`
+  rebuilds the *ground* rather than the entire game state.
+- Region files are still written on every save, so the journal does not yet make
+  saves smaller — it earns its keep as a determinism oracle first. Letting it
+  replace region writes is where the disk win lives, and the keyframe machinery
+  is in place for it.
+- Replay is deterministic on the same binary and platform. Agent movement uses
+  `f32`, so **cross-platform replay is not promised** and should not be claimed.
+- Chunk pinning holds an operation's whole working span resident for the life of
+  the job. Correct, but a very large marked area pins a lot of chunks.
 - A running excavation is not saved, and neither is the fleet. The holes are —
   block edits go through the same path a player's do — but quitting mid-dig
-  loses the drone, the job board, the surveys and the base declaration.
+  loses the drone, the job board, the surveys and the base declaration. The
+  journal is the obvious way to fix this and does not do it yet.
+- Chunk mesh vertices are 36 bytes each and carry **absolute world positions**
+  as `f32`, so geometry is far fatter than a blocky world needs and the
+  precision wall is baked into the mesh data rather than just the camera. Packed
+  chunk-local quads are the fix and are not done.
 - The minimap draws explored-but-unloaded ground from the generator, so your
   edits and mine holes only show on it while their chunks are loaded. The
   trade is that the map stores nothing but the explored set.
@@ -517,7 +557,7 @@ Controls:
 | `M` | Mark a corner of an ore body (two marks make an area) |
 | `Tab` | Cycle the proposed mining method |
 | `Enter` | Send a drone to dig it |
-| `Backspace` | Cancel the marked plan |
+| `Backspace` | Cancel the marked plan, releasing the ground it held |
 | `G` | Send the flier to scan the sector you are standing in |
 | `N` | Toggle the minimap |
 | `[` / `]` | Zoom the minimap out / in |
@@ -564,6 +604,12 @@ cargo run --release -p vx-app -- --screenshot town.ppm --at 0,22 --dawn
 
 # the beacon console, work posted and one contract already taken
 cargo run --release -p vx-app -- --screenshot board.ppm --at 0,4 --board
+
+# rebuild a saved world from its journal and check it against the ground on disk
+cargo run --release -p vx-app -- --replay --world myworld
+
+# put a bigger crew on the next dispatch
+cargo run --release -p vx-app -- --drones 8
 
 # the handheld's fleet roster and a live feed banner
 cargo run --release -p vx-app -- --screenshot uplink.ppm --at 0,10 --device

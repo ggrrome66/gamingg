@@ -81,6 +81,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 6.5 | `229a299` | Starting village, villagers, trading shop, trees |
 | 7 | `42fb8ab` | Third person, drone piloting, NPC senses |
 | 8 | `f050c16` | Day/night, container towns on a lattice, the beacon network |
+| 9a | `7dcff15` | Residency pinning, content hashes, the command journal, seed tree, body ids, a real crew |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -150,9 +151,24 @@ player has never seen, pinning it on a map that is still black around it. The
 structural half of the round was splitting `height_at` into `natural_height_at`
 plus a blend, so town siting could stop reading its own output.
 
+**9a — Determinism, and cashing it in.** An external design report prompted this
+round; the audit of it is in the commit history. It began by finding a real bug:
+`World::block` reports unloaded chunks as air and agents read through it, so a
+drone's decisions depended on which chunks the camera had streamed in. Fixed by
+pinning an operation's working span, and gated by a test that digs the same body
+at two residencies and compares content hashes — verified sensitive by removing
+the pins and watching it fail.
+
+That made the round's real idea safe: agents author almost every block change in
+this game, and they do it deterministically, so the save should record *orders*
+rather than outcomes. The command journal does, and `--replay` rebuilds a world
+from it and checks the result — a determinism oracle covering worldgen, agents
+and editing at once. Also: `SeedPath`, `BodyId` on every chunk key, and a crew
+of drones finally exercising the job board's contention paths.
+
 ---
 
-## In flight — Stage 9: the trade network
+## In flight — Stage 9b: the trade network
 
 Towns get stockpiles and prices that differ between them; they broadcast what
 they need over the network stage 8 built; trade drones run routes. The
@@ -160,13 +176,39 @@ game-of-life economy — a shortage in one town becoming a run on another — is
 the point, and it is the first thing in the game where the world changes while
 the player is not looking.
 
+The approach is settled and comes from the design report's economy chapter,
+which is genuinely excellent: **fast-forward-on-read** town state (integrate
+only when something asks), a **discrete-event queue** so idle towns cost
+nothing, **damped tâtonnement** with capped iterations to solve clearing prices
+rather than nudge them, **net buy/sell pressure** pricing so shocks are legible,
+**Leontief input-output** for what a town must import, and **min-cost flow** for
+who ships to whom. Region-rollup LOD from the start: detail near the player,
+aggregates far away.
+
 Groundwork already in place: `postings_for` derives a board from a town and its
-neighbours, `Ledger` records what the player did about it, and `towns_near`
-answers "who can this mast hear" without loading a chunk. What stage 9 adds is
-state that *persists per town* — the first thing in the world that is not a
-pure function of the seed — and the rule for how it changes.
+neighbours, `Ledger` records what the player did about it, `towns_near` answers
+"who can this mast hear" without loading a chunk, and the command journal is the
+shape the economy's own event log wants. What 9b adds is state that *persists
+per town* — the first thing in the world that is not a pure function of the seed
+— and the rule for how it changes.
 
 ---
+
+## Also outstanding from 9a
+
+**Packed chunk-local quads.** Mesh vertices are 36 bytes and carry absolute
+world positions as `f32`, so a merged quad costs 168 bytes and the precision
+wall is baked into the mesh data rather than just the camera. Storing one `u64`
+per quad and synthesising the six vertices in the vertex shader is ~21x less
+geometry memory, removes a buffer per chunk, and opens the floating-origin seam.
+Deferred out of 9a because cross blocks emit diagonal quads that need their own
+encoding, and because it is a renderer change that wants the byte-identical
+frame tests watched closely rather than rushed.
+
+**Letting the journal shrink saves.** Region files are still written every save,
+so the journal is currently an oracle rather than a disk win. The keyframe
+machinery is in place; turning it on is worth doing after the oracle has run
+against real sessions for a while.
 
 ## The arc beyond
 
