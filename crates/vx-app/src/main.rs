@@ -120,6 +120,8 @@ struct Options {
     third_person: bool,
     /// Draw the handheld's fleet roster over the capture.
     device: bool,
+    /// Show the handheld's map page rather than its roster.
+    handheld_map: bool,
     /// Hour of the in-game day to light the capture by, 0..1.
     time: f32,
 }
@@ -149,6 +151,7 @@ fn parse_args() -> Result<Options, String> {
         drones: 0,
         third_person: false,
         device: false,
+        handheld_map: false,
         time: TimeOfDay::START.fraction(),
     };
 
@@ -202,6 +205,10 @@ fn parse_args() -> Result<Options, String> {
             }
             "--third-person" => options.third_person = true,
             "--device" => options.device = true,
+            "--handheld-map" => {
+                options.device = true;
+                options.handheld_map = true;
+            }
             "--night" => options.time = TimeOfDay::MIDNIGHT.fraction(),
             "--dawn" => options.time = TimeOfDay::DAWN.fraction(),
             "--noon" => options.time = TimeOfDay::NOON.fraction(),
@@ -245,6 +252,7 @@ fn parse_args() -> Result<Options, String> {
                                          ground it rebuilds, then exit\n  \
                      --third-person      frame over the player's shoulder, body in shot\n  \
                      --device            draw the handheld fleet roster over the capture\n  \
+                     --handheld-map      draw the handheld's map page instead\n  \
                      --time <0..1>       hour of the day to light the capture by\n  \
                      --night             shorthand for --time 0\n  \
                      --dawn --noon --dusk\n  \
@@ -695,8 +703,29 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         let mut handheld = device::Device::new();
         handheld.open_list();
         handheld.feedback = Some("CONTROL TAKEN".into());
+        if options.handheld_map {
+            handheld.turn_page();
+        }
         let roster = mining.roster(camera.position);
-        let pixels = device::render_device(&handheld, &roster);
+        // The map page needs the country under it; the roster page does not.
+        let explored = {
+            let mut seen = map::MapState::new();
+            seen.explore_around(chunk_at(camera.position), 6);
+            seen
+        };
+        let markers = [map::Marker {
+            x: options.at.0,
+            z: options.at.1,
+            colour: map::colour::PLAYER,
+            radius: 2,
+        }];
+        let country = device::Country {
+            world: &world,
+            explored: &explored,
+            centre: options.at,
+            markers: &markers,
+        };
+        let pixels = device::render_device(&handheld, &roster, Some(&country));
         let panel_width = device::DEVICE_WIDTH as f32 * device::DEVICE_SCALE;
         let panel_height = device::DEVICE_HEIGHT as f32 * device::DEVICE_SCALE;
         renderer.set_overlay(
@@ -1623,6 +1652,10 @@ impl App {
                         self.take_or_release_control();
                     }
                 }
+                KeyCode::Tab => {
+                    let Some(active) = &mut self.active else { return };
+                    active.device.turn_page();
+                }
                 KeyCode::KeyV | KeyCode::Escape => {
                     let Some(active) = &mut self.active else { return };
                     active.device.close();
@@ -2093,7 +2126,68 @@ impl App {
         }
         let from = active.player.eye_position();
         let roster = active.mining.roster(from);
-        let pixels = device::render_device(&active.device, &roster);
+        // The handheld's map: where you are, what you own, the towns you have
+        // found and the traffic in the air — over the same fog the corner
+        // minimap uses.
+        let now = active.journal.tick();
+        let centre = (
+            active.player.position.x.floor() as i32,
+            active.player.position.z.floor() as i32,
+        );
+        let mut markers = vec![map::Marker {
+            x: centre.0,
+            z: centre.1,
+            colour: map::colour::PLAYER,
+            radius: 2,
+        }];
+        for town in active.ledger.visited() {
+            markers.push(map::Marker {
+                x: town.0,
+                z: town.1,
+                colour: map::colour::TOWN,
+                radius: 2,
+            });
+        }
+        for pin in active.ledger.pins() {
+            markers.push(map::Marker {
+                x: pin.0,
+                z: pin.1,
+                colour: map::colour::CONTRACT,
+                radius: 2,
+            });
+        }
+        for load in active.economy.shipments() {
+            let (x, z) = load.position_at(now);
+            markers.push(map::Marker {
+                x: x as i32,
+                z: z as i32,
+                colour: map::colour::TRADE,
+                radius: 1,
+            });
+        }
+        for position in active.mining.drone_positions() {
+            markers.push(map::Marker {
+                x: position.x,
+                z: position.z,
+                colour: map::colour::DRONE,
+                radius: 1,
+            });
+        }
+        for flier in &active.mining.fleet.fliers {
+            markers.push(map::Marker {
+                x: flier.position.x,
+                z: flier.position.z,
+                colour: map::colour::FLIER,
+                radius: 1,
+            });
+        }
+        let country = device::Country {
+            world: &active.world,
+            explored: &active.map,
+            centre,
+            markers: &markers,
+        };
+        let pixels = device::render_device(&active.device, &roster, Some(&country));
         let (width, height) = active.renderer.size();
         let panel_width = device::DEVICE_WIDTH as f32 * device::DEVICE_SCALE;
         let panel_height = device::DEVICE_HEIGHT as f32 * device::DEVICE_SCALE;

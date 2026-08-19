@@ -410,6 +410,35 @@ pub fn blit(
     }
 }
 
+/// Draw a hairline frame around a blitted map.
+///
+/// Unexplored ground and a panel's own background are very nearly the same
+/// colour, so without this an inset map reads as a hole rather than a map.
+pub fn frame(
+    panel: &mut [u8],
+    panel_width: u32,
+    edge: u32,
+    left: i32,
+    top: i32,
+    colour: [u8; 4],
+) {
+    let panel_height = panel.len() as i32 / (panel_width as i32 * 4);
+    let edge = edge as i32;
+    for step in -1..=edge {
+        for (x, y) in [
+            (left + step, top - 1),
+            (left + step, top + edge),
+            (left - 1, top + step),
+            (left + edge, top + step),
+        ] {
+            if (0..panel_width as i32).contains(&x) && (0..panel_height).contains(&y) {
+                let at = ((y * panel_width as i32 + x) * 4) as usize;
+                panel[at..at + 4].copy_from_slice(&colour);
+            }
+        }
+    }
+}
+
 /// Every chunk covered by a scan sector, for marking swept ground explored.
 pub fn sector_chunks(sector: vx_agent::Sector) -> impl Iterator<Item = ChunkPos> {
     let (min_x, min_z) = sector.min_column();

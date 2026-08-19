@@ -11,12 +11,14 @@
 //! The compositor knows nothing about what any of it means.
 
 use vx_render::font::{self, LINE_HEIGHT};
+use vx_world::World;
 
+use crate::map::{self, MapState, Marker};
 use crate::mining::{MachineListing, MachineRef};
 
 /// Panel size in texture pixels; drawn at [`DEVICE_SCALE`].
 pub const DEVICE_WIDTH: u32 = 240;
-pub const DEVICE_HEIGHT: u32 = 150;
+pub const DEVICE_HEIGHT: u32 = 166;
 pub const DEVICE_SCALE: f32 = 2.0;
 
 /// The strip along the top of a live feed.
@@ -36,11 +38,26 @@ const BAR_BACK: [u8; 4] = [45, 48, 55, 255];
 const BACKGROUND: [u8; 4] = [10, 12, 16, 235];
 const BANNER_BACK: [u8; 4] = [10, 12, 16, 170];
 
+/// Side of the handheld's map, in panel pixels.
+pub const HANDHELD_MAP: u32 = 120;
+
+/// What the handheld is showing.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    /// The fleet: who is out there and what they are doing.
+    #[default]
+    Fleet,
+    /// The country: where you have been, and everything on it.
+    Map,
+}
+
 /// The handheld's state.
 #[derive(Debug, Default)]
 pub struct Device {
     /// Is the roster panel up?
     pub open: bool,
+    /// Which page it is showing.
+    pub page: Page,
     cursor: usize,
     /// The machine the camera is riding, if any.
     viewing: Option<MachineRef>,
@@ -57,6 +74,15 @@ impl Device {
 
     pub fn open_list(&mut self) {
         self.open = true;
+        self.feedback = None;
+    }
+
+    /// Flip between the fleet roster and the map.
+    pub fn turn_page(&mut self) {
+        self.page = match self.page {
+            Page::Fleet => Page::Map,
+            Page::Map => Page::Fleet,
+        };
         self.feedback = None;
     }
 
@@ -153,7 +179,19 @@ fn draw_bar(
 }
 
 /// Draw the roster panel.
-pub fn render_device(device: &Device, roster: &[MachineListing]) -> Vec<u8> {
+/// What the handheld's map draws over.
+pub struct Country<'a> {
+    pub world: &'a World,
+    pub explored: &'a MapState,
+    pub centre: (i32, i32),
+    pub markers: &'a [Marker],
+}
+
+pub fn render_device(
+    device: &Device,
+    roster: &[MachineListing],
+    country: Option<&Country<'_>>,
+) -> Vec<u8> {
     let mut pixels = vec![0u8; (DEVICE_WIDTH * DEVICE_HEIGHT * 4) as usize];
     for texel in pixels.chunks_exact_mut(4) {
         texel.copy_from_slice(&BACKGROUND);
@@ -161,6 +199,43 @@ pub fn render_device(device: &Device, roster: &[MachineListing]) -> Vec<u8> {
 
     let margin = 6i32;
     let mut y = margin;
+
+    if device.page == Page::Map {
+        font::draw_text(&mut pixels, DEVICE_WIDTH, margin, y, 1, ACCENT, "COUNTRY");
+        y += LINE_HEIGHT as i32 + 2;
+        if let Some(country) = country {
+            // The same picture the corner minimap draws, at the size a
+            // handheld can hold: your machines, the towns you have found, and
+            // the black you have not walked into yet.
+            let inset = map::render_map_sized(
+                country.world,
+                country.explored,
+                country.centre,
+                2,
+                HANDHELD_MAP,
+                country.markers,
+            );
+            let left = (DEVICE_WIDTH as i32 - HANDHELD_MAP as i32) / 2;
+            map::blit(&mut pixels, DEVICE_WIDTH, &inset, HANDHELD_MAP, left, y);
+            map::frame(&mut pixels, DEVICE_WIDTH, HANDHELD_MAP, left, y, DIM);
+            y += HANDHELD_MAP as i32 + 3;
+            let here = format!("{} {}", country.centre.0, country.centre.1);
+            font::draw_text(&mut pixels, DEVICE_WIDTH, margin, y, 1, DIM, &here);
+        } else {
+            font::draw_text(&mut pixels, DEVICE_WIDTH, margin, y, 1, DIM, "NO SIGNAL");
+        }
+        font::draw_text(
+            &mut pixels,
+            DEVICE_WIDTH,
+            margin,
+            DEVICE_HEIGHT as i32 - LINE_HEIGHT as i32 - 2,
+            1,
+            DIM,
+            "TAB TURNS THE PAGE. V CLOSES.",
+        );
+        return pixels;
+    }
+
     font::draw_text(&mut pixels, DEVICE_WIDTH, margin, y, 1, ACCENT, "FLEET UPLINK");
     y += LINE_HEIGHT as i32 + 3;
 
@@ -347,17 +422,17 @@ mod tests {
         device.open_list();
         let roster = roster();
 
-        let a = render_device(&device, &roster);
-        let b = render_device(&device, &roster);
+        let a = render_device(&device, &roster, None);
+        let b = render_device(&device, &roster, None);
         assert_eq!(a.len(), (DEVICE_WIDTH * DEVICE_HEIGHT * 4) as usize);
         assert_eq!(a, b);
 
         // An empty fleet reads differently from a stocked one.
-        assert_ne!(a, render_device(&device, &[]));
+        assert_ne!(a, render_device(&device, &[], None));
 
         // And moving the cursor is visible.
         device.move_cursor(1, roster.len());
-        assert_ne!(a, render_device(&device, &roster));
+        assert_ne!(a, render_device(&device, &roster, None));
     }
 
     #[test]
@@ -398,5 +473,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_handheld_turns_between_the_fleet_and_the_country() {
+        let mut device = Device::new();
+        device.open_list();
+        assert_eq!(device.page, Page::Fleet);
+        device.turn_page();
+        assert_eq!(device.page, Page::Map);
+        device.turn_page();
+        assert_eq!(device.page, Page::Fleet);
+    }
+
+    #[test]
+    fn the_map_page_draws_the_country_and_says_so_without_one() {
+        let mut device = Device::new();
+        device.open_list();
+        device.turn_page();
+
+        let world = World::new(2024);
+        let explored = MapState::new();
+        let markers = [Marker {
+            x: 0,
+            z: 0,
+            colour: map::colour::PLAYER,
+            radius: 2,
+        }];
+        let country = Country {
+            world: &world,
+            explored: &explored,
+            centre: (0, 0),
+            markers: &markers,
+        };
+
+        let drawn = render_device(&device, &[], Some(&country));
+        let blind = render_device(&device, &[], None);
+        assert_ne!(drawn, blind, "the country did not draw");
+        assert_eq!(drawn.len(), (DEVICE_WIDTH * DEVICE_HEIGHT * 4) as usize);
+        // Deterministic, like every other panel.
+        assert_eq!(drawn, render_device(&device, &[], Some(&country)));
+
+        // And the fleet page is a different picture again.
+        let mut fleet = Device::new();
+        fleet.open_list();
+        assert_ne!(drawn, render_device(&fleet, &[], Some(&country)));
     }
 }

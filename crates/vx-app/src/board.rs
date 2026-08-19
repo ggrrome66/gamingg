@@ -514,25 +514,8 @@ pub fn render_board(
         let left = (BOARD_WIDTH as i32 - TRADE_MAP as i32) / 2;
         map::blit(&mut pixels, BOARD_WIDTH, &inset, TRADE_MAP, left, y);
 
-        // A hairline frame, so unexplored ground reads as a map rather than a
-        // hole in the panel — the two are very nearly the same colour.
-        let edge = TRADE_MAP as i32;
-        for step in -1..=edge {
-            for (fx, fy) in [
-                (left + step, y - 1),
-                (left + step, y + edge),
-                (left - 1, y + step),
-                (left + edge, y + step),
-            ] {
-                if (0..BOARD_WIDTH as i32).contains(&fx)
-                    && (0..BOARD_HEIGHT as i32).contains(&fy)
-                {
-                    let at = ((fy * BOARD_WIDTH as i32 + fx) * 4) as usize;
-                    pixels[at..at + 4].copy_from_slice(&DIM);
-                }
-            }
-        }
-        y += edge + 3;
+        map::frame(&mut pixels, BOARD_WIDTH, TRADE_MAP, left, y, DIM);
+        y += TRADE_MAP as i32 + 3;
 
         let name = runs
             .iter()
