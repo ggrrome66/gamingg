@@ -81,7 +81,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 6.5 | `229a299` | Starting village, villagers, trading shop, trees |
 | 7 | `42fb8ab` | Third person, drone piloting, NPC senses |
 | 8 | `f050c16` | Day/night, container towns on a lattice, the beacon network |
-| 9a | `7dcff15` | Residency pinning, content hashes, the command journal, seed tree, body ids, a real crew |
+| 9a | `b77aedc` | Residency pinning, content hashes, the command journal, seed tree, body ids, a real crew, 8-byte packed quads |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -163,8 +163,10 @@ That made the round's real idea safe: agents author almost every block change in
 this game, and they do it deterministically, so the save should record *orders*
 rather than outcomes. The command journal does, and `--replay` rebuilds a world
 from it and checks the result — a determinism oracle covering worldgen, agents
-and editing at once. Also: `SeedPath`, `BodyId` on every chunk key, and a crew
-of drones finally exercising the job board's contention paths.
+and editing at once. Also: `SeedPath`, `BodyId` on every chunk key, a crew of
+drones finally exercising the job board's contention paths, and geometry packed
+from 168 bytes a quad down to 8 — chunk-local, with the vertices synthesised in
+the shader, verified by a byte-identical capture.
 
 ---
 
@@ -196,14 +198,10 @@ per town* — the first thing in the world that is not a pure function of the se
 
 ## Also outstanding from 9a
 
-**Packed chunk-local quads.** Mesh vertices are 36 bytes and carry absolute
-world positions as `f32`, so a merged quad costs 168 bytes and the precision
-wall is baked into the mesh data rather than just the camera. Storing one `u64`
-per quad and synthesising the six vertices in the vertex shader is ~21x less
-geometry memory, removes a buffer per chunk, and opens the floating-origin seam.
-Deferred out of 9a because cross blocks emit diagonal quads that need their own
-encoding, and because it is a renderer change that wants the byte-identical
-frame tests watched closely rather than rushed.
+**Rebasing the floating origin.** Chunk geometry is chunk-local now, so the
+precision wall is out of the mesh data — but nothing shifts the origin as the
+player travels, so the camera still meets it eventually. The seam is open and
+the rebase is a small change on top of it.
 
 **Letting the journal shrink saves.** Region files are still written every save,
 so the journal is currently an oracle rather than a disk win. The keyframe

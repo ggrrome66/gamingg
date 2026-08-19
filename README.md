@@ -43,6 +43,15 @@ Also in: a **crew** of drones instead of one — the job board was built for
 contention and had never run any of it — plus the seed tree and a body id on
 every chunk, so a planet is additive later rather than a rewrite.
 
+And the geometry got twenty-one times smaller. A merged quad used to cost four
+36-byte vertices and six indices; it is now **eight bytes**, with the six
+vertices of its two triangles synthesised in the vertex shader. Positions are
+chunk-local, which also pulls the `f32` precision wall out of the mesh data —
+it was baked into every vertex, so walking far enough would have degraded the
+geometry itself and not just the camera. Verified the only way this can be
+verified: a real town capture through the new path is byte-identical to the
+same capture taken before it.
+
 Before that, stage 8: The sun moves. A day runs twenty real minutes and the light,
 the sky and the fog all turn with it — golden hour, dusk, real dark, dawn —
 with the hour on the HUD and saved beside the world, so you come back to the
@@ -115,7 +124,7 @@ build in it, and it survives quitting — skills included.
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
 | `vx-world` | Chunk storage, worldgen, ore, town lattice, flora, raycast, line of sight, physics, editing, content hashes, saves | Done |
-| `vx-mesh` | Greedy meshing + crossed-quad plants | Done |
+| `vx-mesh` | Greedy meshing + crossed-quad plants, packed into 8-byte quads | Done |
 | `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
 | `vx-app` | Window, walk/fly/third-person camera, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, handheld, beacon board, command journal, `gamingg` binary | Done |
@@ -189,10 +198,12 @@ build in it, and it survives quitting — skills included.
   block edits go through the same path a player's do — but quitting mid-dig
   loses the drone, the job board, the surveys and the base declaration. The
   journal is the obvious way to fix this and does not do it yet.
-- Chunk mesh vertices are 36 bytes each and carry **absolute world positions**
-  as `f32`, so geometry is far fatter than a blocky world needs and the
-  precision wall is baked into the mesh data rather than just the camera. Packed
-  chunk-local quads are the fix and are not done.
+- Chunk geometry is chunk-local now, but nothing yet *rebases* the origin as the
+  player travels, so the camera still walks into `f32` trouble eventually. The
+  seam is open; the rebase is not written.
+- Each chunk carries its own small origin uniform and bind group. Fine at a few
+  hundred chunks; a single buffer with dynamic offsets is the tidier answer if
+  view distances grow.
 - The minimap draws explored-but-unloaded ground from the generator, so your
   edits and mine holes only show on it while their chunks are loaded. The
   trade is that the map stores nothing but the explored set.
