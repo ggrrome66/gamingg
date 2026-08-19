@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use vx_core::{BlockId, BlockRegistry, ChunkPos};
+use vx_core::{BlockId, BlockRegistry, BodyId, ChunkPos};
 
 use crate::chunk::Chunk;
 use crate::storage::{PalettedStorage, StorageError};
@@ -61,9 +61,10 @@ pub enum SaveError {
     Storage(#[from] StorageError),
 }
 
-/// Which region file holds a chunk.
-pub fn region_of(pos: ChunkPos) -> (i32, i32) {
+/// Which region file holds a chunk: its body, and its 32x32 block of chunks.
+pub fn region_of(pos: ChunkPos) -> (BodyId, i32, i32) {
     (
+        pos.body,
         pos.x.div_euclid(REGION_SIZE),
         pos.z.div_euclid(REGION_SIZE),
     )
@@ -145,8 +146,19 @@ impl WorldSave {
         self.root.join("level.vx")
     }
 
-    fn region_path(&self, region: (i32, i32)) -> PathBuf {
-        self.root.join(format!("r.{}.{}.vxr", region.0, region.1))
+    /// Where a region lives on disk.
+    ///
+    /// The flat world keeps the filename it has always had, so every save
+    /// already written still loads; other bodies get their own prefix. A body
+    /// in the *path* rather than inside the file means a region never has to be
+    /// opened to find out which world it belongs to.
+    fn region_path(&self, region: (BodyId, i32, i32)) -> PathBuf {
+        let (body, x, z) = region;
+        if body == BodyId::FLAT_WORLD {
+            self.root.join(format!("r.{x}.{z}.vxr"))
+        } else {
+            self.root.join(format!("b{}.r.{x}.{z}.vxr", body.0))
+        }
     }
 
     /// True when this directory holds a world.
@@ -185,7 +197,7 @@ impl WorldSave {
         }
 
         // Group by region so each file is rewritten once, not once per chunk.
-        let mut by_region: HashMap<(i32, i32), Vec<ChunkPos>> = HashMap::new();
+        let mut by_region: HashMap<(BodyId, i32, i32), Vec<ChunkPos>> = HashMap::new();
         for pos in pending {
             by_region.entry(region_of(pos)).or_default().push(pos);
         }
@@ -224,16 +236,18 @@ impl WorldSave {
             .transpose()
     }
 
-    fn read_region(&self, region: (i32, i32)) -> Result<Region, SaveError> {
+    fn read_region(&self, region: (BodyId, i32, i32)) -> Result<Region, SaveError> {
         let path = self.region_path(region);
         if !path.is_file() {
             return Ok(Region::default());
         }
         let bytes = std::fs::read(&path)?;
-        Region::decode(&bytes)
+        // The body is not stored in the file — the filename carries it — so
+        // decoding has to be told which world these chunks belong to.
+        Region::decode(&bytes, region.0)
     }
 
-    fn write_region(&self, region: (i32, i32), contents: &Region) -> Result<(), SaveError> {
+    fn write_region(&self, region: (BodyId, i32, i32), contents: &Region) -> Result<(), SaveError> {
         write_atomically(&self.region_path(region), &contents.encode())
     }
 }
@@ -285,7 +299,7 @@ impl Region {
         out
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, SaveError> {
+    fn decode(bytes: &[u8], body: BodyId) -> Result<Self, SaveError> {
         let mut reader = Reader::new(bytes);
         reader.expect_magic(REGION_MAGIC, "region")?;
         reader.expect_version()?;
@@ -294,7 +308,7 @@ impl Region {
         let mut region = Region::default();
 
         for _ in 0..count {
-            let pos = ChunkPos::new(reader.i32()?, reader.i32()?);
+            let pos = ChunkPos::in_body(body, reader.i32()?, reader.i32()?);
             let len = reader.u32()?;
             let bits = reader.u32()?;
 
@@ -448,14 +462,14 @@ mod tests {
 
     #[test]
     fn region_grouping_floors_for_negative_chunks() {
-        assert_eq!(region_of(ChunkPos::new(0, 0)), (0, 0));
-        assert_eq!(region_of(ChunkPos::new(31, 31)), (0, 0));
-        assert_eq!(region_of(ChunkPos::new(32, 0)), (1, 0));
+        assert_eq!(region_of(ChunkPos::new(0, 0)), (BodyId::FLAT_WORLD, 0, 0));
+        assert_eq!(region_of(ChunkPos::new(31, 31)), (BodyId::FLAT_WORLD, 0, 0));
+        assert_eq!(region_of(ChunkPos::new(32, 0)), (BodyId::FLAT_WORLD, 1, 0));
         // The bug this guards is the same one as chunk lookup: truncating
         // division would fold -1 and 0 into the same region.
-        assert_eq!(region_of(ChunkPos::new(-1, -1)), (-1, -1));
-        assert_eq!(region_of(ChunkPos::new(-32, 0)), (-1, 0));
-        assert_eq!(region_of(ChunkPos::new(-33, 0)), (-2, 0));
+        assert_eq!(region_of(ChunkPos::new(-1, -1)), (BodyId::FLAT_WORLD, -1, -1));
+        assert_eq!(region_of(ChunkPos::new(-32, 0)), (BodyId::FLAT_WORLD, -1, 0));
+        assert_eq!(region_of(ChunkPos::new(-33, 0)), (BodyId::FLAT_WORLD, -2, 0));
     }
 
     #[test]

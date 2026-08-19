@@ -156,19 +156,14 @@ pub fn home_site() -> TownSite {
     }
 }
 
-/// The splitmix64 finalizer the ore and flora lattices use, mapped to `0..1`.
-/// One stream per property via `salt`.
+/// The shared splitmix64 finaliser, mapped to `0..1`. One stream per property
+/// via `salt`.
 fn hash01(seed: u64, salt: u64, cell_x: i32, cell_z: i32) -> f32 {
-    let mut hash = seed
-        ^ salt
-        ^ (cell_x as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        ^ (cell_z as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
-    hash ^= hash >> 30;
-    hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    hash ^= hash >> 27;
-    hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
-    hash ^= hash >> 31;
-    ((hash >> 40) as f32) / ((1u32 << 24) as f32)
+    crate::seed::unit(crate::seed::finalise(
+        seed ^ salt
+            ^ (cell_x as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ (cell_z as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f),
+    ))
 }
 
 /// The town in one lattice cell, or nothing.

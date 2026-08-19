@@ -13,4 +13,4 @@ pub mod pos;
 pub use block::{BlockDef, BlockId, BlockRegistry, RegistryError, Shape};
 pub use event::{Cancellable, Event, EventBus, Priority, PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_NORMAL};
 pub use face::Face;
-pub use pos::{BlockPos, ChunkPos, LocalPos, CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_VOLUME};
+pub use pos::{BlockPos, BodyId, ChunkPos, LocalPos, CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_VOLUME};

@@ -118,17 +118,12 @@ fn deposit_in_cell(seed: u64, cell_x: i32, cell_y: i32, cell_z: i32) -> Option<D
     // One hash stream per property, so changing the radius range cannot shift
     // where deposits sit.
     let key = |salt: u64| -> f32 {
-        let mut hash = seed
-            ^ salt
-            ^ (cell_x as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
-            ^ (cell_y as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f)
-            ^ (cell_z as i64 as u64).wrapping_mul(0x1656_67b1_9e37_79f9);
-        hash ^= hash >> 30;
-        hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        hash ^= hash >> 27;
-        hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
-        hash ^= hash >> 31;
-        ((hash >> 40) as f32) / ((1u32 << 24) as f32)
+        crate::seed::unit(crate::seed::finalise(
+            seed ^ salt
+                ^ (cell_x as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                ^ (cell_y as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f)
+                ^ (cell_z as i64 as u64).wrapping_mul(0x1656_67b1_9e37_79f9),
+        ))
     };
 
     if key(0x01) > PRESENCE {

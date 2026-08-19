@@ -45,16 +45,11 @@ pub enum TreePart {
 /// The splitmix-style hash the tiles and ore lattice already use, mapped to
 /// `0..1`.
 fn hash01(seed: u64, salt: u64, x: i32, z: i32) -> f32 {
-    let mut hash = seed
-        ^ salt
-        ^ (x as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        ^ (z as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
-    hash ^= hash >> 30;
-    hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    hash ^= hash >> 27;
-    hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
-    hash ^= hash >> 31;
-    ((hash >> 40) as f32) / ((1u32 << 24) as f32)
+    crate::seed::unit(crate::seed::finalise(
+        seed ^ salt
+            ^ (x as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ (z as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f),
+    ))
 }
 
 /// May a tree or tuft stand on this column, given its surface height?

@@ -29,9 +29,32 @@ pub struct BlockPos {
     pub z: i32,
 }
 
+/// Which world a coordinate belongs to.
+///
+/// Today there is exactly one: [`BodyId::FLAT_WORLD`]. It exists now because
+/// it is the one thing that cannot be added later without touching every save
+/// on disk — a chunk key is what a region file is named after, and renaming
+/// those retroactively means migrating worlds. Costing nothing while there is
+/// one world is the whole argument for it.
+///
+/// Later it names a face of a cube-sphere planet, and later still that planet's
+/// place in a seed tree (see [`crate::pos`] and `vx_world::seed`). The flat
+/// world becomes "body zero" rather than a special case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct BodyId(pub u64);
+
+impl BodyId {
+    /// The single world that exists today.
+    pub const FLAT_WORLD: BodyId = BodyId(0);
+}
+
 /// Position of a chunk column on the world grid.
+///
+/// Ordered by body first, so chunks of one world sort together — which is what
+/// keeps a region file's contents contiguous when there is more than one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ChunkPos {
+    pub body: BodyId,
     pub x: i32,
     pub z: i32,
 }
@@ -53,6 +76,7 @@ impl BlockPos {
     /// Which chunk column contains this block.
     pub const fn chunk(self) -> ChunkPos {
         ChunkPos {
+            body: BodyId::FLAT_WORLD,
             x: self.x.div_euclid(CHUNK_SIZE),
             z: self.z.div_euclid(CHUNK_SIZE),
         }
@@ -88,8 +112,22 @@ impl BlockPos {
 }
 
 impl ChunkPos {
+    /// A chunk of the flat world.
+    ///
+    /// Kept two-argument on purpose. Every one of the ~170 call sites in the
+    /// engine means "the world we are in", and making them all say so would be
+    /// churn that obscures the places where the body genuinely matters.
     pub const fn new(x: i32, z: i32) -> Self {
-        ChunkPos { x, z }
+        ChunkPos {
+            body: BodyId::FLAT_WORLD,
+            x,
+            z,
+        }
+    }
+
+    /// A chunk of a named body.
+    pub const fn in_body(body: BodyId, x: i32, z: i32) -> Self {
+        ChunkPos { body, x, z }
     }
 
     /// World position of this chunk's (0, 0, 0) corner.
@@ -286,5 +324,44 @@ mod tests {
         assert!(BlockPos::new(0, 0, 0).in_vertical_bounds());
         assert!(BlockPos::new(0, CHUNK_HEIGHT - 1, 0).in_vertical_bounds());
         assert!(!BlockPos::new(0, CHUNK_HEIGHT, 0).in_vertical_bounds());
+    }
+
+    #[test]
+    fn a_bare_chunk_position_belongs_to_the_flat_world() {
+        // The two-argument constructor is what let ~170 call sites keep
+        // compiling when the body was added; this pins what it means.
+        assert_eq!(ChunkPos::new(3, -4).body, BodyId::FLAT_WORLD);
+        assert_eq!(BlockPos::new(50, 0, -50).chunk().body, BodyId::FLAT_WORLD);
+        assert_eq!(
+            ChunkPos::new(3, -4),
+            ChunkPos::in_body(BodyId::FLAT_WORLD, 3, -4)
+        );
+    }
+
+    #[test]
+    fn the_same_column_of_two_bodies_is_two_different_chunks() {
+        // The whole point: a chunk key names a place *and* a world. Without
+        // this, two planets would share one map of chunks.
+        let here = ChunkPos::in_body(BodyId::FLAT_WORLD, 7, 7);
+        let elsewhere = ChunkPos::in_body(BodyId(1), 7, 7);
+        assert_ne!(here, elsewhere);
+
+        let mut seen = std::collections::HashSet::new();
+        assert!(seen.insert(here));
+        assert!(seen.insert(elsewhere), "two bodies collided on one key");
+    }
+
+    #[test]
+    fn chunks_sort_by_body_before_position() {
+        // Region files hold one body's chunks; sorting body-first is what
+        // keeps them contiguous once there is more than one.
+        let mut positions = [
+            ChunkPos::in_body(BodyId(1), -5, 0),
+            ChunkPos::in_body(BodyId::FLAT_WORLD, 9, 9),
+            ChunkPos::in_body(BodyId(1), -6, 0),
+        ];
+        positions.sort();
+        assert_eq!(positions[0].body, BodyId::FLAT_WORLD);
+        assert_eq!(positions[1], ChunkPos::in_body(BodyId(1), -6, 0));
     }
 }

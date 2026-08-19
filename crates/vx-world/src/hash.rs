@@ -74,7 +74,8 @@ pub fn chunk_hash(chunk: &Chunk, registry: &BlockRegistry) -> u64 {
     // is not the same chunk.
     let mut hash = mix(
         (pos.x as i64 as u64).wrapping_mul(0x2545_f491_4f6c_dd1d)
-            ^ (pos.z as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+            ^ (pos.z as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ pos.body.0,
     );
 
     for (local, id) in chunk.iter_blocks() {
@@ -227,4 +228,5 @@ mod tests {
             "the span straddling two seams was not covered"
         );
     }
+
 }
