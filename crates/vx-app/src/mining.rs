@@ -46,11 +46,9 @@ const PING_SIZE: f32 = 0.5;
 /// Radians per second the drill and rotor turn while working.
 const SPIN_RATE: f32 = 9.0;
 
-/// Drones a dispatch puts on the job by default.
-///
-/// Small enough that a hole still reads as a hole rather than a scrum, big
-/// enough that the job board's claim-and-release paths actually run.
-pub const DEFAULT_CREW: u32 = 3;
+// How many drones a dispatch fields is no longer a constant here: it is
+// whatever the player has bought, and `crate::garage` is the only place that
+// knows.
 
 /// What the player is currently doing with the mining tools.
 #[derive(Debug)]
@@ -76,8 +74,6 @@ pub struct Mining {
     /// Ticks the last `update` turned its elapsed time into. What the command
     /// journal records, because wall time is not reproducible and this is.
     last_ticks: u32,
-    /// Drones a dispatch puts on the job.
-    crew: u32,
     drone_yaws: Vec<f32>,
     flier_yaws: Vec<f32>,
     /// Drill/rotor angle, advanced while machines work.
@@ -130,7 +126,6 @@ impl Default for Mining {
             operation: None,
             pinned: Vec::new(),
             last_ticks: 0,
-            crew: DEFAULT_CREW,
             pending: 0.0,
             fleet: Fleet::default(),
             drone_yaws: Vec::new(),
@@ -210,7 +205,15 @@ impl Mining {
     /// The drone starts at the portal and the stockpile sits there too, so the
     /// haul route is the excavation itself — which is the whole point of
     /// choosing a method the drone can drive.
-    pub fn start(&mut self, world: &mut World) -> Option<MineMethod> {
+    /// Post the selected plan and put the crew you own on it.
+    ///
+    /// `crew` is what the garage says you have bought. Owning none is not a
+    /// silent no-op: the caller reports it, because "I marked a dig and nothing
+    /// happened" is the worst way to learn that machines cost money now.
+    pub fn start(&mut self, world: &mut World, crew: u32) -> Option<MineMethod> {
+        if crew == 0 {
+            return None;
+        }
         let plan = self.plans.get(self.chosen)?.clone();
         let start = vx_agent::settle(world, plan.portal);
 
@@ -226,7 +229,7 @@ impl Mining {
         // A crew, not a single machine. The job board has always been built for
         // contention — claims, releases, nearest-first — and until now exactly
         // one drone ever existed, so none of that ever ran.
-        for _ in 0..self.crew.max(1) {
+        for _ in 0..crew {
             operation.add_drone(start);
         }
         operation.post_plan(&plan);
@@ -318,15 +321,6 @@ impl Mining {
     /// the dispatch, since the plan itself is derivable from it.
     pub fn area(&self) -> Option<VoxelAabb> {
         self.area
-    }
-
-    /// How many drones a dispatch puts on the job.
-    pub fn set_crew(&mut self, crew: u32) {
-        self.crew = crew.max(1);
-    }
-
-    pub fn crew(&self) -> u32 {
-        self.crew
     }
 
     /// Ticks the last [`Mining::update`] ran. Recorded by the journal.

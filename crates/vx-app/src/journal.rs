@@ -46,7 +46,10 @@ use vx_world::World;
 use crate::mining::Mining;
 
 const MAGIC: &[u8; 4] = b"VXLG";
-const VERSION: u32 = 1;
+// Bumped to 2 when a dispatch gained its crew size. A journal is an oracle
+// rather than a load path — region files are still written every save — so an
+// old one being rejected costs a determinism check, not a world.
+const VERSION: u32 = 2;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -66,8 +69,17 @@ pub enum Command {
     /// A block placed by hand. Named, never numbered — block ids shift when a
     /// mod is installed, exactly as the save format has always said.
     Place { at: BlockPos, block: String },
-    /// An excavation ordered: the marked area and the chosen method.
-    Dispatch { area: VoxelAabb, method: MineMethod },
+    /// An excavation ordered: the marked area, the method, and how many drones
+    /// were put on it.
+    ///
+    /// The crew is recorded because it changes the hole. Machines cost credits
+    /// now, so how many you own varies over a session, and a replay that
+    /// guessed would dig a different excavation from the one that happened.
+    Dispatch {
+        area: VoxelAabb,
+        method: MineMethod,
+        crew: u32,
+    },
     /// The plan abandoned.
     Cancel,
     /// Simulation ticks run. The unit of time the log speaks in.
@@ -217,7 +229,7 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, mining: &mut M
                 log::warn!("replay skipped an unknown block {block} at {at:?}");
             }
         }
-        Command::Dispatch { area, method } => {
+        Command::Dispatch { area, method, crew } => {
             mining.mark(world, area.min);
             mining.mark(world, area.max);
             // Select the recorded method rather than trusting the ranking:
@@ -230,7 +242,7 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, mining: &mut M
                 }
                 mining.cycle_method();
             }
-            mining.start(world);
+            mining.start(world, *crew);
         }
         Command::Cancel => mining.cancel(world),
         Command::Advance { ticks } => {
@@ -252,7 +264,7 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             file.write_all(&(block.len() as u32).to_le_bytes())?;
             file.write_all(block.as_bytes())?;
         }
-        Command::Dispatch { area, method } => {
+        Command::Dispatch { area, method, crew } => {
             file.write_all(&[2u8])?;
             write_pos(file, area.min)?;
             write_pos(file, area.max)?;
@@ -261,6 +273,7 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
                 MineMethod::Decline => 1,
                 MineMethod::Pit => 2,
             }])?;
+            file.write_all(&crew.to_le_bytes())?;
         }
         Command::Cancel => file.write_all(&[3u8])?,
         Command::Advance { ticks } => {
@@ -330,6 +343,7 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
                         return Err(std::io::Error::other(format!("unknown method {other}")))
                     }
                 },
+                crew: read_u32(file)?,
             }
         }
         3 => Command::Cancel,
@@ -403,6 +417,7 @@ mod tests {
         let dispatch = Command::Dispatch {
             area,
             method: MineMethod::Pit,
+            crew: 3,
         };
         apply(&dispatch, &mut world, &events, &mut mining);
         journal.record(dispatch);
@@ -445,6 +460,7 @@ mod tests {
         let dispatch = Command::Dispatch {
             area,
             method: MineMethod::Pit,
+            crew: 3,
         };
         apply(&dispatch, &mut world, &events, &mut mining);
         journal.record(dispatch);
@@ -474,6 +490,7 @@ mod tests {
         let dispatch = Command::Dispatch {
             area,
             method: MineMethod::Pit,
+            crew: 3,
         };
         apply(&dispatch, &mut world, &events, &mut mining);
         journal.record(dispatch);
@@ -627,6 +644,7 @@ mod tests {
         let dispatch = Command::Dispatch {
             area,
             method: MineMethod::Pit,
+            crew: 3,
         };
         apply(&dispatch, &mut world, &events, &mut mining);
         journal.record(dispatch);

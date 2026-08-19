@@ -15,6 +15,7 @@ mod clock;
 mod controller;
 mod device;
 mod economy;
+mod garage;
 mod hud;
 mod journal;
 mod map;
@@ -112,7 +113,8 @@ struct Options {
     /// Replay the saved world's command journal and report the ground it
     /// rebuilds, instead of opening a window.
     replay: bool,
-    /// Drones a dispatch puts on the job.
+    /// Drones to grant for free at startup. A development override: in a real
+    /// game you buy them, which is the point of the garage.
     drones: u32,
     /// Frame the capture over the player's shoulder, body in shot.
     third_person: bool,
@@ -144,7 +146,7 @@ fn parse_args() -> Result<Options, String> {
         shop: false,
         board: false,
         replay: false,
-        drones: mining::DEFAULT_CREW,
+        drones: 0,
         third_person: false,
         device: false,
         time: TimeOfDay::START.fraction(),
@@ -237,7 +239,8 @@ fn parse_args() -> Result<Options, String> {
                      --close             frame the first drone up close (with --dig)\n  \
                      --shop              draw the supply shop panel over the capture\n  \
                      --board             draw the beacon console over the capture\n  \
-                     --drones <n>        drones a dispatch puts on the job (default 3)\n  \
+                     --drones <n>        grant this many drones for free (default 0;\n  \
+                                         normally you buy them at the shop)\n  \
                      --replay            replay the saved world's journal and report the\n  \
                                          ground it rebuilds, then exit\n  \
                      --third-person      frame over the player's shoulder, body in shot\n  \
@@ -746,7 +749,9 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         let market = economy::Economy::new()
             .market(&here, 0)
             .clone();
-        let pixels = shop::render_shop(&panel, Some(&pile), &walletbook, &here, &market);
+        let shed = garage::Garage::new();
+        let pixels =
+            shop::render_shop(&panel, Some(&pile), &walletbook, &here, &market, &shed);
         let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
         let panel_height = shop::SHOP_HEIGHT as f32 * shop::SHOP_SCALE;
         renderer.set_overlay(
@@ -932,6 +937,8 @@ struct Active {
     journal: CommandLog,
     /// Town markets: what each place holds, makes and charges.
     economy: economy::Economy,
+    /// The machines the player actually owns.
+    garage: garage::Garage,
     /// The town whose counter is open. `TownSite` is `Copy`, so this can be
     /// taken out and handed to the shop beside a mutable borrow of the books.
     counter: Option<vx_world::town::TownSite>,
@@ -1701,7 +1708,9 @@ impl App {
                     let Some(site) = active.counter else { return };
                     let now = active.journal.tick();
                     let market = active.economy.market_mut(&site, now);
-                    active.shop.confirm(pile, &mut active.wallet, market);
+                    active
+                        .shop
+                        .confirm(pile, &mut active.wallet, market, &mut active.garage);
                 }
                 KeyCode::KeyE | KeyCode::Escape => {
                     active.shop.close();
@@ -1837,16 +1846,21 @@ impl App {
             return;
         }
         let area = active.mining.area();
-        match active.mining.start(&mut active.world) {
+        let crew = active.garage.owned(garage::DRONE);
+        if crew == 0 {
+            active.greeting = Some((
+                "NO DRONES. BUY ONE AT THE SHOP COUNTER".into(),
+                Instant::now(),
+            ));
+            log::info!("no drones owned");
+            return;
+        }
+        match active.mining.start(&mut active.world, crew) {
             Some(method) => {
                 if let Some(area) = area {
-                    active.journal.record(Command::Dispatch { area, method });
+                    active.journal.record(Command::Dispatch { area, method, crew });
                 }
-                log::info!(
-                    "digging: {} with a crew of {}",
-                    method.name(),
-                    active.mining.crew()
-                );
+                log::info!("digging: {} with a crew of {crew}", method.name());
             }
             None => log::info!("nothing marked to dig"),
         }
@@ -2099,7 +2113,14 @@ impl App {
             .map(|base| &base.stockpile);
         let Some(site) = active.counter else { return };
         let market = active.economy.market(&site, active.journal.tick()).clone();
-        let pixels = shop::render_shop(&active.shop, pile, &active.wallet, &site, &market);
+        let pixels = shop::render_shop(
+            &active.shop,
+            pile,
+            &active.wallet,
+            &site,
+            &market,
+            &active.garage,
+        );
         let (width, height) = active.renderer.size();
         let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
         let panel_height = shop::SHOP_HEIGHT as f32 * shop::SHOP_SCALE;
@@ -2360,6 +2381,9 @@ impl App {
         if let Err(error) = active.journal.save(save.root()) {
             log::error!("could not save the command journal: {error}");
         }
+        if let Err(error) = active.garage.save(save.root()) {
+            log::error!("could not save the garage: {error}");
+        }
         match active.economy.save(save.root()) {
             Ok(()) => log::info!("saved {} town markets", active.economy.tracked()),
             Err(error) => log::error!("could not save the town books: {error}"),
@@ -2494,6 +2518,7 @@ impl ApplicationHandler for App {
         let mut ledger = beacon::Ledger::new();
         let mut journal = CommandLog::new();
         let mut economy = economy::Economy::new();
+        let mut garage = garage::Garage::new();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -2502,6 +2527,12 @@ impl ApplicationHandler for App {
             ledger.load(save.root());
             journal = CommandLog::load(save.root());
             economy.load(save.root());
+            garage.load(save.root());
+        }
+        // The dev override starts you with a crew, so the swarm tests and the
+        // capture flags still mean what they meant before machines cost money.
+        if self.crew > 0 {
+            garage.grant(garage::DRONE, self.crew);
         }
 
         self.active = Some(Active {
@@ -2520,7 +2551,6 @@ impl ApplicationHandler for App {
             selected: 0,
             mining: {
                 let mut mining = Mining::default();
-                mining.set_crew(self.crew);
                 mining.ensure_flier(camera.position);
                 mining
             },
@@ -2547,6 +2577,7 @@ impl ApplicationHandler for App {
             ledger,
             journal,
             economy,
+            garage,
             counter: None,
             console: None,
             // Deliberately absurd, so the first frame always scans.

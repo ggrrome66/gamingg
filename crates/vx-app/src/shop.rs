@@ -16,6 +16,7 @@ use vx_render::font::{self, LINE_HEIGHT};
 use vx_world::town::TownSite;
 
 use crate::economy::{self, Market};
+use crate::garage::{self, Garage};
 use crate::wallet::{self, Wallet};
 
 /// Panel size in texture pixels; displayed at [`SHOP_SCALE`].
@@ -52,6 +53,8 @@ pub enum Row {
     Sell(String),
     /// Buy one level of this upgrade line.
     Buy(&'static str),
+    /// Buy a machine. The reason to mine at all.
+    BuyMachine(&'static str),
 }
 
 /// The shop's interaction state.
@@ -90,6 +93,11 @@ impl Shop {
                 }
             }
         }
+        // Machines first among the buys: they are what the ore is *for*, and a
+        // player who has just sold their first load should see one.
+        for kind in garage::KINDS {
+            rows.push(Row::BuyMachine(kind));
+        }
         for line in [wallet::DRILL, wallet::CARGO] {
             if walletbook.upgrade(line) < wallet::MAX_UPGRADE {
                 rows.push(Row::Buy(line));
@@ -118,6 +126,7 @@ impl Shop {
         pile: Option<&mut Stockpile>,
         walletbook: &mut Wallet,
         market: &mut Market,
+        shed: &mut Garage,
     ) {
         let rows = Shop::rows(pile.as_deref(), walletbook, market);
         let Some(row) = rows.get(self.cursor) else {
@@ -133,6 +142,18 @@ impl Shop {
                 let (sold, earned) = sell_all(pile, walletbook, market, name);
                 self.feedback =
                     Some(format!("SOLD {sold} {} FOR {earned} CR", display_name(name)));
+            }
+            Row::BuyMachine(kind) => {
+                let owned = shed.owned(kind);
+                if shed.buy(walletbook, kind) {
+                    self.feedback = Some(format!(
+                        "{} {} DELIVERED",
+                        garage::display_name(kind),
+                        owned + 1
+                    ));
+                } else {
+                    self.feedback = Some("NOT ENOUGH CR".into());
+                }
             }
             Row::Buy(line) => {
                 if buy(walletbook, line) {
@@ -203,6 +224,7 @@ pub fn render_shop(
     walletbook: &Wallet,
     town: &TownSite,
     market: &Market,
+    shed: &Garage,
 ) -> Vec<u8> {
     let mut pixels = vec![0u8; (SHOP_WIDTH * SHOP_HEIGHT * 4) as usize];
     for texel in pixels.chunks_exact_mut(4) {
@@ -241,6 +263,14 @@ pub fn render_shop(
                 let count = pile.map_or(0, |pile| pile.count(name));
                 let price = sell_price(market, name).unwrap_or(0);
                 format!("SELL {} X{count} AT {price} CR", display_name(name))
+            }
+            Row::BuyMachine(kind) => {
+                let owned = shed.owned(kind);
+                format!(
+                    "BUY {} FOR {} CR - OWN {owned}",
+                    garage::display_name(kind),
+                    garage::cost(kind, owned)
+                )
             }
             Row::Buy(line) => {
                 let next = walletbook.upgrade(line) + 1;
@@ -296,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shelf_lists_priced_goods_and_unbought_upgrades_in_stable_order() {
+    fn the_shelf_lists_goods_then_machines_then_upgrades() {
         let pile = stocked_pile();
         let wallet = Wallet::new();
         let market = market();
@@ -307,6 +337,10 @@ mod tests {
                 Row::Sell("engine:copper_ore".into()),
                 Row::Sell("engine:log".into()),
                 Row::Sell("engine:stone".into()),
+                // Machines before upgrades: they are what the ore is for, and
+                // somebody who has just sold their first load should see one.
+                Row::BuyMachine(garage::DRONE),
+                Row::BuyMachine(garage::FLIER),
                 Row::Buy(wallet::DRILL),
                 Row::Buy(wallet::CARGO),
             ],
@@ -403,7 +437,7 @@ mod tests {
         shop.open_at_counter();
         let mut wallet = Wallet::new();
         // Cursor 0 lands on the first Buy row (no pile rows exist).
-        shop.confirm(None, &mut wallet, &mut market());
+        shop.confirm(None, &mut wallet, &mut market(), &mut Garage::new());
         assert_eq!(shop.feedback.as_deref(), Some("NOT ENOUGH CR"));
     }
 
@@ -430,12 +464,40 @@ mod tests {
         let pile = stocked_pile();
 
         let market = market();
-        let a = render_shop(&shop, Some(&pile), &wallet, &town(), &market);
-        let b = render_shop(&shop, Some(&pile), &wallet, &town(), &market);
+        let a = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new());
+        let b = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new());
         assert_eq!(a.len(), (SHOP_WIDTH * SHOP_HEIGHT * 4) as usize);
         assert_eq!(a, b);
 
-        let empty = render_shop(&shop, None, &wallet, &town(), &market);
+        let empty = render_shop(&shop, None, &wallet, &town(), &market, &Garage::new());
         assert_ne!(a, empty, "an empty shop drew a full shelf");
+    }
+
+    #[test]
+    fn a_machine_can_be_bought_from_the_shelf_and_costs_the_asking_price() {
+        // The loop this whole round exists for: ore becomes credits, credits
+        // become a drone.
+        let mut wallet = Wallet::new();
+        wallet.earn(garage::cost(garage::DRONE, 0));
+        let mut shed = Garage::new();
+        let mut market = market();
+
+        let mut shop = Shop::new();
+        shop.open_at_counter();
+        let rows = Shop::rows(None, &wallet, &market);
+        let at = rows
+            .iter()
+            .position(|row| *row == Row::BuyMachine(garage::DRONE))
+            .expect("no drone on the shelf");
+        shop.move_cursor(at as i32, rows.len());
+
+        shop.confirm(None, &mut wallet, &mut market, &mut shed);
+        assert_eq!(shed.owned(garage::DRONE), 1, "the drone never arrived");
+        assert_eq!(wallet.credits(), 0, "the wrong amount was spent");
+
+        // And a second one is refused, because it costs more than the first.
+        shop.confirm(None, &mut wallet, &mut market, &mut shed);
+        assert_eq!(shed.owned(garage::DRONE), 1, "a drone was bought on credit");
+        assert_eq!(shop.feedback.as_deref(), Some("NOT ENOUGH CR"));
     }
 }
