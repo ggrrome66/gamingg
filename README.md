@@ -70,7 +70,6 @@ foundation is solid rather than being designed around up front.
 - The DRILL tab installs the first module kind you carry into the chosen
   slot; there is no picker yet. With three kinds this is predictable.
 - The bar clips its tail on very long item labels rather than shrinking.
-- The drill's tier and modules are not persisted yet, same as the inventory.
 - A full inventory loses the drop when you mine. There are no dropped-item
   entities yet for it to fall into, and refusing the break would trap the
   player in a hole they cannot dig out of.
