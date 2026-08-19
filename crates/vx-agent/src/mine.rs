@@ -144,6 +144,17 @@ pub struct MinePlan {
 }
 
 impl MinePlan {
+    /// Every box this plan will cut, as one, plus the portal.
+    ///
+    /// The ground an operation running this plan needs resident — see
+    /// [`crate::working_span`], which adds the haul-route margin on top.
+    pub fn span(&self) -> VoxelAabb {
+        self.access
+            .iter()
+            .chain(&self.extraction)
+            .fold(VoxelAabb::single(self.portal), |span, box_| span.union(*box_))
+    }
+
     /// The largest single change in floor height between consecutive access
     /// steps.
     ///

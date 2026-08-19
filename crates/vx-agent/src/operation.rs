@@ -67,6 +67,28 @@ pub enum RunOutcome {
     OutOfTicks,
 }
 
+/// How far outside its excavation an operation reads the world.
+///
+/// The widest read is the haul route home, whose flow field is built over
+/// `VoxelAabb::new(drone_position, home).expanded(12)`. Anything inside this
+/// margin of the excavation-plus-home box may be consulted, so anything inside
+/// it must be real ground rather than the air an unloaded chunk reports.
+pub const WORK_MARGIN: i32 = 12;
+
+/// The block box an operation over `region`, hauling to `home`, will read.
+///
+/// Pin this before dispatching (see `World::pin_span`). Reading unloaded ground
+/// is not unsafe — it reports air, and a drone conservatively refuses to drive
+/// onto ground it cannot see — but it makes the drone's decisions depend on
+/// which chunks are resident, and residency follows the player's camera. Pinned,
+/// the same dispatch produces the same excavation however the player wandered.
+pub fn working_span(region: VoxelAabb, home: BlockPos) -> VoxelAabb {
+    region
+        .union(VoxelAabb::single(home))
+        .expanded(WORK_MARGIN)
+        .clamped_to_world()
+}
+
 /// A mining operation: the work, the drones doing it, and the pile it feeds.
 #[derive(Debug)]
 pub struct Operation {
@@ -871,6 +893,73 @@ mod tests {
             "the veto was ignored and the drone dug anyway"
         );
         assert_eq!(site.operation.accounted_blocks(), 0);
+    }
+
+    /// Dig a fixed body in a *generated* world, having loaded `resident`
+    /// chunks around the origin up front, and report what the ground looks
+    /// like afterwards.
+    ///
+    /// The point of the parameter is that it should not matter. Pinning loads
+    /// whatever the work needs; `resident` only changes how much was already
+    /// there when the job was dispatched — which, in the running game, is
+    /// decided by where the player happened to be standing.
+    fn dig_with_residency(resident: i32) -> (u64, u64, BlockPos) {
+        let mut world = World::new(2024);
+        world.load_around(vx_core::ChunkPos::new(0, 0), resident);
+
+        // A body a few blocks under the surface, in real generated terrain.
+        let ground = world.generator().height_at(4, 4);
+        let body = VoxelAabb::new(
+            BlockPos::new(2, ground - 7, 2),
+            BlockPos::new(5, ground - 5, 5),
+        );
+
+        // Planning reads the world, so the ground it reads must be resident
+        // first — exactly as `Mining::mark` now does.
+        let scouted = crate::working_span(body, body.min);
+        world.pin_span(scouted.min, scouted.max);
+
+        let plan = mine::plan(&world, body, 3, MineMethod::Pit)
+            .expect("no pit plan for this body");
+        let start = flow::settle(&world, plan.portal);
+        let span = crate::working_span(plan.span(), start);
+        world.pin_span(span.min, span.max);
+
+        let mut operation = Operation::new(start);
+        operation.add_drone(start);
+        operation.post_plan(&plan);
+
+        let events = EventBus::new();
+        for _ in 0..1_500 {
+            operation.tick(&mut world, &events);
+        }
+
+        (
+            vx_world::region_hash(&world, span.min, span.max),
+            operation.stockpile.total(),
+            operation.drones[0].position,
+        )
+    }
+
+    #[test]
+    fn an_excavation_is_the_same_however_much_of_the_world_was_resident() {
+        // The gate. `World::block` reports unloaded chunks as air, and agents
+        // read through it, so before pinning a drone's decisions depended on
+        // which chunks the camera happened to have streamed in. Two runs of the
+        // same dispatch could diverge purely because the player stood somewhere
+        // different — not a crash, but the end of any claim that this
+        // simulation is reproducible.
+        //
+        // Pinned, the dispatch is closed over its own ground: the same order
+        // digs the same hole whether the world around it was fully resident or
+        // barely there at all.
+        let barely = dig_with_residency(0);
+        let fully = dig_with_residency(4);
+
+        assert_eq!(
+            barely, fully,
+            "the same excavation came out differently depending on what was loaded"
+        );
     }
 
     #[test]

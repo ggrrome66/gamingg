@@ -1547,7 +1547,7 @@ impl App {
             }
             KeyCode::Backspace => {
                 if let Some(active) = &mut self.active {
-                    active.mining.cancel();
+                    active.mining.cancel(&mut active.world);
                     log::info!("mining plan cancelled");
                 }
             }
@@ -1588,7 +1588,7 @@ impl App {
         ) else {
             return;
         };
-        active.mining.mark(&active.world, hit.block);
+        active.mining.mark(&mut active.world, hit.block);
         match active.mining.status() {
             Some(status) => log::info!("{status}"),
             None => log::info!("marked {:?}; mark a second corner", hit.block),
@@ -1601,7 +1601,7 @@ impl App {
         if active.mining.is_running() {
             return;
         }
-        match active.mining.start(&active.world) {
+        match active.mining.start(&mut active.world) {
             Some(method) => log::info!("digging: {}", method.name()),
             None => log::info!("nothing marked to dig"),
         }

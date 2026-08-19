@@ -65,6 +65,8 @@ pub struct Mining {
     /// The air side: the flier, its surveys, and the base container.
     pub fleet: Fleet,
     /// Nose directions, remembered so parked machines do not twitch.
+    /// Chunks held resident for the running operation, released when it ends.
+    pinned: Vec<vx_core::ChunkPos>,
     drone_yaws: Vec<f32>,
     flier_yaws: Vec<f32>,
     /// Drill/rotor angle, advanced while machines work.
@@ -115,6 +117,7 @@ impl Default for Mining {
             plans: Vec::new(),
             chosen: 0,
             operation: None,
+            pinned: Vec::new(),
             pending: 0.0,
             fleet: Fleet::default(),
             drone_yaws: Vec::new(),
@@ -150,7 +153,7 @@ impl Mining {
     }
 
     /// Add a corner at `pos`, replacing the previous pair once two are down.
-    pub fn mark(&mut self, world: &World, pos: BlockPos) {
+    pub fn mark(&mut self, world: &mut World, pos: BlockPos) {
         if self.operation.is_some() {
             return;
         }
@@ -163,6 +166,15 @@ impl Mining {
 
         if let [first, second] = self.corners[..] {
             let area = VoxelAabb::new(first, second);
+            // Planning reads the world too — it looks for a hillside to drive
+            // into and a grade it can climb — so the ground has to be resident
+            // before it is consulted, not just before a drone drives on it.
+            // Released by `cancel`, or replaced by the plan's own span at
+            // `start`.
+            self.release_ground(world);
+            let scouted = vx_agent::working_span(area, area.min);
+            self.pinned = world.pin_span(scouted.min, scouted.max);
+
             self.area = Some(area);
             self.plans = options(world, area, GRADE);
             self.chosen = 0;
@@ -185,9 +197,17 @@ impl Mining {
     /// The drone starts at the portal and the stockpile sits there too, so the
     /// haul route is the excavation itself — which is the whole point of
     /// choosing a method the drone can drive.
-    pub fn start(&mut self, world: &World) -> Option<MineMethod> {
+    pub fn start(&mut self, world: &mut World) -> Option<MineMethod> {
         let plan = self.plans.get(self.chosen)?.clone();
         let start = vx_agent::settle(world, plan.portal);
+
+        // Hold the ground the drones will read for as long as the job lasts.
+        // Without this a drone near the edge of the loaded set sees air where
+        // there is rock, and the same dispatch digs a different hole depending
+        // on where the player happened to stand while it ran.
+        let span = vx_agent::working_span(plan.span(), start);
+        self.release_ground(world);
+        self.pinned = world.pin_span(span.min, span.max);
 
         let mut operation = Operation::new(start);
         operation.add_drone(start);
@@ -196,10 +216,20 @@ impl Mining {
         Some(plan.method)
     }
 
+    /// Release the ground an operation was holding. Safe to call with nothing
+    /// pinned, which is what makes it safe to call from `cancel`.
+    pub fn release_ground(&mut self, world: &mut World) {
+        let span = std::mem::take(&mut self.pinned);
+        world.unpin_span(&span);
+    }
+
     /// Abandon whatever is marked or running. The hole stays dug, and the
     /// fleet — the flier, its surveys, the base — is not the plan's to throw
     /// away, so it survives.
-    pub fn cancel(&mut self) {
+    pub fn cancel(&mut self, world: &mut World) {
+        // Let the ground go before dropping the state that remembers it, or
+        // the pin outlives the job and streaming can never evict that span.
+        self.release_ground(world);
         let fleet = std::mem::take(&mut self.fleet);
         *self = Mining {
             fleet,
@@ -823,9 +853,9 @@ mod tests {
 
     #[test]
     fn the_first_corner_alone_does_not_make_an_area() {
-        let world = World::new(1);
+        let mut world = World::new(1);
         let mut mining = Mining::default();
-        mining.mark(&world, BlockPos::new(0, 60, 0));
+        mining.mark(&mut world, BlockPos::new(0, 60, 0));
 
         assert!(mining.area.is_none());
         assert!(mining.selected_plan().is_none());
@@ -836,13 +866,13 @@ mod tests {
     #[test]
     fn a_third_mark_starts_a_fresh_area() {
         // Otherwise a mis-click would need a separate cancel key to undo.
-        let world = World::new(1);
+        let mut world = World::new(1);
         let mut mining = Mining::default();
-        mining.mark(&world, BlockPos::new(0, 60, 0));
-        mining.mark(&world, BlockPos::new(3, 63, 3));
+        mining.mark(&mut world, BlockPos::new(0, 60, 0));
+        mining.mark(&mut world, BlockPos::new(3, 63, 3));
         assert!(mining.area.is_some());
 
-        mining.mark(&world, BlockPos::new(10, 60, 10));
+        mining.mark(&mut world, BlockPos::new(10, 60, 10));
         assert!(mining.area.is_none());
         assert_eq!(mining.corners, vec![BlockPos::new(10, 60, 10)]);
     }
@@ -857,12 +887,12 @@ mod tests {
 
     #[test]
     fn cancelling_clears_everything() {
-        let world = World::new(1);
+        let mut world = World::new(1);
         let mut mining = Mining::default();
-        mining.mark(&world, BlockPos::new(0, 60, 0));
-        mining.mark(&world, BlockPos::new(3, 63, 3));
+        mining.mark(&mut world, BlockPos::new(0, 60, 0));
+        mining.mark(&mut world, BlockPos::new(3, 63, 3));
 
-        mining.cancel();
+        mining.cancel(&mut world);
         assert!(mining.area.is_none());
         assert!(mining.objects().is_empty());
         assert!(!mining.is_running());

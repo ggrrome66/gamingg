@@ -42,7 +42,7 @@ pub use flier::{Flier, FlierState, CLEARANCE, DEFAULT_FLIER_CAPACITY};
 pub use flow::{is_standable, settle, FlowField, STEP, UNREACHABLE};
 pub use job::{DroneId, Job, JobBoard, JobId, JobKind};
 pub use mine::{options, plan, propose, MineMethod, MinePlan, PIT_MAX_DEPTH};
-pub use operation::{Operation, RunOutcome, TickReport};
+pub use operation::{working_span, Operation, RunOutcome, TickReport, WORK_MARGIN};
 pub use pilot::{Heading, PilotCommand, PilotReport};
 pub use prospect::{find_body, is_ore, scan_columns, Ping, Sector, SCAN_DEPTH, SECTOR_SIZE};
 pub use stockpile::Stockpile;

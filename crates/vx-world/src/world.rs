@@ -20,6 +20,20 @@ pub struct World {
     /// anything derived from world contents — a consumer stores the count it
     /// built against and rebuilds when it moves. Monotonic, never reset.
     edit_count: u64,
+    /// Chunks something is actively working in, and how many things.
+    ///
+    /// A drone reads the world through [`World::block`], which reports
+    /// unloaded ground as air. That is deliberately conservative — a machine
+    /// will not drive onto ground it cannot see — but it means a drone's
+    /// decisions depend on which chunks happen to be resident, and residency
+    /// follows the camera. Two runs of the same excavation could diverge
+    /// purely because the player stood somewhere different.
+    ///
+    /// Pinning closes that: an operation declares the span it will work in,
+    /// that span is loaded up front, and streaming may not evict it while the
+    /// work lasts. Counted rather than a flag, so overlapping operations
+    /// cannot unpin each other's ground.
+    pinned: HashMap<ChunkPos, u32>,
 }
 
 impl World {
@@ -32,6 +46,7 @@ impl World {
             generator: TerrainGenerator::new(seed, blocks),
             chunks: HashMap::new(),
             edit_count: 0,
+            pinned: HashMap::new(),
         }
     }
 
@@ -118,10 +133,52 @@ impl World {
     pub fn unload_beyond(&mut self, centre: ChunkPos, radius: i32) -> usize {
         let limit = (radius as i64) * (radius as i64);
         let before = self.chunks.len();
+        let pinned = &self.pinned;
         self.chunks.retain(|pos, chunk| {
-            pos.distance_squared(centre) <= limit || chunk.is_modified()
+            pos.distance_squared(centre) <= limit
+                || chunk.is_modified()
+                || pinned.contains_key(pos)
         });
         before - self.chunks.len()
+    }
+
+    /// Load every chunk overlapping a block box and hold it against eviction.
+    ///
+    /// Returns the chunks pinned, which is also the set
+    /// [`World::unpin_span`] must be given to release them. Call this before
+    /// dispatching anything that will read the world inside `min..=max`: what
+    /// it buys is that the work reads real ground rather than the air an
+    /// unloaded chunk reports, and therefore behaves the same however the
+    /// player wandered while it ran.
+    pub fn pin_span(&mut self, min: BlockPos, max: BlockPos) -> Vec<ChunkPos> {
+        let span: Vec<ChunkPos> = crate::hash::chunks_overlapping(min, max).collect();
+        for pos in &span {
+            self.load_chunk(*pos);
+            *self.pinned.entry(*pos).or_insert(0) += 1;
+        }
+        span
+    }
+
+    /// Release a pin taken by [`World::pin_span`]. Unbalanced calls are
+    /// ignored rather than underflowing — losing a pin is recoverable, a panic
+    /// in the middle of a mine is not.
+    pub fn unpin_span(&mut self, span: &[ChunkPos]) {
+        for pos in span {
+            if let Some(count) = self.pinned.get_mut(pos) {
+                *count -= 1;
+                if *count == 0 {
+                    self.pinned.remove(pos);
+                }
+            }
+        }
+    }
+
+    pub fn is_pinned(&self, pos: ChunkPos) -> bool {
+        self.pinned.contains_key(&pos)
+    }
+
+    pub fn pinned_count(&self) -> usize {
+        self.pinned.len()
     }
 
     /// Block at a world position. Unloaded chunks and out-of-bounds heights
@@ -364,5 +421,58 @@ mod tests {
         }
 
         assert_eq!(world.surface_y(500, 500), None, "unloaded columns have no surface");
+    }
+
+    #[test]
+    fn pinned_ground_survives_the_player_walking_away() {
+        // The whole point of pinning: an operation's ground must not be
+        // evicted just because the camera left. Without this a drone would
+        // start reading air where it had been digging rock.
+        let mut world = World::new(2024);
+        let span = world.pin_span(BlockPos::new(0, 0, 0), BlockPos::new(31, 0, 31));
+        assert_eq!(span.len(), 4, "a 32x32 box spans four chunks");
+        assert!(span.iter().all(|pos| world.is_loaded(*pos)));
+
+        // Stream far away. Ordinarily every one of these would go.
+        world.unload_beyond(ChunkPos::new(500, 500), 2);
+        assert!(
+            span.iter().all(|pos| world.is_loaded(*pos)),
+            "streaming evicted ground an operation was working in"
+        );
+
+        world.unpin_span(&span);
+        assert_eq!(world.pinned_count(), 0);
+        world.unload_beyond(ChunkPos::new(500, 500), 2);
+        assert!(
+            span.iter().all(|pos| !world.is_loaded(*pos)),
+            "released ground was still held"
+        );
+    }
+
+    #[test]
+    fn overlapping_operations_cannot_unpin_each_other() {
+        // Counted, not a flag. Two mines sharing a chunk, one finishing, must
+        // not pull the ground out from under the other.
+        let mut world = World::new(2024);
+        let first = world.pin_span(BlockPos::new(0, 0, 0), BlockPos::new(15, 0, 15));
+        let second = world.pin_span(BlockPos::new(8, 0, 8), BlockPos::new(20, 0, 20));
+        let shared = ChunkPos::new(0, 0);
+        assert!(world.is_pinned(shared));
+
+        world.unpin_span(&first);
+        assert!(world.is_pinned(shared), "the surviving operation lost its ground");
+
+        world.unpin_span(&second);
+        assert!(!world.is_pinned(shared));
+    }
+
+    #[test]
+    fn an_unbalanced_release_is_ignored_rather_than_underflowing() {
+        // Losing a pin is recoverable; a panic in the middle of a mine is not.
+        let mut world = World::new(2024);
+        let span = world.pin_span(BlockPos::new(0, 0, 0), BlockPos::new(1, 0, 1));
+        world.unpin_span(&span);
+        world.unpin_span(&span);
+        assert_eq!(world.pinned_count(), 0);
     }
 }
