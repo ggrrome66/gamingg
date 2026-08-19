@@ -67,6 +67,9 @@ pub struct Mining {
     /// Nose directions, remembered so parked machines do not twitch.
     /// Chunks held resident for the running operation, released when it ends.
     pinned: Vec<vx_core::ChunkPos>,
+    /// Ticks the last `update` turned its elapsed time into. What the command
+    /// journal records, because wall time is not reproducible and this is.
+    last_ticks: u32,
     drone_yaws: Vec<f32>,
     flier_yaws: Vec<f32>,
     /// Drill/rotor angle, advanced while machines work.
@@ -118,6 +121,7 @@ impl Default for Mining {
             chosen: 0,
             operation: None,
             pinned: Vec::new(),
+            last_ticks: 0,
             pending: 0.0,
             fleet: Fleet::default(),
             drone_yaws: Vec::new(),
@@ -273,24 +277,6 @@ impl Mining {
             self.spin += elapsed.as_secs_f32() * SPIN_RATE;
         }
 
-        let mut report = FleetReport::default();
-        if self.operation.is_none() {
-            // The fleet still flies with no dig running.
-            self.pending += elapsed.as_secs_f64() * TICK_RATE;
-            let ticks = (self.pending as u32).min(16);
-            self.pending -= f64::from(ticks);
-            self.pending = self.pending.min(1.0);
-            for _ in 0..ticks {
-                self.pilot_sub_tick(world, events);
-                let tick = self.fleet.tick(world, &mut []);
-                report.delivered += tick.delivered;
-                report.sectors_completed += tick.sectors_completed;
-                report.pings_found += tick.pings_found;
-            }
-            self.remember_yaws();
-            return report;
-        }
-
         self.pending += elapsed.as_secs_f64() * TICK_RATE;
         // Cap the catch-up. After a long stall — loading, or a dragged window —
         // running hundreds of ticks in one frame would teleport the drone and
@@ -303,6 +289,45 @@ impl Mining {
         // the very teleport the cap exists to prevent. Time lost to a stall
         // stays lost; the drone simply pauses with the game.
         self.pending = self.pending.min(1.0);
+
+        self.last_ticks = ticks;
+        self.advance(world, events, ticks)
+    }
+
+    /// The marked area, if two corners are down. What the journal records as
+    /// the dispatch, since the plan itself is derivable from it.
+    pub fn area(&self) -> Option<VoxelAabb> {
+        self.area
+    }
+
+    /// Ticks the last [`Mining::update`] ran. Recorded by the journal.
+    pub fn last_ticks(&self) -> u32 {
+        self.last_ticks
+    }
+
+    /// Run exactly `ticks` simulation ticks.
+    ///
+    /// The seam the command log records against. Wall time decides *how many*
+    /// ticks a frame is worth, and that answer depends on frame rate, stalls
+    /// and how long a window was dragged — none of which is reproducible. The
+    /// tick count is. So the log stores ticks and replays through here, and a
+    /// session recorded on a machine managing nine frames a second replays
+    /// identically on one managing three hundred.
+    pub fn advance(&mut self, world: &mut World, events: &EventBus, ticks: u32) -> FleetReport {
+        let mut report = FleetReport::default();
+
+        if self.operation.is_none() {
+            // The fleet still flies with no dig running.
+            for _ in 0..ticks {
+                self.pilot_sub_tick(world, events);
+                let tick = self.fleet.tick(world, &mut []);
+                report.delivered += tick.delivered;
+                report.sectors_completed += tick.sectors_completed;
+                report.pings_found += tick.pings_found;
+            }
+            self.remember_yaws();
+            return report;
+        }
 
         for _ in 0..ticks {
             self.pilot_sub_tick(world, events);

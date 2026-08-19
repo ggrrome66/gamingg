@@ -15,6 +15,7 @@ mod clock;
 mod controller;
 mod device;
 mod hud;
+mod journal;
 mod map;
 mod mining;
 mod rig;
@@ -34,6 +35,7 @@ use rig::Rig;
 use skills::Skills;
 use view::ViewMode;
 use clock::TimeOfDay;
+use journal::{Command, CommandLog};
 use villagers::Villagers;
 use wallet::Wallet;
 
@@ -92,6 +94,9 @@ struct Options {
     shop: bool,
     /// Draw the beacon console open over the capture, with work posted.
     board: bool,
+    /// Replay the saved world's command journal and report the ground it
+    /// rebuilds, instead of opening a window.
+    replay: bool,
     /// Frame the capture over the player's shoulder, body in shot.
     third_person: bool,
     /// Draw the handheld's fleet roster over the capture.
@@ -121,6 +126,7 @@ fn parse_args() -> Result<Options, String> {
         close: false,
         shop: false,
         board: false,
+        replay: false,
         third_person: false,
         device: false,
         time: TimeOfDay::START.fraction(),
@@ -168,6 +174,7 @@ fn parse_args() -> Result<Options, String> {
             "--close" => options.close = true,
             "--shop" => options.shop = true,
             "--board" => options.board = true,
+            "--replay" => options.replay = true,
             "--third-person" => options.third_person = true,
             "--device" => options.device = true,
             "--night" => options.time = TimeOfDay::MIDNIGHT.fraction(),
@@ -207,6 +214,8 @@ fn parse_args() -> Result<Options, String> {
                      --close             frame the first drone up close (with --dig)\n  \
                      --shop              draw the supply shop panel over the capture\n  \
                      --board             draw the beacon console over the capture\n  \
+                     --replay            replay the saved world's journal and report the\n  \
+                                         ground it rebuilds, then exit\n  \
                      --third-person      frame over the player's shoulder, body in shot\n  \
                      --device            draw the handheld fleet roster over the capture\n  \
                      --time <0..1>       hour of the day to light the capture by\n  \
@@ -236,14 +245,90 @@ fn main() {
         }
     };
 
-    let result = match &options.screenshot {
-        Some(path) => run_screenshot(&options, path),
-        None => run_windowed(&options),
+    let result = if options.replay {
+        run_replay(&options)
+    } else {
+        match &options.screenshot {
+            Some(path) => run_screenshot(&options, path),
+            None => run_windowed(&options),
+        }
     };
 
     if let Err(message) = result {
         eprintln!("error: {message}");
         std::process::exit(1);
+    }
+}
+
+/// Replay a saved world's command journal and report what it rebuilds.
+///
+/// The determinism oracle, run from the command line. The journal records
+/// *orders* — mine that area this way, run this many ticks — so replaying it
+/// re-derives every block those orders produced. If the ground it rebuilds
+/// disagrees with the ground on disk, something in worldgen, the agents or the
+/// editing path has stopped being deterministic, and this says so.
+///
+/// Needs no GPU and no window, so it is what CI runs.
+fn run_replay(options: &Options) -> Result<(), String> {
+    let root = vx_platform::paths::saves_dir().join(&options.world);
+    let save = WorldSave::new(&root);
+    if !save.exists() {
+        return Err(format!("no world saved at {}", root.display()));
+    }
+    let seed = save
+        .read_meta()
+        .map_err(|error| format!("could not read {}: {error}", root.display()))?;
+
+    let journal = CommandLog::load(&root);
+    if journal.is_empty() {
+        println!("nothing recorded for {}", root.display());
+    }
+    println!(
+        "replaying {} commands covering ticks {}..{} (seed {seed})",
+        journal.len(),
+        journal.keyframe_tick,
+        journal.tick()
+    );
+
+    let mut world = World::new(seed);
+    let events = EventBus::new();
+    let started = Instant::now();
+    journal::replay(&journal, &mut world, &events);
+    let rebuilt = vx_world::world_hash(&world);
+
+    println!(
+        "rebuilt {} chunks in {:.2}s, hash {rebuilt:#018x}",
+        world.loaded_chunk_count(),
+        started.elapsed().as_secs_f32()
+    );
+
+    // Only a journal that reaches all the way back to an empty world can be
+    // checked against the saved ground; a tail after a keyframe describes only
+    // part of it, and saying so is better than comparing the wrong things.
+    if journal.keyframe_tick != 0 {
+        println!("journal starts from a keyframe at tick {}; nothing to compare against", journal.keyframe_tick);
+        return Ok(());
+    }
+
+    let mut saved = World::new(seed);
+    for pos in world.loaded_chunks().collect::<Vec<_>>() {
+        match save.load_chunk(pos, saved.registry()) {
+            Ok(Some(chunk)) => saved.insert_chunk(chunk),
+            Ok(None) => {
+                saved.load_chunk(pos);
+            }
+            Err(error) => return Err(format!("could not read chunk {pos:?}: {error}")),
+        }
+    }
+    let on_disk = vx_world::world_hash(&saved);
+
+    if on_disk == rebuilt {
+        println!("match: the journal rebuilds the saved world exactly");
+        Ok(())
+    } else {
+        Err(format!(
+            "DIVERGED: saved world hashes {on_disk:#018x}, the journal rebuilds {rebuilt:#018x}"
+        ))
     }
 }
 
@@ -803,6 +888,8 @@ struct Active {
     board: board::Board,
     /// Contracts taken, settled, and towns actually stood in.
     ledger: beacon::Ledger,
+    /// Every order given since the last keyframe, and the clock it is kept in.
+    journal: CommandLog,
     /// The town whose beacon is open, and the work it is broadcasting.
     /// Derived when the console opens, not stored in the world.
     console: Option<(vx_world::town::TownSite, Vec<beacon::Posting>)>,
@@ -1008,6 +1095,13 @@ impl App {
             &active.events,
             std::time::Duration::from_secs_f32(dt),
         );
+        // Ticks, not seconds. How many ticks a frame is worth depends on frame
+        // rate and stalls; how the world evolves across them does not.
+        active
+            .journal
+            .record(Command::Advance {
+                ticks: active.mining.last_ticks(),
+            });
 
         // The fleet's work becomes the player's experience.
         if report.sectors_completed > 0 || report.pings_found > 0 {
@@ -1282,6 +1376,7 @@ impl App {
         match break_block(&mut active.world, &active.events, hit.block) {
             Err(error) => log::debug!("could not break {:?}: {error}", hit.block),
             Ok(_) => {
+                active.journal.record(Command::Break { at: hit.block });
                 let xp = (hardness * skills::MINING_XP_PER_HARDNESS) as u64;
                 if let Some(level) = active.skills.add_xp(skills::MINING, xp) {
                     active.level_up = Some((skills::MINING.to_string(), level, Instant::now()));
@@ -1335,6 +1430,11 @@ impl App {
         );
         // Placing a container declares it the fleet's base.
         if let Ok(position) = result {
+            let name = active.world.registry().get_or_air(block).name.clone();
+            active.journal.record(Command::Place {
+                at: position,
+                block: name,
+            });
             let container = active.world.registry().id_of("engine:container");
             if container == Some(block) {
                 active.mining.fleet.set_base(position);
@@ -1548,6 +1648,7 @@ impl App {
             KeyCode::Backspace => {
                 if let Some(active) = &mut self.active {
                     active.mining.cancel(&mut active.world);
+                    active.journal.record(Command::Cancel);
                     log::info!("mining plan cancelled");
                 }
             }
@@ -1601,8 +1702,14 @@ impl App {
         if active.mining.is_running() {
             return;
         }
+        let area = active.mining.area();
         match active.mining.start(&mut active.world) {
-            Some(method) => log::info!("digging: {}", method.name()),
+            Some(method) => {
+                if let Some(area) = area {
+                    active.journal.record(Command::Dispatch { area, method });
+                }
+                log::info!("digging: {}", method.name());
+            }
             None => log::info!("nothing marked to dig"),
         }
     }
@@ -2049,6 +2156,21 @@ impl App {
         if let Err(error) = active.ledger.save(save.root()) {
             log::error!("could not save the posting ledger: {error}");
         }
+        // The region files above are the keyframe; the journal is everything
+        // ordered since. Both are written every save for now — the journal
+        // earns its keep as a determinism oracle first, and only once it has
+        // been proving itself against real sessions is it worth letting it
+        // *replace* region writes on disk.
+        // Keyframe only once the tail is long enough to be worth bounding.
+        // Regions are written every save regardless, so loading never depends
+        // on the journal — it accumulates alongside as the record `--replay`
+        // checks the simulation against.
+        if active.journal.wants_keyframe() {
+            active.journal.keyframed(vx_world::world_hash(&active.world));
+        }
+        if let Err(error) = active.journal.save(save.root()) {
+            log::error!("could not save the command journal: {error}");
+        }
     }
 
     fn report_framerate(&mut self) {
@@ -2177,12 +2299,14 @@ impl ApplicationHandler for App {
         let mut wallet = Wallet::new();
         let mut clock = TimeOfDay::default();
         let mut ledger = beacon::Ledger::new();
+        let mut journal = CommandLog::new();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
             wallet.load(save.root());
             clock = clock::load(save.root());
             ledger.load(save.root());
+            journal = CommandLog::load(save.root());
         }
 
         self.active = Some(Active {
@@ -2224,6 +2348,7 @@ impl ApplicationHandler for App {
             shop: shop::Shop::new(),
             board: board::Board::new(),
             ledger,
+            journal,
             console: None,
             // Deliberately absurd, so the first frame always scans.
             last_scan: (i32::MAX, i32::MAX),
