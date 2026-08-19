@@ -31,11 +31,193 @@ pub struct Vertex {
     pub tile: u32,
 }
 
+/// One quad, packed into eight bytes.
+///
+/// # Why a quad and not four vertices
+///
+/// A merged quad currently costs four 36-byte vertices and six 4-byte indices —
+/// 168 bytes to say "a rectangle, here, this big, facing this way". But in a
+/// blocky world a quad can only sit on the lattice of its own chunk, span a
+/// whole number of blocks, and face one of six directions, so all of it fits in
+/// a single `u64` with room to spare. The four corners are then synthesised in
+/// the vertex shader from `@builtin(vertex_index)`, which needs no vertex data
+/// and no index buffer at all.
+///
+/// # Chunk-local, which is the other half of the point
+///
+/// Positions are offsets inside the chunk, not world coordinates. Vertices used
+/// to carry `(origin + local) as f32`, which baked the `f32` precision wall
+/// into the mesh data itself — walk far enough from the origin and the geometry
+/// starts falling apart, not just the camera. The chunk's origin now travels
+/// separately, once per chunk instead of once per vertex.
+///
+/// # Layout
+///
+/// ```text
+/// kind:4 | plane:9 | iu:9 | iv:9 | w:9 | h:9 | tile:8   = 57 bits
+/// ```
+///
+/// `kind` 0..=5 is a [`Face`] index and `plane`/`iu`/`iv`/`w`/`h` describe a
+/// merged rectangle in that face's plane. `kind` 6..=9 are the four crossed
+/// quads a plant emits — two diagonals, each with both windings, because the
+/// terrain pipeline culls back faces and a plant must carry its own back. Those
+/// are always one block square, so they reuse `plane`/`iu`/`iv` as x/y/z.
+///
+/// Stored as two `u32`s rather than a `u64`: WGSL has no 64-bit integers
+/// without an optional feature, and eight bytes is eight bytes either way.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
+pub struct PackedQuad {
+    pub low: u32,
+    pub high: u32,
+}
+
+/// The four crossed quads a plant emits, in the order the mesher pushes them.
+pub const CROSS_KINDS: [u32; 4] = [6, 7, 8, 9];
+
+impl PackedQuad {
+    /// Pack a cube face. `plane` is the position along the face's own axis;
+    /// `iu`/`iv` and `w`/`h` are the rectangle in the other two.
+    pub fn face(kind: u32, plane: i32, iu: i32, iv: i32, w: i32, h: i32, tile: u32) -> Self {
+        debug_assert!(kind < 10, "quad kind {kind} is not a face or a cross");
+        let bits = (kind as u64)
+            | ((plane as u64 & 0x1ff) << 4)
+            | ((iu as u64 & 0x1ff) << 13)
+            | ((iv as u64 & 0x1ff) << 22)
+            | ((w as u64 & 0x1ff) << 31)
+            | ((h as u64 & 0x1ff) << 40)
+            | ((tile as u64 & 0xff) << 49);
+        PackedQuad {
+            low: bits as u32,
+            high: (bits >> 32) as u32,
+        }
+    }
+
+    /// Pack one of a plant's crossed quads at a block.
+    pub fn cross(variant: usize, x: i32, y: i32, z: i32, tile: u32) -> Self {
+        PackedQuad::face(CROSS_KINDS[variant], y, x, z, 1, 1, tile)
+    }
+
+    fn bits(self) -> u64 {
+        u64::from(self.low) | (u64::from(self.high) << 32)
+    }
+
+    pub fn kind(self) -> u32 {
+        (self.bits() & 0xf) as u32
+    }
+
+    pub fn plane(self) -> i32 {
+        ((self.bits() >> 4) & 0x1ff) as i32
+    }
+
+    pub fn iu(self) -> i32 {
+        ((self.bits() >> 13) & 0x1ff) as i32
+    }
+
+    pub fn iv(self) -> i32 {
+        ((self.bits() >> 22) & 0x1ff) as i32
+    }
+
+    pub fn width(self) -> i32 {
+        ((self.bits() >> 31) & 0x1ff) as i32
+    }
+
+    pub fn height(self) -> i32 {
+        ((self.bits() >> 40) & 0x1ff) as i32
+    }
+
+    pub fn tile(self) -> u32 {
+        ((self.bits() >> 49) & 0xff) as u32
+    }
+
+    pub fn is_cross(self) -> bool {
+        self.kind() >= 6
+    }
+
+    /// The four corners, in winding order, relative to the chunk origin.
+    ///
+    /// The inverse of packing, and what the vertex shader reimplements. Kept
+    /// here so a test can hold the two to the same answer without a GPU.
+    pub fn corners(self) -> [[f32; 3]; 4] {
+        if self.is_cross() {
+            let (x, y, z) = (self.iu() as f32, self.plane() as f32, self.iv() as f32);
+            let diagonal = if (self.kind() - 6) / 2 == 0 {
+                [
+                    [x, y + 1.0, z],
+                    [x + 1.0, y + 1.0, z + 1.0],
+                    [x + 1.0, y, z + 1.0],
+                    [x, y, z],
+                ]
+            } else {
+                [
+                    [x + 1.0, y + 1.0, z],
+                    [x, y + 1.0, z + 1.0],
+                    [x, y, z + 1.0],
+                    [x + 1.0, y, z],
+                ]
+            };
+            // The odd variant of each pair is the same quad wound backwards.
+            return if (self.kind() - 6).is_multiple_of(2) {
+                diagonal
+            } else {
+                [diagonal[3], diagonal[2], diagonal[1], diagonal[0]]
+            };
+        }
+
+        let face = Face::ALL[self.kind() as usize];
+        let d = face.axis();
+        let u = (d + 1) % 3;
+        let v = (d + 2) % 3;
+        let corner = |a: i32, b: i32| {
+            let mut local = [0i32; 3];
+            local[d] = self.plane();
+            local[u] = a;
+            local[v] = b;
+            [local[0] as f32, local[1] as f32, local[2] as f32]
+        };
+        let (u0, v0) = (self.iu(), self.iv());
+        let (u1, v1) = (u0 + self.width(), v0 + self.height());
+        if face.is_positive() {
+            [
+                corner(u0, v0),
+                corner(u1, v0),
+                corner(u1, v1),
+                corner(u0, v1),
+            ]
+        } else {
+            [
+                corner(u0, v0),
+                corner(u0, v1),
+                corner(u1, v1),
+                corner(u1, v0),
+            ]
+        }
+    }
+
+    /// The outward normal.
+    pub fn normal(self) -> [f32; 3] {
+        if self.is_cross() {
+            // Lit as if lying flat: plants take the ground's light, and neither
+            // diagonal ever shows a dark "back of the leaf".
+            return [0.0, 1.0, 0.0];
+        }
+        Face::ALL[self.kind() as usize].normal()
+    }
+
+    /// The `uv` at each corner, spanning the merged quad in tile units.
+    pub fn uvs(self) -> [[f32; 2]; 4] {
+        let (w, h) = (self.width() as f32, self.height() as f32);
+        [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]]
+    }
+}
+
 /// Renderable geometry for one chunk.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// The same geometry as packed quads, chunk-local.
+    pub quads: Vec<PackedQuad>,
 }
 
 impl Mesh {
@@ -53,7 +235,20 @@ impl Mesh {
     }
 
     /// Append one quad, given its four corners in winding order.
-    fn push_quad(&mut self, corners: [[f32; 3]; 4], normal: [f32; 3], size: [f32; 2], tile: u32) {
+    ///
+    /// Takes the packed form too, and the two are held to the same geometry by
+    /// `packed_quads_reproduce_the_vertex_geometry`. Once the renderer reads
+    /// quads the vertex half goes away; until then both exist so the change can
+    /// be proved before it is relied on.
+    fn push_quad(
+        &mut self,
+        packed: PackedQuad,
+        corners: [[f32; 3]; 4],
+        normal: [f32; 3],
+        size: [f32; 2],
+        tile: u32,
+    ) {
+        self.quads.push(packed);
         let base = self.vertices.len() as u32;
         let [w, h] = size;
         let uvs = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
@@ -154,10 +349,22 @@ fn mesh_cross_blocks(
                         [fx + 1.0, fy, fz],
                     ],
                 ];
-                for corners in diagonals {
-                    mesh.push_quad(corners, up, [1.0, 1.0], tile);
+                for (diagonal, corners) in diagonals.into_iter().enumerate() {
+                    mesh.push_quad(
+                        PackedQuad::cross(diagonal * 2, x, y, z, tile),
+                        corners,
+                        up,
+                        [1.0, 1.0],
+                        tile,
+                    );
                     let reversed = [corners[3], corners[2], corners[1], corners[0]];
-                    mesh.push_quad(reversed, up, [1.0, 1.0], tile);
+                    mesh.push_quad(
+                        PackedQuad::cross(diagonal * 2 + 1, x, y, z, tile),
+                        reversed,
+                        up,
+                        [1.0, 1.0],
+                        tile,
+                    );
                 }
             }
         }
@@ -249,7 +456,21 @@ fn mesh_face_direction(
                 ]
             };
 
-            mesh.push_quad(corners, normal, [w as f32, h as f32], tile);
+            mesh.push_quad(
+                PackedQuad::face(
+                    Face::ALL.iter().position(|other| *other == face).unwrap() as u32,
+                    plane,
+                    iu,
+                    iv,
+                    w,
+                    h,
+                    tile,
+                ),
+                corners,
+                normal,
+                [w as f32, h as f32],
+                tile,
+            );
         });
     }
 }
@@ -623,5 +844,102 @@ mod tests {
                 "index {index} is past the end of the vertex buffer"
             );
         }
+    }
+
+    #[test]
+    fn packed_quads_reproduce_the_vertex_geometry_exactly() {
+        // The gate for replacing vertices with quads. Unpacking a quad has to
+        // give back the same four corners, the same normal and the same uvs the
+        // mesher wrote as vertices — with the chunk origin added back, since
+        // packed positions are chunk-local and vertex positions are not.
+        // All four shapes in one chunk — opaque, translucent, non-solid and a
+        // plant — so every quad kind is exercised. Meshed far from the origin
+        // as well as at it, because chunk-local is the whole point: the packed
+        // form must not know or care where its chunk sits.
+        let f = fixture();
+        let at = |pos: ChunkPos| {
+            let mut chunk = Chunk::empty(pos);
+            for x in 0..4 {
+                for z in 0..4 {
+                    chunk.fill_column(x, z, 0, 3, f.stone);
+                }
+            }
+            chunk.set(local(1, 3, 1), f.glass);
+            chunk.set(local(2, 3, 2), f.water);
+            chunk.set(local(3, 3, 3), f.plant);
+            chunk
+        };
+
+        for pos in [ChunkPos::new(0, 0), ChunkPos::new(1, -2), ChunkPos::new(-16, 32)] {
+            let chunk = at(pos);
+            let corner = pos.origin();
+            let origin = [corner.x, corner.y, corner.z];
+            let mesh = build_mesh(&SoloChunkView(&chunk), &f.registry, origin);
+            assert!(!mesh.quads.is_empty(), "nothing was meshed at {origin:?}");
+            assert_eq!(
+                mesh.quads.len(),
+                mesh.quad_count(),
+                "a quad went missing between the two representations"
+            );
+
+            for (index, quad) in mesh.quads.iter().enumerate() {
+                let corners = quad.corners();
+                let uvs = quad.uvs();
+                let normal = quad.normal();
+                for corner in 0..4 {
+                    let vertex = mesh.vertices[index * 4 + corner];
+                    let expected = [
+                        corners[corner][0] + origin[0] as f32,
+                        corners[corner][1] + origin[1] as f32,
+                        corners[corner][2] + origin[2] as f32,
+                    ];
+                    assert_eq!(
+                        vertex.position, expected,
+                        "quad {index} corner {corner} moved at origin {origin:?}"
+                    );
+                    assert_eq!(vertex.normal, normal, "quad {index} normal");
+                    assert_eq!(vertex.uv, uvs[corner], "quad {index} corner {corner} uv");
+                    assert_eq!(vertex.tile, quad.tile(), "quad {index} tile");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_packed_quad_round_trips_every_field() {
+        // Bit-packing is exactly the kind of code that silently loses the top
+        // of a field, so walk the extremes of each one.
+        for kind in 0..6u32 {
+            for plane in [0, 1, 16, 255, 256] {
+                for (iu, iv, w, h) in [(0, 0, 1, 1), (15, 255, 1, 1), (0, 0, 16, 256)] {
+                    for tile in [0, 1, 26, 255] {
+                        let quad = PackedQuad::face(kind, plane, iu, iv, w, h, tile);
+                        assert_eq!(quad.kind(), kind);
+                        assert_eq!(quad.plane(), plane);
+                        assert_eq!(quad.iu(), iu);
+                        assert_eq!(quad.iv(), iv);
+                        assert_eq!(quad.width(), w);
+                        assert_eq!(quad.height(), h);
+                        assert_eq!(quad.tile(), tile);
+                        assert!(!quad.is_cross());
+                    }
+                }
+            }
+        }
+
+        for variant in 0..4 {
+            let quad = PackedQuad::cross(variant, 15, 200, 3, 12);
+            assert!(quad.is_cross());
+            assert_eq!(quad.tile(), 12);
+            assert_eq!((quad.iu(), quad.plane(), quad.iv()), (15, 200, 3));
+        }
+    }
+
+    #[test]
+    fn a_quad_is_eight_bytes() {
+        // The whole argument. A merged quad used to cost four 36-byte vertices
+        // plus six 4-byte indices.
+        assert_eq!(std::mem::size_of::<PackedQuad>(), 8);
+        assert_eq!(std::mem::size_of::<Vertex>() * 4 + 4 * 6, 168);
     }
 }

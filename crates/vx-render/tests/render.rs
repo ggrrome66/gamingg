@@ -191,6 +191,9 @@ fn facing_quad(z: f32, half_extent: f32, tile: u32) -> vx_mesh::Mesh {
     vx_mesh::Mesh {
         vertices,
         indices: vec![0, 1, 2, 0, 2, 3],
+        // Hand-built geometry for a depth test, not a meshed chunk: it has no
+        // packed form and does not need one.
+        quads: Vec::new(),
     }
 }
 
