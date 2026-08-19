@@ -15,14 +15,20 @@ use vx_agent::Stockpile;
 use vx_render::font::{self, LINE_HEIGHT};
 use vx_world::town::TownSite;
 
+use vx_world::World;
+
 use crate::beacon::{Ledger, Posting, Task};
 use crate::economy::{self, Market};
+use crate::map::{self, MapState, Marker};
 use crate::shop::display_name;
 use crate::wallet::Wallet;
 
 /// Panel size in texture pixels; displayed at [`BOARD_SCALE`].
 pub const BOARD_WIDTH: u32 = 256;
-pub const BOARD_HEIGHT: u32 = 156;
+pub const BOARD_HEIGHT: u32 = 262;
+
+/// Side of the inset trade map, in panel pixels.
+pub const TRADE_MAP: u32 = 96;
 pub const BOARD_SCALE: f32 = 2.0;
 
 const TEXT: [u8; 4] = [235, 235, 235, 255];
@@ -93,13 +99,13 @@ impl Board {
         here: (i32, i32),
         postings: &[Posting],
         ledger: &Ledger,
-        runs: &[(usize, (i32, i32))],
+        runs: &[Run],
     ) -> Vec<Row> {
         let mut rows = Board::postings_rows(here, postings, ledger);
-        for (good, to) in runs {
+        for run in runs {
             rows.push(Row::Ship {
-                good: *good,
-                to: *to,
+                good: run.good,
+                to: run.to,
             });
         }
         rows
@@ -298,15 +304,45 @@ fn settle(
 }
 
 /// Render the panel. Pure in its inputs.
+/// A run this town will pay somebody to carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    pub good: usize,
+    pub to: (i32, i32),
+    /// The destination's name, carried so the panel need not go back to the
+    /// lattice every frame to print it.
+    pub name: String,
+}
+
+/// Where a trade run is going, and what the network has in the air.
+pub struct TradeView<'a> {
+    pub world: &'a World,
+    pub explored: &'a MapState,
+    /// Live caravans, as columns.
+    pub traffic: &'a [(i32, i32)],
+}
+
+/// Everything the town itself contributes to the panel.
+pub struct Counter<'a> {
+    pub here: &'a TownSite,
+    pub postings: &'a [Posting],
+    pub runs: &'a [Run],
+    pub market: &'a Market,
+}
+
 pub fn render_board(
     board: &Board,
-    here: &TownSite,
-    postings: &[Posting],
+    counter: &Counter<'_>,
     ledger: &Ledger,
     walletbook: &Wallet,
-    market: &Market,
-    runs: &[(usize, (i32, i32))],
+    view: Option<&TradeView<'_>>,
 ) -> Vec<u8> {
+    let Counter {
+        here,
+        postings,
+        runs,
+        market,
+    } = *counter;
     let mut pixels = vec![0u8; (BOARD_WIDTH * BOARD_HEIGHT * 4) as usize];
     for texel in pixels.chunks_exact_mut(4) {
         texel.copy_from_slice(&BACKGROUND);
@@ -364,11 +400,13 @@ pub fn render_board(
         }
         // A trade run is not a posting; it draws its own line and moves on.
         if let Row::Ship { good, to } = row {
+            let name = runs
+                .iter()
+                .find(|run| run.good == *good && run.to == *to)
+                .map_or_else(|| format!("{} {}", to.0, to.1), |run| run.name.clone());
             let label = format!(
-                "SHIP {} TO {} {}",
-                crate::shop::display_name(economy::GOODS[*good]),
-                to.0,
-                to.1
+                "SHIP {} TO {name}",
+                crate::shop::display_name(economy::GOODS[*good])
             );
             let colour = if selected { GOOD } else { DIM };
             font::draw_text(&mut pixels, BOARD_WIDTH, margin + 10, y, 1, colour, &label);
@@ -413,6 +451,103 @@ pub fn render_board(
     if let Some(feedback) = &board.feedback {
         y += 3;
         font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, GOOD, feedback);
+        y += LINE_HEIGHT as i32;
+    }
+
+    // The trade map. Centred midway between here and wherever the selected run
+    // is going, zoomed to fit both, and black wherever you have not walked —
+    // which needs no special handling, because the map's marker pass has never
+    // had a visibility test. A destination you have never seen is a pin sitting
+    // in the dark, which is the whole point.
+    if let (Some(view), Some(Row::Ship { to, .. })) = (
+        view,
+        board
+            .selected(&rows)
+            .filter(|row| matches!(row, Row::Ship { .. })),
+    ) {
+        y += 4;
+        let centre = (
+            (here.centre.0 + to.0) / 2,
+            (here.centre.1 + to.1) / 2,
+        );
+        // Enough zoom that both ends sit inside the inset, with a margin.
+        // Rounded *up*: truncating here would leave the destination a few
+        // blocks off the edge of its own map, which is the one thing this
+        // inset exists to show.
+        let span = (here.centre.0 - to.0)
+            .abs()
+            .max((here.centre.1 - to.1).abs());
+        let across = span * 5 / 4;
+        let zoom = ((across + TRADE_MAP as i32 - 1) / TRADE_MAP as i32).max(1);
+
+        let mut markers = vec![
+            Marker {
+                x: here.centre.0,
+                z: here.centre.1,
+                colour: map::colour::TOWN,
+                radius: 2,
+            },
+            Marker {
+                x: to.0,
+                z: to.1,
+                colour: map::colour::CONTRACT,
+                radius: 3,
+            },
+        ];
+        for (x, z) in view.traffic {
+            markers.push(Marker {
+                x: *x,
+                z: *z,
+                colour: map::colour::TRADE,
+                radius: 1,
+            });
+        }
+
+        let inset = map::render_map_sized(
+            view.world,
+            view.explored,
+            centre,
+            zoom,
+            TRADE_MAP,
+            &markers,
+        );
+        let left = (BOARD_WIDTH as i32 - TRADE_MAP as i32) / 2;
+        map::blit(&mut pixels, BOARD_WIDTH, &inset, TRADE_MAP, left, y);
+
+        // A hairline frame, so unexplored ground reads as a map rather than a
+        // hole in the panel — the two are very nearly the same colour.
+        let edge = TRADE_MAP as i32;
+        for step in -1..=edge {
+            for (fx, fy) in [
+                (left + step, y - 1),
+                (left + step, y + edge),
+                (left - 1, y + step),
+                (left + edge, y + step),
+            ] {
+                if (0..BOARD_WIDTH as i32).contains(&fx)
+                    && (0..BOARD_HEIGHT as i32).contains(&fy)
+                {
+                    let at = ((fy * BOARD_WIDTH as i32 + fx) * 4) as usize;
+                    pixels[at..at + 4].copy_from_slice(&DIM);
+                }
+            }
+        }
+        y += edge + 3;
+
+        let name = runs
+            .iter()
+            .find(|run| run.to == to)
+            .map_or_else(|| format!("{} {}", to.0, to.1), |run| run.name.clone());
+        let line = format!("{name} - {}", map::bearing(here.centre, to));
+        font::draw_text(
+            &mut pixels,
+            BOARD_WIDTH,
+            (BOARD_WIDTH as i32 - font::text_width(&line, 1) as i32) / 2,
+            y,
+            1,
+            ACCENT,
+            &line,
+        );
     }
 
     font::draw_text(
@@ -618,8 +753,8 @@ mod tests {
         let mut ledger = Ledger::new();
         ledger.accept(&haul);
 
-        let a = render_board(&board, &home, &postings, &ledger, &wallet, &market, &[]);
-        let b = render_board(&board, &home, &postings, &ledger, &wallet, &market, &[]);
+        let a = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market }, &ledger, &wallet, None);
+        let b = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market }, &ledger, &wallet, None);
         assert_eq!(a.len(), (BOARD_WIDTH * BOARD_HEIGHT * 4) as usize);
         assert_eq!(a, b);
 
@@ -627,7 +762,7 @@ mod tests {
         // pair of coordinates.
         assert!(!ledger.knows(haul.settles_at()));
         ledger.visit(haul.settles_at());
-        let found = render_board(&board, &home, &postings, &ledger, &wallet, &market, &[]);
+        let found = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market }, &ledger, &wallet, None);
         assert_ne!(a, found, "discovering the target left the board unchanged");
     }
 
@@ -756,5 +891,67 @@ mod tests {
         // And with no base at all it reports rather than panics.
         board.ship(&home, crate::economy::ORE, away.centre, None, &mut economy, 0);
         assert_eq!(board.feedback.as_deref(), Some("NO BASE PILE"));
+    }
+
+    #[test]
+    fn selecting_a_trade_run_draws_its_map_and_bearing() {
+        // The console's map only appears for a run, because that is the only
+        // row that has somewhere to point at.
+        let home = town::home_site();
+        let away = frontier()
+            .into_iter()
+            .find(|site| site.centre != home.centre)
+            .expect("the fixture frontier has only one town");
+        let runs = vec![Run {
+            good: economy::ORE,
+            to: away.centre,
+            name: away.name.to_string(),
+        }];
+
+        let world = World::new(2024);
+        let explored = MapState::new();
+        let view = TradeView {
+            world: &world,
+            explored: &explored,
+            traffic: &[],
+        };
+
+        let market = economy::Economy::new().market(&home, 0).clone();
+        let ledger = Ledger::new();
+        let wallet = Wallet::new();
+        let mut board = Board::new();
+        board.open_at_beacon();
+
+        // Put the cursor on the run, which is the last row.
+        let rows = Board::rows_with_runs(home.centre, &[], &ledger, &runs);
+        assert!(matches!(rows.last(), Some(Row::Ship { .. })));
+        board.move_cursor(rows.len() as i32, rows.len());
+
+        let counter = Counter {
+            here: &home,
+            postings: &[],
+            runs: &runs,
+            market: &market,
+        };
+        let with_map = render_board(&board, &counter, &ledger, &wallet, Some(&view));
+        let without = render_board(&board, &counter, &ledger, &wallet, None);
+        assert_ne!(with_map, without, "the trade map did not draw");
+        assert_eq!(
+            with_map.len(),
+            (BOARD_WIDTH * BOARD_HEIGHT * 4) as usize,
+            "the panel changed size"
+        );
+
+        // Deterministic, like every other panel.
+        assert_eq!(
+            with_map,
+            render_board(&board, &counter, &ledger, &wallet, Some(&view))
+        );
+
+        // The destination is unexplored here, so it is a pin in the dark —
+        // which is exactly the paper-map behaviour asked for.
+        assert!(!explored.is_explored(
+            vx_core::BlockPos::new(away.centre.0, 0, away.centre.1).chunk()
+        ));
     }
 }

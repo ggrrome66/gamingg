@@ -76,7 +76,7 @@ const RADIO_RANGE: i32 = 2_000;
 type Console = (
     vx_world::town::TownSite,
     Vec<beacon::Posting>,
-    Vec<(usize, (i32, i32))>,
+    Vec<board::Run>,
 );
 
 /// How near a trade load has to pass before it is drawn as a real machine.
@@ -787,7 +787,44 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         panel.open_at_beacon();
         let market = economy::Economy::new().market(&here, 0).clone();
         let pixels =
-            board::render_board(&panel, &here, &postings, &ledger, &walletbook, &market, &[]);
+            {
+                // A run to somewhere the player has never walked, so the
+                // capture shows the thing worth showing: a pin sitting in the
+                // dark with a bearing under it.
+                let runs: Vec<board::Run> = neighbours
+                    .iter()
+                    .find(|other| other.centre != here.centre)
+                    .map(|target| {
+                        vec![board::Run {
+                            good: economy::ORE,
+                            to: target.centre,
+                            name: target.name.to_string(),
+                        }]
+                    })
+                    .unwrap_or_default();
+                let explored = map::MapState::new();
+                let view = board::TradeView {
+                    world: &world,
+                    explored: &explored,
+                    traffic: &[],
+                };
+                // Cursor onto the run, which is the last row.
+                let rows = board::Board::rows_with_runs(here.centre, &postings, &ledger, &runs);
+                panel.move_cursor(rows.len() as i32, rows.len());
+
+                board::render_board(
+                    &panel,
+                    &board::Counter {
+                        here: &here,
+                        postings: &postings,
+                        runs: &runs,
+                        market: &market,
+                    },
+                    &ledger,
+                    &walletbook,
+                    Some(&view),
+                )
+            };
         let panel_width = board::BOARD_WIDTH as f32 * board::BOARD_SCALE;
         let panel_height = board::BOARD_HEIGHT as f32 * board::BOARD_SCALE;
         renderer.set_overlay(
@@ -1930,7 +1967,11 @@ impl App {
                     else {
                         continue;
                     };
-                    runs.push((good, target.centre));
+                    runs.push(board::Run {
+                        good,
+                        to: target.centre,
+                        name: target.name.to_string(),
+                    });
                 }
                 active.ledger.visit(site.centre);
                 active.console = Some((site, postings, runs));
@@ -2149,15 +2190,33 @@ impl App {
         let Some((here, postings, runs)) = active.console.take() else {
             return;
         };
-        let market = active.economy.market(&here, active.journal.tick()).clone();
+        let now = active.journal.tick();
+        let market = active.economy.market(&here, now).clone();
+        let traffic: Vec<(i32, i32)> = active
+            .economy
+            .shipments()
+            .iter()
+            .map(|load| {
+                let (x, z) = load.position_at(now);
+                (x as i32, z as i32)
+            })
+            .collect();
+        let view = board::TradeView {
+            world: &active.world,
+            explored: &active.map,
+            traffic: &traffic,
+        };
         let pixels = board::render_board(
             &active.board,
-            &here,
-            &postings,
+            &board::Counter {
+                here: &here,
+                postings: &postings,
+                runs: &runs,
+                market: &market,
+            },
             &active.ledger,
             &active.wallet,
-            &market,
-            &runs,
+            Some(&view),
         );
         active.console = Some((here, postings, runs));
         let (width, height) = active.renderer.size();

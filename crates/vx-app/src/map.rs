@@ -274,9 +274,28 @@ pub fn render_map(
     centre: (i32, i32),
     markers: &[Marker],
 ) -> Vec<u8> {
-    let size = MAP_SIZE as i32;
-    let zoom = state.zoom.max(1);
-    let mut pixels = vec![0u8; (MAP_SIZE * MAP_SIZE * 4) as usize];
+    render_map_sized(world, state, centre, state.zoom.max(1), MAP_SIZE, markers)
+}
+
+/// The same picture at any size and zoom.
+///
+/// Panels want a smaller map than the corner minimap does, and a trade console
+/// wants a zoom that fits two towns rather than the player's chosen one. The
+/// fog and marker passes are shared with [`render_map`] — which matters,
+/// because the behaviour a paper map wants is already theirs: unexplored ground
+/// draws as a dark pane and markers stamp over it with no visibility test, so a
+/// pin in the black costs nothing.
+pub fn render_map_sized(
+    world: &World,
+    state: &MapState,
+    centre: (i32, i32),
+    zoom: i32,
+    edge: u32,
+    markers: &[Marker],
+) -> Vec<u8> {
+    let size = edge as i32;
+    let zoom = zoom.max(1);
+    let mut pixels = vec![0u8; (edge * edge * 4) as usize];
 
     // One lattice gather for the whole picture rather than one per pixel.
     let half = size / 2 * zoom;
@@ -328,6 +347,67 @@ pub fn render_map(
     }
 
     pixels
+}
+
+/// The compass point and distance from one column to another: `"NE 1420M"`.
+///
+/// North is -Z, matching the camera's convention, so the eight points read the
+/// way they do on the ground rather than the way they do in the array.
+pub fn bearing(from: (i32, i32), to: (i32, i32)) -> String {
+    let (dx, dz) = ((to.0 - from.0) as f32, (to.1 - from.1) as f32);
+    let distance = (dx * dx + dz * dz).sqrt().round() as i64;
+    if distance == 0 {
+        return "HERE".to_string();
+    }
+
+    // Angle clockwise from north, which is -Z.
+    let angle = dx.atan2(-dz).to_degrees().rem_euclid(360.0);
+    const POINTS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+    // Half a sector of offset, so due north spans 337.5..22.5 rather than
+    // starting at zero and calling anything slightly west of north "NW".
+    let point = POINTS[(((angle + 22.5) / 45.0) as usize) % 8];
+    format!("{point} {distance}M")
+}
+
+/// Paste a square map into a larger panel at `(left, top)`.
+///
+/// Composited source-over rather than copied. Unexplored ground is drawn
+/// *translucent* on purpose — on the corner minimap it hints at the world
+/// behind it — but a panel already has its own background, and copying that
+/// translucency straight in would punch a hole through the panel and show the
+/// game through it. Blending puts the dark pane over the panel's own dark
+/// instead, which is what a paper map should look like.
+pub fn blit(
+    panel: &mut [u8],
+    panel_width: u32,
+    map: &[u8],
+    edge: u32,
+    left: i32,
+    top: i32,
+) {
+    let panel_height = panel.len() as i32 / (panel_width as i32 * 4);
+    for row in 0..edge as i32 {
+        let y = top + row;
+        if !(0..panel_height).contains(&y) {
+            continue;
+        }
+        for column in 0..edge as i32 {
+            let x = left + column;
+            if !(0..panel_width as i32).contains(&x) {
+                continue;
+            }
+            let from = ((row * edge as i32 + column) * 4) as usize;
+            let to = ((y * panel_width as i32 + x) * 4) as usize;
+            let alpha = map[from + 3] as u32;
+            for channel in 0..3 {
+                let over = map[from + channel] as u32 * alpha;
+                let under = panel[to + channel] as u32 * (255 - alpha);
+                panel[to + channel] = ((over + under) / 255) as u8;
+            }
+            // The panel keeps its own opacity; the map never makes it see-through.
+            panel[to + 3] = panel[to + 3].max(map[from + 3]);
+        }
+    }
 }
 
 /// Every chunk covered by a scan sector, for marking swept ground explored.
@@ -544,5 +624,139 @@ mod tests {
         let (wild, _) =
             column_colour(&world, &state, &sites, 120, 0).expect("open ground is unmapped");
         assert_ne!(plot, wild, "a levelled town plot looks like open country");
+    }
+
+    #[test]
+    fn a_small_map_agrees_with_a_big_one_about_what_is_explored() {
+        // The panel maps and the corner minimap must not disagree about where
+        // the black starts, or a pin would sit in a different place on each.
+        let mut world = World::new(2024);
+        world.load_around(ChunkPos::new(0, 0), 1);
+        let mut state = MapState::new();
+        state.explore_around(ChunkPos::new(0, 0), 2);
+
+        let big = render_map_sized(&world, &state, (0, 0), 4, 96, &[]);
+        let small = render_map_sized(&world, &state, (0, 0), 4, 48, &[]);
+
+        // The centre pixel of each covers the same column, so it must match.
+        let centre_of = |pixels: &[u8], edge: u32| {
+            let at = (((edge / 2) * edge + edge / 2) * 4) as usize;
+            [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
+        };
+        assert_eq!(centre_of(&big, 96), centre_of(&small, 48));
+    }
+
+    #[test]
+    fn a_pin_draws_over_unexplored_ground_at_panel_size_too() {
+        // The paper-map behaviour, exercised through the size the console uses.
+        let world = World::new(2024);
+        let state = MapState::new();
+        let edge = 96;
+        let blank = render_map_sized(&world, &state, (4_000, 4_000), 8, edge, &[]);
+        let pinned = render_map_sized(
+            &world,
+            &state,
+            (4_000, 4_000),
+            8,
+            edge,
+            &[Marker {
+                x: 4_000,
+                z: 4_000,
+                colour: colour::CONTRACT,
+                radius: 2,
+            }],
+        );
+        assert_ne!(blank, pinned, "a pin in the black did not draw");
+        let at = (((edge / 2) * edge + edge / 2) * 4) as usize;
+        assert_eq!(&pinned[at..at + 4], &colour::CONTRACT);
+    }
+
+    #[test]
+    fn bearings_read_the_way_they_do_on_the_ground() {
+        // North is -Z, matching the camera.
+        assert!(bearing((0, 0), (0, -100)).starts_with("N "));
+        assert!(bearing((0, 0), (100, 0)).starts_with("E "));
+        assert!(bearing((0, 0), (0, 100)).starts_with("S "));
+        assert!(bearing((0, 0), (-100, 0)).starts_with("W "));
+        assert!(bearing((0, 0), (100, -100)).starts_with("NE "));
+        assert!(bearing((0, 0), (100, 100)).starts_with("SE "));
+        assert!(bearing((0, 0), (-100, 100)).starts_with("SW "));
+        assert!(bearing((0, 0), (-100, -100)).starts_with("NW "));
+
+        // Slightly west of due north is still north, not north-west.
+        assert!(bearing((0, 0), (-5, -100)).starts_with("N "));
+
+        // Distance is Euclidean and rounded.
+        assert_eq!(bearing((0, 0), (300, -400)), "NE 500M");
+        assert_eq!(bearing((10, -10), (10, -10)), "HERE");
+    }
+
+    #[test]
+    fn every_bearing_is_something_the_font_can_draw() {
+        // Panels print these, and a character the font does not know draws as
+        // a filled box.
+        for x in [-1000, -37, 0, 37, 1000] {
+            for z in [-1000, -37, 0, 37, 1000] {
+                let line = bearing((0, 0), (x, z));
+                for character in line.chars() {
+                    assert!(
+                        vx_render::font::knows(character),
+                        "the font cannot draw {character:?} in {line:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blitting_lands_the_map_where_it_was_asked_and_clips_the_rest() {
+        let panel_width = 32u32;
+        let mut panel = vec![0u8; (panel_width * 32 * 4) as usize];
+        let edge = 8u32;
+
+        // An opaque source composites to a straight copy.
+        let mut solid = vec![200u8; (edge * edge * 4) as usize];
+        for texel in solid.chunks_exact_mut(4) {
+            texel[3] = 255;
+        }
+        blit(&mut panel, panel_width, &solid, edge, 4, 6);
+        let at = ((6 * panel_width + 4) * 4) as usize;
+        assert_eq!(panel[at], 200, "the map did not land at its corner");
+        assert_eq!(panel[at + 3], 255);
+        // Just outside it is untouched.
+        let outside = ((5 * panel_width + 4) * 4) as usize;
+        assert_eq!(panel[outside], 0);
+
+        // Hanging off the edge clips rather than panicking.
+        blit(&mut panel, panel_width, &solid, edge, -3, 28);
+        blit(&mut panel, panel_width, &solid, edge, 30, 2);
+    }
+
+    #[test]
+    fn unexplored_ground_blends_into_the_panel_instead_of_holing_it() {
+        // The map draws unexplored ground translucent so the corner minimap
+        // hints at the world behind it. Copying that into a panel would punch
+        // a hole and show the game through the middle of a menu, so the blit
+        // composites and keeps the panel's own opacity.
+        let width = 8u32;
+        let mut panel = vec![0u8; (width * width * 4) as usize];
+        for texel in panel.chunks_exact_mut(4) {
+            texel.copy_from_slice(&[10, 12, 16, 235]);
+        }
+
+        let edge = 4u32;
+        let mut fog = vec![0u8; (edge * edge * 4) as usize];
+        for texel in fog.chunks_exact_mut(4) {
+            // What `render_map_sized` writes for ground nobody has walked.
+            texel.copy_from_slice(&[10, 12, 16, 170]);
+        }
+
+        blit(&mut panel, width, &fog, edge, 0, 0);
+        let at = 0;
+        assert_eq!(&panel[at..at + 3], &[10, 12, 16], "the fog changed colour");
+        assert_eq!(
+            panel[at + 3], 235,
+            "the map made the panel see-through"
+        );
     }
 }
