@@ -168,32 +168,18 @@ fn the_camera_looking_up_sees_only_sky() {
     );
 }
 
-/// Build a quad facing the camera (+Z) at depth `z`, textured with `tile`.
+/// A `PosZ`-facing quad, given chunk-local coordinates and a tile.
 ///
-/// Winding matches what the mesher emits for a `PosZ` face, so this exercises
-/// the same front-face convention the pipeline is configured for.
-fn facing_quad(z: f32, half_extent: f32, tile: u32) -> vx_mesh::Mesh {
-    let (lo, hi) = (-half_extent, half_extent);
-    let corners = [[lo, lo, z], [hi, lo, z], [hi, hi, z], [lo, hi, z]];
-    let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-
-    let vertices = corners
-        .into_iter()
-        .zip(uvs)
-        .map(|(position, uv)| vx_mesh::Vertex {
-            position,
-            normal: [0.0, 0.0, 1.0],
-            uv,
-            tile,
-        })
-        .collect();
-
+/// Uses the same packed form the mesher emits, so this exercises the real
+/// front-face convention and the real vertex-synthesis path. Positions are
+/// relative to the chunk the mesh is uploaded under, which is what decides
+/// where it lands in the world.
+fn facing_quad(plane: i32, iu: i32, iv: i32, w: i32, h: i32, tile: u32) -> vx_mesh::Mesh {
     vx_mesh::Mesh {
-        vertices,
-        indices: vec![0, 1, 2, 0, 2, 3],
-        // Hand-built geometry for a depth test, not a meshed chunk: it has no
-        // packed form and does not need one.
-        quads: Vec::new(),
+        vertices: Vec::new(),
+        indices: Vec::new(),
+        // Kind 5 is PosZ in `Face::ALL` order.
+        quads: vec![vx_mesh::PackedQuad::face(5, plane, iu, iv, w, h, tile)],
     }
 }
 
@@ -213,9 +199,11 @@ fn nearer_geometry_occludes_farther_geometry() {
     // the depth buffer, not visibility.
     renderer.set_culling_enabled(false);
 
-    // Camera at the origin looking down -Z, which is the default orientation.
+    // Looking down -Z, which is the default orientation. Lifted off the floor
+    // because packed quads are chunk-local and unsigned: a chunk's origin has
+    // y = 0, so geometry cannot sit below it.
     let camera = Camera {
-        position: glam::Vec3::ZERO,
+        position: glam::Vec3::new(0.0, 16.0, 0.0),
         yaw: 0.0,
         pitch: 0.0,
         aspect: WIDTH as f32 / HEIGHT as f32,
@@ -223,11 +211,18 @@ fn nearer_geometry_occludes_farther_geometry() {
     };
     renderer.update_camera(&context.queue, &camera);
 
-    // Near: pale sand. Far and larger: near-black bedrock.
-    let near = facing_quad(-5.0, 2.0, vx_render::tiles::slot::SAND);
-    let far = facing_quad(-20.0, 12.0, vx_render::tiles::slot::BEDROCK);
-    renderer.set_chunk_mesh(&context.device, ChunkPos::new(0, 0), &near);
-    renderer.set_chunk_mesh(&context.device, ChunkPos::new(1, 0), &far);
+    // Near: pale sand, small, at z = -5. Far and larger: near-black bedrock at
+    // z = -20. Both straddle the camera's line of sight at (0, 8).
+    //
+    // Chunk (-1, -1) has its corner at (-16, 0, -16) and (-1, -2) at
+    // (-16, 0, -32), so the local coordinates below put the near quad at
+    // x -2..2, y 14..18, z -5 and the far one at x -12..12, y 0..32, z -20.
+    // The far quad reaches well below the near one so the sample further down
+    // the frame lands on it alone.
+    let near = facing_quad(11, 14, 14, 4, 4, vx_render::tiles::slot::SAND);
+    let far = facing_quad(12, 4, 0, 24, 32, vx_render::tiles::slot::BEDROCK);
+    renderer.set_chunk_mesh(&context.device, ChunkPos::new(-1, -1), &near);
+    renderer.set_chunk_mesh(&context.device, ChunkPos::new(-1, -2), &far);
     assert_eq!(renderer.loaded_chunk_count(), 2);
 
     let capture = capture_frame(&context, &renderer, WIDTH, HEIGHT);

@@ -24,7 +24,7 @@ use vx_mesh::Mesh;
 pub use camera::{Camera, CameraUniform};
 pub use frustum::Frustum;
 pub use gpu::{GpuContext, GpuError, WindowSurface, DEPTH_FORMAT};
-pub use mesh_buffer::{ChunkMesh, VERTEX_LAYOUT};
+pub use mesh_buffer::{ChunkMesh, QUAD_LAYOUT, VERTEX_LAYOUT};
 pub use object::{Object, ObjectBatch, ObjectInstance, INSTANCE_LAYOUT};
 pub use overlay::{OverlayPass, OverlayRect, OVERLAY_SLOTS};
 pub use tiles::TileTextures;
@@ -70,6 +70,9 @@ pub const SKY_COLOUR: wgpu::Color = wgpu::Color {
 /// Draws the world.
 pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
+    /// Layout of the per-chunk origin uniform. Chunk meshes build their own
+    /// bind group against it as they are uploaded.
+    chunk_origin_layout: wgpu::BindGroupLayout,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     /// The sun, the sky and the light level. Pushed explicitly — never read
@@ -183,8 +186,22 @@ impl Renderer {
 
         let tiles = TileTextures::new(device, &context.queue);
 
+        // Terrain needs one more group than objects do: the chunk origin its
+        // quads are relative to. Objects carry a full model matrix per
+        // instance and have no chunk.
+        let chunk_origin_layout = ChunkMesh::origin_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("terrain pipeline layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&tiles.bind_group_layout),
+                Some(&sun_layout),
+                Some(&chunk_origin_layout),
+            ],
+            immediate_size: 0,
+        });
+        let object_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("object pipeline layout"),
             bind_group_layouts: &[
                 Some(&camera_layout),
                 Some(&tiles.bind_group_layout),
@@ -199,10 +216,11 @@ impl Renderer {
         // differently from the ground it stands on.
         let build_pipeline = |label: &str,
                               vertex_entry: &str,
-                              buffers: &[wgpu::VertexBufferLayout<'_>]| {
+                              buffers: &[wgpu::VertexBufferLayout<'_>],
+                              layout: &wgpu::PipelineLayout| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&pipeline_layout),
+                layout: Some(layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some(vertex_entry),
@@ -247,17 +265,24 @@ impl Renderer {
             })
         };
 
-        let pipeline = build_pipeline("terrain pipeline", "vs_main", &[VERTEX_LAYOUT]);
+        let pipeline = build_pipeline(
+            "terrain pipeline",
+            "vs_main",
+            &[QUAD_LAYOUT],
+            &pipeline_layout,
+        );
         let object_pipeline = build_pipeline(
             "object pipeline",
             "vs_object",
             &[VERTEX_LAYOUT, INSTANCE_LAYOUT],
+            &object_pipeline_layout,
         );
 
         let depth_view = context.create_depth_view(width, height);
 
         Renderer {
             pipeline,
+            chunk_origin_layout,
             camera_buffer,
             sun_buffer,
             sun_bind_group,
@@ -353,7 +378,14 @@ impl Renderer {
 
     /// Upload (or replace) one chunk's geometry. An empty mesh drops it.
     pub fn set_chunk_mesh(&mut self, device: &wgpu::Device, pos: ChunkPos, mesh: &Mesh) {
-        match ChunkMesh::upload(device, mesh, &format!("chunk {},{}", pos.x, pos.z)) {
+        let corner = pos.origin();
+        match ChunkMesh::upload(
+            device,
+            mesh,
+            &format!("chunk {},{}", pos.x, pos.z),
+            [corner.x as f32, corner.y as f32, corner.z as f32],
+            &self.chunk_origin_layout,
+        ) {
             Some(uploaded) => {
                 self.chunks.insert(pos, uploaded);
             }

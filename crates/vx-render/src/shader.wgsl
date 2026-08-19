@@ -24,6 +24,25 @@ struct Sun {
 
 @group(2) @binding(0) var<uniform> sun: Sun;
 
+// Where this chunk's (0,0,0) corner sits. Quad positions are chunk-local, so
+// this is added once per vertex here instead of being baked into every one of
+// them on the CPU — which is what keeps geometry out of the f32 precision wall
+// far from the origin.
+@group(3) @binding(0) var<uniform> chunk_origin: vec4<f32>;
+
+// One instance per quad, eight bytes:
+//   kind:4 | plane:9 | iu:9 | iv:9 | w:9 | h:9 | tile:8
+// There is no vertex buffer and no index buffer; the six vertices of a quad's
+// two triangles are synthesised from `vertex_index`. Must stay in step with
+// `vx_mesh::PackedQuad`, whose `corners`/`normal`/`uvs` are the same arithmetic
+// on the CPU and are held to it by test.
+struct QuadInput {
+    @location(0) packed: vec2<u32>,
+};
+
+// The object pipeline still draws real vertices: a drone is a handful of
+// cuboids, not a chunk of blocks, so packing buys nothing there and the mesh
+// comes from `object::unit_cube` rather than the greedy mesher.
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -42,15 +61,123 @@ struct VertexOutput {
 };
 
 @vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
+fn vs_main(quad: QuadInput, @builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    let low = quad.packed.x;
+    let high = quad.packed.y;
+
+    let kind = low & 0xfu;
+    let plane = f32((low >> 4u) & 0x1ffu);
+    let iu = f32((low >> 13u) & 0x1ffu);
+    let iv = f32((low >> 22u) & 0x1ffu);
+    // `w` straddles the word boundary: one bit at the top of `low`, eight at
+    // the bottom of `high`.
+    let w = f32(((low >> 31u) & 1u) | ((high & 0xffu) << 1u));
+    let h = f32((high >> 8u) & 0x1ffu);
+    let tile = (high >> 17u) & 0xffu;
+
+    // Two triangles per quad: 0,1,2 and 0,2,3.
+    var winding = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
+    let corner = winding[vertex_index];
+
+    // uv spans the merged quad in tile units, so the sampler's Repeat mode
+    // tiles the texture across it. Indexed by the output corner.
+    var uvs = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(w, 0.0),
+        vec2<f32>(w, h),
+        vec2<f32>(0.0, h),
+    );
+
+    var local = vec3<f32>(0.0, 0.0, 0.0);
+    var normal = vec3<f32>(0.0, 1.0, 0.0);
+
+    if kind >= 6u {
+        // A plant's crossed quads. Always one block square, so plane/iu/iv are
+        // y/x/z. Lit as if lying flat: plants take the ground's light, and
+        // neither diagonal shows a dark "back of the leaf".
+        let x = iu;
+        let y = plane;
+        let z = iv;
+        var first = array<vec3<f32>, 4>(
+            vec3<f32>(x, y + 1.0, z),
+            vec3<f32>(x + 1.0, y + 1.0, z + 1.0),
+            vec3<f32>(x + 1.0, y, z + 1.0),
+            vec3<f32>(x, y, z),
+        );
+        var second = array<vec3<f32>, 4>(
+            vec3<f32>(x + 1.0, y + 1.0, z),
+            vec3<f32>(x, y + 1.0, z + 1.0),
+            vec3<f32>(x, y, z + 1.0),
+            vec3<f32>(x + 1.0, y, z),
+        );
+        let variant = kind - 6u;
+        // The odd variant of each pair is the same quad wound backwards, so a
+        // plant carries its own back under backface culling.
+        var pick = corner;
+        if (variant & 1u) == 1u {
+            pick = 3u - corner;
+        }
+        if variant < 2u {
+            local = first[pick];
+        } else {
+            local = second[pick];
+        }
+    } else {
+        // A merged cube face. `kind` indexes vx_core::Face::ALL, which runs
+        // NegX, PosX, NegY, PosY, NegZ, PosZ — so the axis is kind/2 and the
+        // sign is kind&1.
+        let axis = kind / 2u;
+        let positive = (kind & 1u) == 1u;
+
+        // Counter-clockwise seen from outside; reversed for negative faces,
+        // whose outward direction is the other way along the axis.
+        var forward = array<vec2<f32>, 4>(
+            vec2<f32>(0.0, 0.0),
+            vec2<f32>(w, 0.0),
+            vec2<f32>(w, h),
+            vec2<f32>(0.0, h),
+        );
+        var backward = array<vec2<f32>, 4>(
+            vec2<f32>(0.0, 0.0),
+            vec2<f32>(0.0, h),
+            vec2<f32>(w, h),
+            vec2<f32>(w, 0.0),
+        );
+        var offset = backward[corner];
+        if positive {
+            offset = forward[corner];
+        }
+
+        let a = iu + offset.x;
+        let b = iv + offset.y;
+        // u and v are the two axes after this one, cyclically, matching the
+        // mesher's choice that makes u x v = +axis.
+        if axis == 0u {
+            local = vec3<f32>(plane, a, b);
+            normal = vec3<f32>(1.0, 0.0, 0.0);
+        } else if axis == 1u {
+            local = vec3<f32>(b, plane, a);
+            normal = vec3<f32>(0.0, 1.0, 0.0);
+        } else {
+            local = vec3<f32>(a, b, plane);
+            normal = vec3<f32>(0.0, 0.0, 1.0);
+        }
+        if !positive {
+            normal = -normal;
+        }
+    }
+
+    let world = local + chunk_origin.xyz;
+
     var out: VertexOutput;
-    out.clip_position = camera.view_projection * vec4<f32>(in.position, 1.0);
-    out.normal = in.normal;
-    out.uv = in.uv;
-    out.tile = in.tile;
-    out.world_position = in.position;
+    out.clip_position = camera.view_projection * vec4<f32>(world, 1.0);
+    out.normal = normal;
+    out.uv = uvs[corner];
+    out.tile = tile;
+    out.world_position = world;
     return out;
 }
+
 
 // Per-instance data for objects — drones, markers, anything that is not
 // terrain. A mat4x4 cannot be a single vertex attribute, so it arrives as four
