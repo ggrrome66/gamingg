@@ -264,6 +264,113 @@ the data-driven shape means hostiles slot in later without a rewrite.
 
 ---
 
+## Planned — the world below: caves and bunkers
+
+From concept art supplied for the project: a small civilian bunker interior
+(one room, reinforced doors onto a stairwell, generator and exhaust, breaker
+box, radio bench, a supply shelf and a cot — lived in, untidy) and a large
+industrial complex (silo hall, dome, conveyor ramps, catwalks, a surface
+canopy over a multi-level base). Those are the small and large tiers.
+
+Everything below stays inside the house rules: sited as a pure function of the
+seed, stamped rather than stored, and original in every name and shape.
+
+### Caves
+
+The engine's terrain is a **height field**. `fill_column` (`gen.rs:480`) fills
+one column from bedrock to a surface height, and nothing anywhere carves a hole
+in the middle of it. Caves are therefore the first genuinely **3D** thing
+worldgen has ever done, and that — not the caves themselves — is the cost of
+the stage.
+
+The shape: 3D ridged or Worley noise thresholded into air below the surface,
+evaluated per block, pure in `(seed, x, y, z)` so it stays chunk-parallel and
+needs no cross-chunk context. Masked out of every town footprint
+(`town::footprint_contains`) so a plaza cannot open into a void, and floored
+above bedrock so the world keeps its bottom.
+
+**Why caves are worth doing early:** stage 10a made you hand-mine your way to a
+first drone. A cave is where hand-mining is *pleasant* — ore at the surface of
+a wall rather than under twenty blocks of overburden — so it directly serves the
+opening loop rather than only the late game.
+
+**What caves break, precisely.** `flow::settle` (`flow.rs:56`) walks a drone
+down until it finds solid ground. Carve a void under one and it falls in. The
+mine planners assume a solid column to cut through, and `working_span` pinning
+assumes the ground stays where it was surveyed. None of that is fatal, but all
+of it needs a pass, and pretending otherwise would be how a stage overruns.
+`World::surface_y` is safe — it reads the topmost solid block, so a cave beneath
+does not confuse it.
+
+### Bunkers
+
+**Siting** is the lattice idiom used three times already — ore deposits, trees,
+towns: a jittered cell, splitmix64 per property, a large cell because bunkers
+should be rare. Tier from the same hash, weighted so the big ones are rarer and
+further out. Derived, so a bunker three kilometres away costs nothing until
+somebody goes there, exactly like a town.
+
+**The shell is the interesting part, and the engine already has it.** Blocks
+carry `hardness: Option<f32>` and the drill spends `dt * power / hardness`
+(`main.rs:1535`). Stone is `1.0`. A bunker shell at, say, `400.0` is four
+hundred times slower to cut — perfectly possible, and almost never worth it.
+That is the soft gate asked for, with **no new mechanic at all**: just a block
+with a big number.
+
+It must be `Some(large)` and never `None`. `None` means bedrock — genuinely
+unbreakable — and that would be the wrong answer: the point is that digging in
+is a *choice you can make and usually regret*, not a wall.
+
+**Getting in** is meant to be the door. A bunker breaks the surface with a hatch
+or a stair head, which makes it findable by walking, by the flier's scanner (it
+already sweeps sectors and drops pings — a structure ping is the same
+machinery), and pinnable on the maps 10a just built. A large one is partly
+above ground by design, so it reads as a landmark from a distance; a small one
+you stumble on.
+
+**Interiors** are the reason to finally build the **jigsaw / template-pool**
+generator that has been deferred since stage 8: a start room plus modules
+attached at connection points, drawn from a pool, deterministic from the site
+hash. Rooms are the existing origin-relative ASCII layer blueprints
+(`town/plan.rs`) stamped at a negative height instead of a positive one — the
+same code, a different Y.
+
+**Loot** is a name-keyed table over goods that already exist, plus the ones the
+concept sheet lists: rations, water, spirits, cigarettes, oil, rope, blankets,
+a first aid kit, tools, mechanical and electrical parts. Derived from the site
+hash and consumed through the ledger, exactly as `postings_for` derives a board
+and `Ledger` remembers what was taken — so two visits agree and nothing is
+rolled twice. This also gives the economy a **source** to match the sink stage
+10a added: things you cannot buy, only take.
+
+**Occupants**, the two flavours asked for:
+
+- *Mobs.* A hostile is a drone that walks toward you instead of toward a job.
+  `FlowField`, `is_standable` and `settle` already move a machine through a
+  world, and `Perception` with `sight::obstruction` (stage 7) is already the
+  "can it see you, with rock in between counting" primitive. The movement half
+  is close to free.
+- *Military.* The same movement, carrying the stage 10b weapons, and aligned to
+  something — which is what makes them a faction problem rather than a monster
+  problem.
+
+**The honest sequencing problem:** both flavours attack you, and stage 10b
+deliberately leaves out player health, hostiles and death. So bunkers split in
+two. The **built** half — sited, shelled, entered, laid out, looted — can ship
+as soon as caves have paid for the 3D carve. The **occupied** half waits for
+health, and a bunker without occupants is still worth entering, because the loot
+is the point.
+
+### The three tiers
+
+| Tier | Shape | Reads as |
+|---|---|---|
+| Small | One room off a stairwell: reinforced doors, generator and exhaust, breaker box, radio bench, supply shelf, a cot. Somebody's private shelter, lived in and untidy | A find. Modest loot, a story told by what is on the shelf |
+| Medium | Several rooms off a corridor, its own stairwell and generator room. Military or civilian | A dungeon. Worth clearing, worth coming back for |
+| Large | Multiple levels, a silo hall, a dome, conveyor ramps and catwalks, part of it breaking the surface under a canopy | A landmark you can see from a ridge and plan an expedition to |
+
+---
+
 ## Also outstanding
 
 **Rebasing the floating origin.** Chunk geometry is chunk-local now, so the
@@ -284,14 +391,17 @@ if the traffic it produces reads as dull.
 
 | Stage | What | Why here |
 |---|---|---|
-| 11 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
-| 12 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
-| 13 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
-| 14 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
-| 15 | Hostiles and health | The half of combat 10b leaves out. `Perception` (stage 7) is already the shape a hostile needs, and 10b's bounty contracts are already something for one to take |
-| 16 | Factions and reputation | Bounty (10b) is per-town standing; factions are that standing shared between towns |
-| 17 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
-| 18 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 11 | Caves | The first true 3D carve in a height-field world, and the thing that makes hand-mining pleasant — so it serves the opening loop 10a just built, not only the late game |
+| 12 | Bunkers, built and lootable | Rests on caves paying for the 3D carve. Sited on the same lattice as towns, shelled with a very high `hardness`, laid out by the jigsaw generator deferred since stage 8, and looted — a *source* to match 10a's sink |
+| 13 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
+| 14 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
+| 15 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
+| 16 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
+| 17 | Hostiles and health | The half of combat 10b leaves out. `Perception` (stage 7) is already the shape a hostile needs, and 10b's bounty contracts are already something for one to take |
+| 18 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 17 brings |
+| 19 | Factions and reputation | Bounty (10b) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to |
+| 20 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
+| 21 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## Known rough edges
 
