@@ -17,7 +17,23 @@ art exists.
 
 ## Status
 
-M3 stage 9b is in — **the towns are in business.** Every town keeps books now:
+M3 stage 10a is in, and it started by finding that the game's opening loop was
+not implemented. **Machines are earned now.** A flier used to arrive the moment
+the world opened and a whole crew of drones appeared, free, on every dispatch —
+so there was nothing to mine *for* and the economy had no sink. You keep one
+free starter flier; every drone after that is bought with credits at a shop
+counter, and each one costs half again what the last did. Mine by hand, sell
+your ore, buy your first drone: that is the opening.
+
+**And the maps read like paper maps.** Pick a trade run at a beacon console and
+it draws a map of the route — this town, the destination pinned, live caravans
+crawling between them, and everything you have never walked pitch black — with
+a bearing under it: `IRONREACH - NW 206M`. If you have not been there, it is a
+pin sitting in the dark and you have to go and find it. `Tab` on the handheld
+turns to the same map centred on you, with your machines, the towns you have
+found and the traffic in the air.
+
+Before that, stage 9b — **the towns are in business.** Every town keeps books now:
 a mining camp pulls ore and stone out of the ground and burns through timber, a
 refinery eats that ore and turns out **copper bars** worth far more than what
 went into them, and a depot chews through finished goods and ships them onward.
@@ -152,7 +168,7 @@ build in it, and it survives quitting — skills included.
 | `vx-mesh` | Greedy meshing + crossed-quad plants, packed into 8-byte quads | Done |
 | `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
-| `vx-app` | Window, walk/fly/third-person camera, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, handheld, beacon board, town economy, command journal, `gamingg` binary | Done |
+| `vx-app` | Window, walk/fly/third-person camera, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, garage, handheld, beacon board, town economy, maps, command journal, `gamingg` binary | Done |
 | `vx-agent` | Job board, flow fields, mine planning, scanner, flier + fleet, manual piloting | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
@@ -202,6 +218,16 @@ build in it, and it survives quitting — skills included.
   expire, or be robbed.
 - Villagers do not react to their town's fortunes — a boom town and a starving
   one look identical on the ground.
+- Nothing can be intercepted and nothing shoots: caravans pass overhead
+  untouchable. Weapons, interception and bounty are stage 10b, designed in
+  ROADMAP.
+- The starter flier is free and unlosable, so you can always scan and ferry even
+  with an empty garage and no credits.
+- A damaged `garage.dat` costs you your whole bought fleet. It is the harshest
+  of the tolerant loaders, and the alternative — refusing to open the world — is
+  worse.
+- The console's trade map picks its zoom to fit the route, so a very long run
+  draws a very coarse map.
 - There is no artificial light. Night is genuinely dark outside, and a lamp
   block is the obvious next thing the sun uniform wants.
 - Leaves do not decay when a trunk is felled by the player's drill (drones
@@ -594,10 +620,11 @@ Controls:
 | `1`–`5` | Choose stone, dirt, grass, sand or the base container |
 | `C` | Toggle first person and over-the-shoulder |
 | `V` | Open the handheld fleet uplink (arrows pick) |
+| `Tab` | (in the handheld) Turn between the fleet roster and the map |
 | `Enter` | (in the uplink) Look through the selected machine |
 | `R` | Take or release the master override of what you are watching |
 | `Escape` | (on a feed) Hang up and return to your body |
-| `E` | Trade at the shop counter (arrows pick, `Enter` trades, `E` leaves) |
+| `E` | Trade at the shop counter: sell at that town's prices, buy drones and fliers (arrows pick, `Enter` trades, `E` leaves) |
 | `E` | Read the beacon console at the foot of a radio mast — take work, or sign for a delivery (arrows pick, `Enter` acts, `E` leaves) |
 | `M` | Mark a corner of an ore body (two marks make an area) |
 | `Tab` | Cycle the proposed mining method |
@@ -649,6 +676,12 @@ cargo run --release -p vx-app -- --screenshot town.ppm --at 0,22 --dawn
 
 # the beacon console, work posted and one contract already taken
 cargo run --release -p vx-app -- --screenshot board.ppm --at 0,4 --board
+
+# the console with its trade map: a pin in the dark and a bearing under it
+cargo run --release -p vx-app -- --screenshot console.ppm --at 0,4 --board --height 620
+
+# the handheld's map page
+cargo run --release -p vx-app -- --screenshot handheld.ppm --at 0,10 --handheld-map
 
 # the beacon console, now with the town's prices and what it is short of
 cargo run --release -p vx-app -- --screenshot market.ppm --at 0,4 --board

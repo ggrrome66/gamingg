@@ -82,6 +82,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 7 | `42fb8ab` | Third person, drone piloting, NPC senses |
 | 8 | `f050c16` | Day/night, container towns on a lattice, the beacon network |
 | 9b | `dbfe091` | Town books, moving prices, inter-town freight, player trade runs, copper bars |
+| 10a | `63da370` | Machines cost credits, trade map on the console, handheld map page |
 | 9a | `b77aedc` | Residency pinning, content hashes, the command journal, seed tree, body ids, a real crew, 8-byte packed quads |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
@@ -184,21 +185,82 @@ and many small ones disagree — so the world would otherwise depend on when the
 player happened to look. Two tests hold that line, and both were verified by
 breaking the code and watching them fail.
 
+**10a — The opening loop, and maps worth reading.** Machines were free: a flier
+arrived the moment the world opened and a crew of drones appeared unpaid on
+every dispatch, while the shop sold two capped upgrade lines and nothing else.
+So the economy had no sink and there was nothing to mine *for*. `garage.rs` is
+that sink — machines are name-keyed, cost credits, and each one costs half again
+what the last did. You keep one free starter flier so an empty garage is still
+playable.
+
+The maps turned out to be half built: the minimap has always drawn unexplored
+ground as a dark pane and always stamped markers over it with no visibility
+test. `render_map_sized` makes that picture drawable at panel size, so the
+beacon console can inset a trade map — this town, the destination pinned, live
+caravans, black where nobody has walked — with a bearing under it, and the
+handheld gains a map page on `Tab`.
+
 ---
 
-## In flight — Stage 10: the fuel loop
+## In flight — Stage 10b: the arsenal, and what robbing costs
 
-Machines stop being perpetual. Drones and fliers burn something to work, that
-something has to be made and carried, and running dry somewhere awkward becomes
-a problem you have to go and solve.
+Caravans can be intercepted. Doing it makes you wanted.
 
-It sits here because everything it needs now exists: markets price goods, the
-network moves them, the journal records dispatches, and the beacon posts work. A
-fuel is one more good on an economy that already knows how to make shortages —
-which is the point, because a fuel shortage is the first one that can stop you.
+### The weapon system
 
-Also wanted, from this round's leavings: **journalling the network's dispatch
-windows**, so `--replay` covers the books as well as the ground.
+Three decisions hold the whole arsenal up, and each one is a pattern this engine
+already uses somewhere else.
+
+**Weapons are name-keyed data, not code.** `engine:slug_launcher` with fire
+rate, muzzle speed, damage, spread, ammunition kind and recoil as fields — the
+same shape blocks, skills, upgrade lines and machines all have. Adding a weapon
+is a row and a tile, which is the only way an arsenal stays affordable.
+
+**A projectile is a sum, not a simulation.** Fired from a point at a tick with a
+velocity, so where it is at any later tick is arithmetic — exactly the trick
+trade caravans use. Nothing is stepped, a hundred rounds in the air cost
+nothing, and it replays exactly. Hit detection is the existing `raycast_solid`
+over the segment a round swept since the last frame, so the physics needs
+nothing new.
+
+**Ammunition is a trade good**, which means the economy already knows how to
+make it scarce. A firefight becomes a supply problem, and that is the game this
+wants to be.
+
+### The arsenal to grow into
+
+Named for what they do rather than for anybody's trademark, per the licensing
+constraints above.
+
+| Weapon | Role | Rests on |
+|---|---|---|
+| Slug launcher | The baseline: one kinetic round, slow, punchy | projectiles, damage |
+| Scattergun | Close work, wide spread, falls off hard | the spread field |
+| Mining charge | Thrown, timed, breaks blocks | `break_block`, an area query |
+| Beam cutter | Continuous, no travel time, drains power | a hitscan path, power draw |
+| Rail lance | Long charge, pierces several targets | charge-up state |
+| EMP burst | Drops a drone *without* wrecking its cargo — the thief's weapon | machine state rather than damage |
+| Guided missile | Slow, tracking, expensive | steering, and a reason for countermeasures |
+
+10b ships the slug launcher and the EMP burst. The rest are rows.
+
+### Interception and bounty
+
+A caravan is already drawn as a real machine when one passes within sight, and
+its position is already a pure function of the clock — so shooting one needs no
+new state. Knocked down, its load falls to you.
+
+The town that sent it remembers. Bounty is **economic first**: its market pays
+you less, then refuses to trade, and the shortage you caused drives its own
+prices up. Then its mast starts **posting a contract on your head** through the
+board that already exists — groundwork that bites properly once there is
+somebody to take it.
+
+### What is deliberately not in 10b
+
+Player health, hostile escorts, and death. Nothing shoots back yet. That keeps
+10b to a weapon system and a consequence rather than a whole combat model, and
+the data-driven shape means hostiles slot in later without a rewrite.
 
 ---
 
@@ -222,12 +284,14 @@ if the traffic it produces reads as dull.
 
 | Stage | What | Why here |
 |---|---|---|
-| 11 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
-| 12 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
-| 13 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
-| 14 | Factions, reputation, PvE | Towns and contracts exist by then; `Perception` (stage 7) is already the shape a hostile needs |
-| 15 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
-| 16 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 11 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
+| 12 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
+| 13 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
+| 14 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
+| 15 | Hostiles and health | The half of combat 10b leaves out. `Perception` (stage 7) is already the shape a hostile needs, and 10b's bounty contracts are already something for one to take |
+| 16 | Factions and reputation | Bounty (10b) is per-town standing; factions are that standing shared between towns |
+| 17 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
+| 18 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## Known rough edges
 
