@@ -76,6 +76,13 @@ pub struct HudState {
     pub recipes: Vec<(String, bool)>,
     /// "WALK" or "FLY", for the status block.
     pub mode: &'static str,
+    /// Current stance label while walking ("SPRINT", "SLIDE", ...).
+    pub stance: &'static str,
+    /// Stamina, 0..=stamina_max.
+    pub stamina: f32,
+    pub stamina_max: f32,
+    /// Inventory fullness 0..=1 — the carried-mass fraction.
+    pub load: f32,
     /// Simulation counters. These exist to make the engine's resource
     /// ceilings visible: a limit that is silently absorbed looks identical to
     /// one that is never reached.
@@ -334,6 +341,11 @@ pub fn draw_hud(ui: &mut OverlayBuilder, state: &HudState) {
             "> SIM Q{} U{}",
             state.sim.pending_ticks, state.sim.pending_updates
         ),
+        format!(
+            "> LOAD {:>3.0}% // {}",
+            state.load.clamp(0.0, 1.0) * 100.0,
+            state.stance
+        ),
     ];
     // Backing panel. Dim green on a sunlit hillside is close to invisible, and
     // the readout has to stay legible over whatever the world puts behind it.
@@ -384,10 +396,33 @@ pub fn draw_hud(ui: &mut OverlayBuilder, state: &HudState) {
         ui.text_centred(width / 2.0, height / 2.0 + 14.0 * scale, &text, GREEN);
     }
 
+    draw_stamina(ui, state);
     draw_hotbar(ui, state);
 }
 
 /// The block selector along the bottom.
+/// The stamina bar, drawn only when some has been spent: no chrome when it
+/// is irrelevant, and its appearance is itself the signal.
+fn draw_stamina(ui: &mut OverlayBuilder, state: &HudState) {
+    if state.stamina >= state.stamina_max || state.stamina_max <= 0.0 {
+        return;
+    }
+    let (width, height) = ui.size();
+    let scale = ui.scale();
+    let bar_width = 64.0 * scale;
+    let bar_height = 3.0 * scale;
+    let x = (width - bar_width) / 2.0;
+    let y = height - ui.line_height() - 12.0 * scale;
+
+    let fraction = (state.stamina / state.stamina_max).clamp(0.0, 1.0);
+    // Amber once low: running dry mid-sprint should not be a surprise.
+    let fill = if fraction < 0.25 { ALERT } else { GREEN };
+
+    ui.rect(x, y, bar_width, bar_height, PANEL);
+    ui.rect_outline(x, y, bar_width, bar_height, scale.max(1.0), DIM);
+    ui.rect(x, y, bar_width * fraction, bar_height, fill);
+}
+
 fn draw_hotbar(ui: &mut OverlayBuilder, state: &HudState) {
     if state.hotbar.is_empty() {
         return;
@@ -662,6 +697,8 @@ fn draw_controls(ui: &mut OverlayBuilder, x: f32, mut y: f32) {
         ("WASD", "MOVE"),
         ("SPACE/LSHIFT", "UP / DOWN"),
         ("LCTRL", "SPRINT"),
+        ("C", "CROUCH / SLIDE"),
+        ("Z", "PRONE"),
         ("F", "WALK / FLY"),
         ("MOUSE", "LOOK"),
         ("LMB", "BREAK BLOCK"),
@@ -730,6 +767,10 @@ mod tests {
             inventory_lines: vec!["STONE x12".into()],
             recipes: vec![("3 STONE + 1 COAL = 1 LAMP".into(), true)],
             mode: "WALK",
+            stance: "STAND",
+            stamina: 100.0,
+            stamina_max: 100.0,
+            load: 0.25,
             sim: SimStats::default(),
         }
     }
@@ -869,6 +910,31 @@ mod tests {
         draw_hud(&mut ui, &state);
         // Still drew the status block, just no selector.
         assert!(!ui.is_empty());
+    }
+
+    #[test]
+    fn the_stamina_bar_appears_only_once_stamina_is_spent() {
+        let mut full = ui();
+        draw_hud(&mut full, &state());
+        let quads_full = full.vertices().len();
+
+        let mut spent = ui();
+        let mut halfway = state();
+        halfway.stamina = 50.0;
+        draw_hud(&mut spent, &halfway);
+
+        assert!(
+            spent.vertices().len() > quads_full,
+            "spending stamina added no geometry"
+        );
+
+        // Hostile values draw without panicking and without escaping 0..=1.
+        let mut hostile = state();
+        hostile.stamina = f32::NAN;
+        hostile.stamina_max = 0.0;
+        hostile.load = 99.0;
+        let mut ui_h = ui();
+        draw_hud(&mut ui_h, &hostile);
     }
 
     #[test]

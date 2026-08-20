@@ -76,7 +76,18 @@ foundation is solid rather than being designed around up front.
 - The inventory cannot be rearranged: stacks sit where insertion put them,
   and there is no way to move an item into a specific hotbar slot.
 - Walking cannot step up a full block automatically; jumping is the mechanism.
-  There are no stairs or slabs yet for a lower step to matter.
+  There are no stairs or slabs yet for a lower step to matter (a 0.6 m step
+  height is inert while every block is 1.0 tall; it returns with slabs).
+- Prone has no combat purpose yet — it earns its keep in one-block tunnels,
+  but nothing shoots at you. It stays because removing a stance later is more
+  disruptive than leaving one under-used.
+- The mantle is a fixed interpolation, not an animation: the body glides up
+  the ledge. Slide friction is one constant for every surface. Neither view
+  bob nor a sprint FOV kick exists yet — deliberately, since they are the
+  fastest route to motion sickness and will arrive with individual toggles.
+- Mining progress still accumulates per frame rather than per tick; it is
+  world-side and speed-clamped, but it is the one interactive system not yet
+  on the command path.
 - Fall damage does not exist, so the punishment for a long drop is the climb
   back up.
 - Breaking is instant and reach is a flat 6 blocks. `BlockDef::hardness` is
@@ -240,6 +251,28 @@ in that hand-back is an item dupe or an item shredder. The refusal is
 conservative: a craft that would only fit in the space its own inputs free is
 refused, costing a rare retry to make the half-done state unrepresentable.
 
+**Player movement is a command consumed on the fixed tick.** Held keys
+become one `MoveCommand` per frame; the simulation eats exactly one per tick
+at 20 Hz and rendering interpolates between tick snapshots via the clock's
+`alpha()`. Look angles are quantised into the command and the simulation reads
+only the quantised value — the camera turns per-frame, but that is cosmetic:
+positions depend on nothing but the command stream, which is what makes a
+recorded sequence replay bit-for-bit. No transcendentals run in the tick path;
+yaw resolves through a table built once at startup (bit-exact per platform —
+cross-platform identity would need the table baked into source).
+
+**Slides obey voxel physics, not slope physics.** There are no slopes for
+gravity to project onto, so the downhill/uphill asymmetry is emergent: slide
+friction only bites while grounded, and landing a drop mid-slide converts
+some of the impact into more slide — so benched declines feed a slide while
+block faces kill one going up. The asymmetry is tested on real stepped
+terrain, not asserted about a normal that cannot exist.
+
+**Carried mass is the movement stat.** Speed multiplies by inventory
+fullness, floored at 0.55, and stamina drains faster loaded. Everything that
+already makes you carry more makes you slower using it — the tension that
+makes the number interesting rather than a straight buff.
+
 **Player collision is axis-separated AABB sweeps, substepped.** Each step
 resolves y before x and z, so landing happens before sliding can clip a block
 corner. No single substep moves further than a fraction of a block, which is
@@ -278,10 +311,15 @@ unload, every thirty seconds, and on exit. An existing world keeps its own
 seed, so `--seed` only applies when creating one — generating against a
 different seed would seam against whatever is already saved.
 
-Controls: `WASD` to move, `Space` to jump, `Left Ctrl` to sprint, click to
-capture the mouse for looking around. `F` switches between walking and flying;
-in flight, `Space`/`Left Shift` move up and down. `E` opens the inventory and
-crafting screen; `Escape` opens the menu.
+Controls: `WASD` to move, `Space` to jump (hold to hop; held against a low
+ledge it vaults, against a two-block one it mantles), `Left Ctrl` to sprint,
+`C` to crouch — pressed at sprint speed it starts a **slide**, and jumping out
+of a slide keeps the speed — `Z` to go prone, which fits one-block tunnels.
+Sprint, slide and mantle draw stamina; running dry slows you to a walk, never
+stops you. Carrying more slows everything: speed scales with inventory
+fullness down to 55% at a full pack. Click to capture the mouse. `F` switches
+between walking and flying; in flight, `Space`/`Left Shift` move up and down.
+`E` opens the deck; `Escape` opens the menu.
 
 The bar's first two positions are permanent equipment: the **deck** (a
 handheld computer — crafting today, drones, supply drops and quests on its

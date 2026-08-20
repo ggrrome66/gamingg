@@ -73,6 +73,44 @@ impl Body {
         }
     }
 
+    /// Change the box height in place, refusing growth into solid blocks.
+    ///
+    /// Shrinking always succeeds — a smaller box fits wherever the bigger one
+    /// did. Growing scans the would-be box first, so standing up under a low
+    /// ceiling is refused rather than embedding the head in rock. This is
+    /// what makes stances safe: prone at 0.6 m slips through a one-block
+    /// tunnel, and this check is why you cannot stand up inside it.
+    pub fn try_resize(&mut self, new_height: f32, solid: impl Fn(BlockPos) -> bool) -> bool {
+        if !new_height.is_finite() || !(0.1..=3.0).contains(&new_height) {
+            return false;
+        }
+        if new_height <= self.height {
+            self.height = new_height;
+            return true;
+        }
+
+        // The full box at the new height, inset by the skin like the sweep.
+        let (min, _) = self.bounds();
+        let max = Vec3::new(
+            self.position.x + self.half_width,
+            self.position.y + new_height,
+            self.position.z + self.half_width,
+        );
+        let lo = (min + SKIN).floor();
+        let hi = (max - SKIN).floor();
+        for bx in (lo.x as i32)..=(hi.x as i32) {
+            for by in (lo.y as i32)..=(hi.y as i32) {
+                for bz in (lo.z as i32)..=(hi.z as i32) {
+                    if solid(BlockPos::new(bx, by, bz)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        self.height = new_height;
+        true
+    }
+
     /// The box corners as `(min, max)`.
     pub fn bounds(&self) -> (Vec3, Vec3) {
         (
@@ -424,6 +462,40 @@ mod tests {
             travelled <= MAX_SUBSTEPS as f32 * MAX_SUBSTEP * 2.0,
             "moved {travelled} blocks in one step"
         );
+    }
+
+    #[test]
+    fn resizing_respects_ceilings_in_both_directions() {
+        let mut blocks = floor();
+        // A ceiling one block above the floor top: a 1-block crawl space.
+        for x in -2..3 {
+            for z in -2..3 {
+                blocks.push((x, 11, z));
+            }
+        }
+        let solid = world_of(&blocks);
+        let mut body = Body::player(Vec3::new(0.5, 10.0, 0.5));
+
+        // Shrinking to prone fits the crawl space.
+        assert!(body.try_resize(0.6, &solid));
+        assert_eq!(body.height, 0.6);
+
+        // Standing back up under the ceiling is refused, height unchanged.
+        assert!(!body.try_resize(1.8, &solid), "stood up into the ceiling");
+        assert_eq!(body.height, 0.6);
+
+        // Crouch height fits under the 1-block gap? No: the gap is exactly
+        // 1.0, so 1.2 must also refuse.
+        assert!(!body.try_resize(1.2, &solid));
+
+        // Rubbish heights are refused outright.
+        assert!(!body.try_resize(f32::NAN, &solid));
+        assert!(!body.try_resize(-1.0, &solid));
+        assert!(!body.try_resize(99.0, &solid));
+
+        // In the open, standing works again.
+        body.position.x = 20.5; // off the platform, clear air
+        assert!(body.try_resize(1.8, &solid));
     }
 
     #[test]

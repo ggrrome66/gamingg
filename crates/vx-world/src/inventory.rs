@@ -166,6 +166,28 @@ impl Inventory {
         Some(item)
     }
 
+    /// How full this inventory is, 0.0 empty to 1.0 full.
+    ///
+    /// Each slot contributes its stack's fraction of that item's ceiling, so
+    /// a full slot of anything weighs the same. This is the carried-mass
+    /// input to the movement speed multiplier — pure arithmetic here; what
+    /// the number *means* stays in the app with the rest of the fiction.
+    pub fn fullness(&self, registry: &ItemRegistry) -> f32 {
+        if self.slots.is_empty() {
+            return 0.0;
+        }
+        let sum: f32 = self
+            .slots
+            .iter()
+            .flatten()
+            .map(|stack| {
+                let ceiling = registry.max_stack(stack.item).max(1) as f32;
+                (stack.count as f32 / ceiling).min(1.0)
+            })
+            .sum();
+        (sum / self.slots.len() as f32).clamp(0.0, 1.0)
+    }
+
     /// Put a stack into a specific empty slot, for restoring a saved layout.
     ///
     /// This is the only way to write a slot directly, and it validates so the
@@ -390,6 +412,32 @@ mod tests {
         // And the promise holds: inserting what was accepted leaves nothing.
         assert_eq!(inventory.insert(stone, 28, &registry), 0);
         assert_eq!(inventory.insert(stone, 1, &registry), 1);
+    }
+
+    #[test]
+    fn fullness_runs_zero_to_one_and_is_monotone() {
+        let (registry, stone, _) = registry();
+        let mut inventory = Inventory::player();
+        assert_eq!(inventory.fullness(&registry), 0.0);
+
+        let mut last = 0.0;
+        for _ in 0..PLAYER_SLOTS {
+            inventory.insert(stone, 64, &registry);
+            let now = inventory.fullness(&registry);
+            assert!(now >= last, "fullness went backwards: {last} -> {now}");
+            last = now;
+        }
+        assert!((inventory.fullness(&registry) - 1.0).abs() < 1e-5);
+
+        // Half the slots full of a small-stack item still reads as fullness:
+        // a full slot of anything weighs one slot.
+        let mut registry2 = ItemRegistry::new();
+        let tiny = registry2
+            .register(vx_core::ItemDef::material("engine:tiny").with_max_stack(2))
+            .unwrap();
+        let mut small = Inventory::new(2);
+        small.insert(tiny, 2, &registry2);
+        assert!((small.fullness(&registry2) - 0.5).abs() < 1e-5);
     }
 
     #[test]

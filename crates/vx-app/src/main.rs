@@ -9,6 +9,7 @@
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
 mod controller;
+mod movement;
 mod hud;
 mod interaction;
 mod streaming;
@@ -25,7 +26,7 @@ use vx_platform::InputState;
 use vx_render::headless::{capture_frame, CAPTURE_FORMAT};
 use vx_render::{Camera, GpuContext, Renderer, WindowSurface};
 use vx_save::WorldStore;
-use vx_world::{Body, Drill, Inventory, ModuleKind, TickClock, World, MAX_MODULE_SLOTS, TICKS_PER_SECOND};
+use vx_world::{Drill, Inventory, ModuleKind, TickClock, World, MAX_MODULE_SLOTS, TICKS_PER_SECOND};
 
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -437,6 +438,10 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             inventory_lines: carried_lines(&inventory, &world),
             recipes: recipe_lines(&inventory, &world),
             mode: "FLY",
+            stance: "STAND",
+            stamina: movement::tune::STAM_MAX,
+            stamina_max: movement::tune::STAM_MAX,
+            load: inventory.fullness(world.items()),
             sim: SimStats::default(),
         };
         let ui = build_overlay(&renderer, &menus, &state);
@@ -499,7 +504,7 @@ struct Active {
     camera: Camera,
     menus: Menus,
     /// The player's physical presence while walking.
-    body: Body,
+    movement: movement::Movement,
     mode: MoveMode,
     inventory: Inventory,
     /// The tool everything is mined with, and the thing progression upgrades.
@@ -680,7 +685,7 @@ impl App {
         // stale — flight moves the camera directly — so derive feet from the
         // eyes; on the next walk toggle that is exactly where they land.
         let position = match active.mode {
-            MoveMode::Walk => active.body.position,
+            MoveMode::Walk => active.movement.body.position,
             MoveMode::Fly => {
                 active.camera.position - glam::Vec3::new(0.0, self.walker.eye_height, 0.0)
             }
@@ -768,13 +773,9 @@ impl App {
                     self.controller.apply(&mut active.camera, &mut self.input, dt);
                 }
                 MoveMode::Walk => {
-                    self.walker.apply(
-                        &mut active.camera,
-                        &mut active.body,
-                        &mut self.input,
-                        &active.world,
-                        dt,
-                    );
+                    // Look is per-frame and cosmetic; the simulation reads
+                    // only the quantised yaw in the command below.
+                    self.walker.look(&mut active.camera, &mut self.input);
                 }
             }
         } else {
@@ -786,11 +787,34 @@ impl App {
         // Fixed-step simulation, decoupled from the frame rate. `advance` caps
         // the catch-up, so a long stall skips time rather than trying to
         // simulate all of it at once and falling further behind each frame.
+        // One command per frame; the simulation consumes it once per tick.
+        // With a menu open (or flying) an empty command still lets gravity
+        // and the world act — the deck does not pause the mine.
+        let command = if active.mode == MoveMode::Walk && !active.menus.is_open() {
+            movement::MoveCommand::sample(&self.input, &active.camera)
+        } else {
+            movement::MoveCommand {
+                bits: 0,
+                yaw_q: movement::quantise_yaw(active.camera.yaw),
+                pitch_q: movement::quantise_pitch(active.camera.pitch),
+            }
+        };
+
         let steps = self
             .clock
             .advance(now - frame_started, active.world.limits().max_catchup_steps);
         for _ in 0..steps {
             active.world.tick();
+            if active.mode == MoveMode::Walk {
+                let fullness = active.inventory.fullness(active.world.items());
+                active.movement.tick(command, &active.world, fullness);
+            }
+        }
+
+        if active.mode == MoveMode::Walk {
+            // The camera rides the interpolated tick snapshots — the hook
+            // TickClock::alpha() was left in place for.
+            active.camera.position = active.movement.camera_position(self.clock.alpha());
         }
 
         // Keep chunks in step with where the camera is.
@@ -851,6 +875,13 @@ impl App {
                 MoveMode::Walk => "WALK",
                 MoveMode::Fly => "FLY",
             },
+            stance: match active.mode {
+                MoveMode::Walk => active.movement.stance.label(),
+                MoveMode::Fly => "FLY",
+            },
+            stamina: active.movement.stamina,
+            stamina_max: movement::tune::STAM_MAX,
+            load: active.inventory.fullness(active.world.items()),
             sim: SimStats {
                 pending_ticks: active.world.scheduler().pending(),
                 pending_updates: active.world.pending_updates(),
@@ -1045,7 +1076,7 @@ impl ApplicationHandler for App {
             menus: Menus::default(),
             // Feet on the ground under the camera; corrected against the
             // real surface a few lines down once the spawn chunk is loaded.
-            body: Body::player(glam::Vec3::new(0.5, 90.0, 0.5)),
+            movement: movement::Movement::new(glam::Vec3::new(0.5, 90.0, 0.5)),
             mode: MoveMode::Walk,
             store,
         });
@@ -1057,18 +1088,20 @@ impl ApplicationHandler for App {
             active.world.load_chunk(centre);
             if let Some(surface_y) = active.world.surface_y(0, 0) {
                 active.camera.position.y = surface_y as f32 + 2.0;
-                active.body.position = glam::Vec3::new(0.5, surface_y as f32, 0.5);
+                active
+                    .movement
+                    .reset_at(glam::Vec3::new(0.5, surface_y as f32, 0.5));
             }
 
             // Saved state wins over the fresh defaults — except a pose the
             // decoder flagged as unusable, which keeps the derived spawn.
             if let Some(record) = restored {
                 if !record.respawn {
-                    active.body.position = glam::Vec3::from(record.position);
+                    active.movement.reset_at(glam::Vec3::from(record.position));
                     active.camera.yaw = record.yaw;
                     active.camera.pitch = record.pitch;
                     active.camera.clamp_pitch();
-                    active.camera.position = active.body.position
+                    active.camera.position = active.movement.body.position
                         + glam::Vec3::new(0.0, self.walker.eye_height, 0.0);
                 }
                 active.inventory = record.inventory;
@@ -1149,9 +1182,14 @@ impl ApplicationHandler for App {
                                     // flew to: feet under the eyes, motion
                                     // reset so flight speed does not carry.
                                     MoveMode::Fly => {
-                                        active.body.position = active.camera.position
-                                            - glam::Vec3::new(0.0, self.walker.eye_height, 0.0);
-                                        active.body.velocity = glam::Vec3::ZERO;
+                                        let eye = glam::Vec3::new(
+                                            0.0,
+                                            self.walker.eye_height,
+                                            0.0,
+                                        );
+                                        active
+                                            .movement
+                                            .reset_at(active.camera.position - eye);
                                         MoveMode::Walk
                                     }
                                     MoveMode::Walk => MoveMode::Fly,
