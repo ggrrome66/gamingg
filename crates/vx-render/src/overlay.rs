@@ -65,6 +65,53 @@ pub const OVERLAY_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::Verte
     ],
 };
 
+/// A 2D similarity transform applied to quads as they are emitted:
+/// scale and rotate about a pivot, then translate. Built for the deck's
+/// raise animation — the whole device group swings up as one.
+///
+/// The rotation's sin/cos are computed once at construction, so per-quad
+/// cost is four multiplies, and an identity transform reproduces untransformed
+/// output bit-for-bit (dx*1.0 - dy*0.0 is exactly dx).
+#[derive(Debug, Clone, Copy)]
+pub struct Transform2 {
+    pivot: [f32; 2],
+    offset: [f32; 2],
+    sin: f32,
+    cos: f32,
+    scale: f32,
+}
+
+impl Transform2 {
+    pub fn new(pivot: [f32; 2], offset: [f32; 2], rotation: f32, scale: f32) -> Self {
+        Transform2 {
+            pivot,
+            offset,
+            sin: rotation.sin(),
+            cos: rotation.cos(),
+            scale,
+        }
+    }
+
+    pub fn identity() -> Self {
+        Transform2 {
+            pivot: [0.0, 0.0],
+            offset: [0.0, 0.0],
+            sin: 0.0,
+            cos: 1.0,
+            scale: 1.0,
+        }
+    }
+
+    fn apply(&self, x: f32, y: f32) -> (f32, f32) {
+        let dx = (x - self.pivot[0]) * self.scale;
+        let dy = (y - self.pivot[1]) * self.scale;
+        (
+            self.pivot[0] + dx * self.cos - dy * self.sin + self.offset[0],
+            self.pivot[1] + dx * self.sin + dy * self.cos + self.offset[1],
+        )
+    }
+}
+
 /// Accumulates overlay geometry in pixel space.
 #[derive(Debug, Clone)]
 pub struct OverlayBuilder {
@@ -74,6 +121,9 @@ pub struct OverlayBuilder {
     height: f32,
     /// Pixels per font pixel. Keeps the UI readable as the window grows.
     scale: f32,
+    /// Applied to every quad emitted while set. `None` is the fast path and
+    /// bit-for-bit identical to the pre-transform builder.
+    transform: Option<Transform2>,
 }
 
 impl OverlayBuilder {
@@ -84,7 +134,18 @@ impl OverlayBuilder {
             width: width.max(1) as f32,
             height: height.max(1) as f32,
             scale: scale.max(1.0),
+            transform: None,
         }
+    }
+
+    /// Transform every subsequent quad (and glyph — text is printed on the
+    /// thing being transformed). Clear with [`OverlayBuilder::clear_transform`].
+    pub fn set_transform(&mut self, transform: Transform2) {
+        self.transform = Some(transform);
+    }
+
+    pub fn clear_transform(&mut self) {
+        self.transform = None;
     }
 
     pub fn size(&self) -> (f32, f32) {
@@ -149,6 +210,10 @@ impl OverlayBuilder {
             (x + w, y + h, u1, v1),
             (x, y + h, u0, v1),
         ] {
+            let (px, py) = match &self.transform {
+                Some(transform) => transform.apply(px, py),
+                None => (px, py),
+            };
             self.vertices.push(OverlayVertex {
                 position: self.to_clip(px, py),
                 uv: [u, v],
@@ -587,6 +652,52 @@ mod tests {
         let count = builder.vertices().len() as u32;
         assert!(builder.indices().iter().all(|&i| i < count));
         assert_eq!(builder.indices().len() % 3, 0);
+    }
+
+    #[test]
+    fn an_identity_transform_is_bit_for_bit_invisible() {
+        // The regression gate on the transform change: the deck must be able
+        // to draw untransformed content through the Some(identity) path and
+        // get exactly what the None path always produced.
+        let draw = |ui: &mut OverlayBuilder| {
+            ui.rect(3.5, 7.25, 40.0, 21.0, WHITE);
+            ui.text(10.0, 30.0, "DR.DOOM", WHITE);
+            ui.rect_outline(1.0, 1.0, 90.0, 50.0, 2.0, WHITE);
+        };
+        let mut plain = OverlayBuilder::new(320, 240, 2.0);
+        draw(&mut plain);
+
+        let mut transformed = OverlayBuilder::new(320, 240, 2.0);
+        transformed.set_transform(Transform2::identity());
+        draw(&mut transformed);
+
+        assert_eq!(plain.vertices().len(), transformed.vertices().len());
+        for (a, b) in plain.vertices().iter().zip(transformed.vertices()) {
+            assert_eq!(a.position()[0].to_bits(), b.position()[0].to_bits());
+            assert_eq!(a.position()[1].to_bits(), b.position()[1].to_bits());
+        }
+    }
+
+    #[test]
+    fn a_real_transform_moves_geometry_and_stays_finite() {
+        let mut ui = OverlayBuilder::new(320, 240, 1.0);
+        ui.set_transform(Transform2::new([160.0, 240.0], [0.0, 55.0], 0.21, 0.93));
+        ui.rect(100.0, 100.0, 50.0, 30.0, WHITE);
+        ui.text(110.0, 110.0, "TILT", WHITE);
+        ui.clear_transform();
+        ui.rect(0.0, 0.0, 10.0, 10.0, WHITE);
+
+        for vertex in ui.vertices() {
+            assert!(vertex.position()[0].is_finite());
+            assert!(vertex.position()[1].is_finite());
+        }
+
+        // The transformed rect is rotated: its top edge is no longer level.
+        let quad = &ui.vertices()[0..4];
+        assert!(
+            (quad[0].position()[1] - quad[1].position()[1]).abs() > 1e-6,
+            "rotation did not tilt the quad"
+        );
     }
 
     #[test]

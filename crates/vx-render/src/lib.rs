@@ -22,7 +22,7 @@ use vx_mesh::Mesh;
 pub use camera::{Camera, CameraUniform};
 pub use gpu::{GpuContext, GpuError, WindowSurface, DEPTH_FORMAT};
 pub use mesh_buffer::{ChunkMesh, VERTEX_LAYOUT};
-pub use overlay::{OverlayBuilder, OverlayRenderer};
+pub use overlay::{OverlayBuilder, OverlayRenderer, Transform2};
 pub use selection::{SelectionRenderer, SELECTION_COLOUR};
 pub use tiles::TileTextures;
 

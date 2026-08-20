@@ -28,6 +28,13 @@ pub const SCANLINE: [f32; 4] = [0.0, 0.0, 0.0, 0.16];
 /// A limit being hit. Amber rather than green: it should not look routine.
 pub const ALERT: [f32; 4] = [1.0, 0.72, 0.10, 1.0];
 
+// The deck's shell. Gunmetal, not phosphor: the glass glows, the metal does
+// not, and the contrast is what sells the object.
+pub const METAL_DARK: [f32; 4] = [0.11, 0.12, 0.14, 1.0];
+pub const METAL: [f32; 4] = [0.21, 0.23, 0.26, 1.0];
+pub const METAL_LIGHT: [f32; 4] = [0.33, 0.36, 0.40, 1.0];
+pub const RIVET: [f32; 4] = [0.52, 0.55, 0.58, 1.0];
+
 /// The deck's tabs, in order. The last three are visible but offline —
 /// the roadmap in the player's hands, which is most of what makes a device
 /// feel like a device rather than a menu.
@@ -478,7 +485,9 @@ fn draw_hotbar(ui: &mut OverlayBuilder, state: &HudState) {
 
 /// Draw whichever menu screen is open. Does nothing while playing.
 pub fn draw_menu(ui: &mut OverlayBuilder, menus: &Menus, state: &HudState) {
-    if !menus.is_open() {
+    // The deck is not a menu panel: it is a device, drawn by
+    // `draw_deck_device` so its raise and lower animate outside menu state.
+    if !menus.is_open() || menus.screen() == Screen::Deck {
         return;
     }
 
@@ -523,16 +532,12 @@ pub fn draw_menu(ui: &mut OverlayBuilder, menus: &Menus, state: &HudState) {
         Screen::Main => draw_main_items(ui, menus, inner_x, y, panel_w - 12.0 * scale),
         Screen::Controls => draw_controls(ui, inner_x, y),
         Screen::World => draw_world(ui, inner_x, y, state),
-        Screen::Deck => {
-            draw_deck(ui, menus, state, inner_x, y, panel_w - 12.0 * scale)
-        }
-        Screen::Playing => {}
+        Screen::Deck | Screen::Playing => {}
     }
 
     // Footer hint, pinned to the bottom of the panel.
     let footer = match menus.screen() {
         Screen::Main => "[W/S] MOVE   [ENTER] EXEC   [ESC] RESUME",
-        Screen::Deck => "[A/D] TAB   [W/S] PICK   [ENTER] ACT   [E] CLOSE",
         _ => "[ESC] BACK",
     };
     // Clear of the double border, not tucked under it.
@@ -545,6 +550,144 @@ pub fn draw_menu(ui: &mut OverlayBuilder, menus: &Menus, state: &HudState) {
 }
 
 /// The deck: tab strip, then whichever tab is open.
+/// The handheld, raised into frame like a Pip-Boy that went portable.
+///
+/// `raise` is 0 stowed to 1 up; the device slides in from the lower edge,
+/// tilting level as it comes. Everything — metal, glass, text — is drawn
+/// under one transform, so it moves as an object. Drawn whenever `raise` is
+/// above zero, which is what makes the lowering visible after the deck
+/// closes.
+pub fn draw_deck_device(
+    ui: &mut OverlayBuilder,
+    menus: &Menus,
+    state: &HudState,
+    raise: f32,
+) {
+    let raise = if raise.is_finite() { raise.clamp(0.0, 1.0) } else { 0.0 };
+    if raise <= 0.001 {
+        return;
+    }
+    // Ease-out: fast off the hip, settling at the top.
+    let eased = 1.0 - (1.0 - raise) * (1.0 - raise);
+
+    let (width, height) = ui.size();
+    let scale = ui.scale();
+
+    // The world dims as the device comes up.
+    let mut shade = SHADE;
+    shade[3] *= eased;
+    ui.rect(0.0, 0.0, width, height, shade);
+
+    // Glass proportions first; the shell wraps around them.
+    let glass_w = (width * 0.56).min(width - 120.0 * scale);
+    let glass_h = (height * 0.60).min(height - 90.0 * scale);
+    let bezel = 7.0 * scale;
+    let grip_w = (glass_w * 0.16).max(30.0 * scale);
+    let body_w = glass_w + 2.0 * (bezel + grip_w);
+    let body_h = glass_h + 2.0 * bezel + 10.0 * scale;
+    let body_x = (width - body_w) / 2.0;
+    let body_y = (height - body_h) / 2.0 + 6.0 * scale;
+    let glass_x = body_x + grip_w + bezel;
+    let glass_y = body_y + bezel + 4.0 * scale;
+
+    // The raise: pivot at the bottom centre, sliding up and tilting level.
+    ui.set_transform(vx_render::Transform2::new(
+        [width / 2.0, body_y + body_h],
+        [0.0, (1.0 - eased) * (height - body_y + 60.0 * scale)],
+        (1.0 - eased) * 0.21,
+        0.92 + 0.08 * eased,
+    ));
+
+    // Shell: body, sheen, grips.
+    ui.rect(body_x, body_y, body_w, body_h, METAL);
+    ui.rect_outline(body_x, body_y, body_w, body_h, 2.0 * scale, METAL_DARK);
+    ui.rect(
+        body_x + 2.0 * scale,
+        body_y + 2.0 * scale,
+        body_w - 4.0 * scale,
+        scale,
+        METAL_LIGHT,
+    );
+    for grip_x in [body_x + 3.0 * scale, body_x + body_w - grip_w + 3.0 * scale] {
+        ui.rect(
+            grip_x,
+            body_y + 6.0 * scale,
+            grip_w - 6.0 * scale,
+            body_h - 12.0 * scale,
+            METAL_DARK,
+        );
+    }
+
+    // Left grip: d-pad. Right grip: four face buttons.
+    let pad_cx = body_x + grip_w / 2.0;
+    let pad_cy = body_y + body_h * 0.42;
+    let arm = 4.0 * scale;
+    ui.rect(pad_cx - arm * 1.5, pad_cy - arm / 2.0, arm * 3.0, arm, METAL_LIGHT);
+    ui.rect(pad_cx - arm / 2.0, pad_cy - arm * 1.5, arm, arm * 3.0, METAL_LIGHT);
+    let btn_cx = body_x + body_w - grip_w / 2.0;
+    for (dx, dy) in [(0.0, -1.4), (0.0, 1.4), (-1.4, 0.0), (1.4, 0.0)] {
+        ui.rect(
+            btn_cx + dx * arm - arm / 2.0,
+            pad_cy + dy * arm - arm / 2.0,
+            arm,
+            arm,
+            RIVET,
+        );
+    }
+
+    // Vents along the top bezel, screws in the corners, the nameplate below.
+    for i in 0..6 {
+        ui.rect(
+            glass_x + glass_w * 0.30 + i as f32 * 6.0 * scale,
+            body_y + 3.0 * scale,
+            3.0 * scale,
+            2.0 * scale,
+            METAL_DARK,
+        );
+    }
+    let screw = 2.0 * scale;
+    for (sx, sy) in [
+        (body_x + 3.0 * scale, body_y + 3.0 * scale),
+        (body_x + body_w - 5.0 * scale, body_y + 3.0 * scale),
+        (body_x + 3.0 * scale, body_y + body_h - 5.0 * scale),
+        (body_x + body_w - 5.0 * scale, body_y + body_h - 5.0 * scale),
+    ] {
+        ui.rect(sx, sy, screw, screw, RIVET);
+    }
+    ui.text_centred(
+        width / 2.0,
+        body_y + body_h - 8.0 * scale,
+        "DR.DOOM SYSTEMS // MK-1",
+        METAL_LIGHT,
+    );
+
+    // The glass, and everything on it.
+    ui.rect(glass_x, glass_y, glass_w, glass_h, PANEL);
+    ui.rect_outline(glass_x, glass_y, glass_w, glass_h, scale, GREEN);
+
+    let inner_x = glass_x + 5.0 * scale;
+    let mut y = glass_y + 5.0 * scale;
+    ui.text(inner_x, y, "GAMINGG // DECK", BRIGHT);
+    y += ui.line_height() * 1.4;
+    draw_deck(ui, menus, state, inner_x, y, glass_w - 10.0 * scale);
+    ui.text_centred(
+        width / 2.0,
+        glass_y + glass_h - ui.line_height() * 1.6,
+        "[A/D] TAB   [W/S] PICK   [ENTER] ACT   [E] CLOSE",
+        DIM,
+    );
+
+    // Scanlines on the glass only: the glass flickers, the metal does not.
+    let step = (2.0 * scale).max(2.0);
+    let mut line_y = glass_y;
+    while line_y < glass_y + glass_h {
+        ui.rect(glass_x, line_y, glass_w, step / 2.0, SCANLINE);
+        line_y += step;
+    }
+
+    ui.clear_transform();
+}
+
 fn draw_deck(
     ui: &mut OverlayBuilder,
     menus: &Menus,
@@ -913,6 +1056,41 @@ mod tests {
     }
 
     #[test]
+    fn the_deck_device_raises_from_nothing_to_a_full_shell() {
+        let mut menus = Menus::default();
+        menus.open_deck(0, 0);
+
+        // Stowed: not a single quad.
+        let mut stowed = ui();
+        draw_deck_device(&mut stowed, &menus, &state(), 0.0);
+        assert!(stowed.is_empty(), "a stowed deck drew geometry");
+
+        // Raised: a shell full of geometry, all of it finite and on screen.
+        let mut raised = ui();
+        draw_deck_device(&mut raised, &menus, &state(), 1.0);
+        assert!(raised.vertices().len() > 100, "the device is barely there");
+        for vertex in raised.vertices() {
+            assert!(vertex.position()[0].is_finite());
+            assert!(vertex.position()[1].is_finite());
+        }
+
+        // Mid-raise is more than stowed, less settled than raised, finite.
+        let mut mid = ui();
+        draw_deck_device(&mut mid, &menus, &state(), 0.5);
+        assert!(!mid.is_empty());
+
+        // Hostile raise values neither panic nor draw garbage.
+        let mut hostile = ui();
+        draw_deck_device(&mut hostile, &menus, &state(), f32::NAN);
+        assert!(hostile.is_empty());
+        let mut over = ui();
+        draw_deck_device(&mut over, &menus, &state(), 99.0);
+        for vertex in over.vertices() {
+            assert!(vertex.position()[0].is_finite());
+        }
+    }
+
+    #[test]
     fn the_stamina_bar_appears_only_once_stamina_is_spent() {
         let mut full = ui();
         draw_hud(&mut full, &state());
@@ -946,7 +1124,7 @@ mod tests {
 
     #[test]
     fn every_menu_screen_draws_and_stays_on_screen() {
-        for screen in [Screen::Main, Screen::Controls, Screen::World, Screen::Deck] {
+        for screen in [Screen::Main, Screen::Controls, Screen::World] {
             let mut menus = Menus::default();
             menus.open();
             menus.screen = screen;

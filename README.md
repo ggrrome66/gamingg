@@ -92,6 +92,9 @@ foundation is solid rather than being designed around up front.
   back up.
 - Breaking is instant and reach is a flat 6 blocks. `BlockDef::hardness` is
   respected only as breakable/unbreakable; nothing consumes the value itself.
+- The deck is screen-space presentation: a drawn shell around the UI, raised
+  and lowered with a 2D transform, not a modelled object in a hand. The 3D
+  version arrives with the player model and third person.
 - The menus are keyboard-only. The mouse is ignored while one is open rather
   than moving a pointer over the entries.
 - The overlay is rebuilt from scratch every frame. Fine at a few hundred
@@ -319,7 +322,8 @@ Sprint, slide and mantle draw stamina; running dry slows you to a walk, never
 stops you. Carrying more slows everything: speed scales with inventory
 fullness down to 55% at a full pack. Click to capture the mouse. `F` switches
 between walking and flying; in flight, `Space`/`Left Shift` move up and down.
-`E` opens the deck; `Escape` opens the menu.
+`E` raises the deck — the handheld swings up into frame and its screen is the
+UI; `E` again stows it. `Escape` opens the menu.
 
 The bar's first two positions are permanent equipment: the **deck** (a
 handheld computer — crafting today, drones, supply drops and quests on its

@@ -220,6 +220,7 @@ fn build_overlay(
     renderer: &Renderer,
     menus: &Menus,
     state: &HudState,
+    deck_raise: f32,
 ) -> vx_render::OverlayBuilder {
     let mut ui = renderer.overlay_builder();
 
@@ -228,7 +229,12 @@ fn build_overlay(
         hud::draw_hud(&mut ui, state);
     }
     hud::draw_menu(&mut ui, menus, state);
-    hud::draw_scanlines(&mut ui);
+    hud::draw_deck_device(&mut ui, menus, state, deck_raise);
+    // While the device is up, its glass carries the scanlines; the full-frame
+    // pass would put them on the metal too.
+    if deck_raise <= 0.001 {
+        hud::draw_scanlines(&mut ui);
+    }
 
     ui
 }
@@ -322,12 +328,28 @@ fn drill_view(drill: &Drill, world: &World) -> DrillView {
     } else {
         let recipes = world.recipes();
         let upgrade_item = world.game_items().drill_upgrade;
+        // Inputs only: the full recipe label overflows the deck's glass, and
+        // the output is implied by the line it is printed on.
         let cost = recipes
             .iter()
             .find(|recipe| recipe.output.item == upgrade_item)
-            .map(|recipe| vx_world::recipe_label(recipe, world.items()))
+            .map(|recipe| {
+                recipe
+                    .inputs
+                    .iter()
+                    .map(|input| {
+                        let name = world
+                            .items()
+                            .get(input.item)
+                            .map_or("?", |def| def.display_name.as_str())
+                            .to_uppercase();
+                        format!("{} {name}", input.count)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            })
             .unwrap_or_else(|| "?".to_string());
-        format!("UPGRADE TIER (CRAFT: {cost})")
+        format!("UPGRADE TIER: {cost}")
     };
 
     DrillView {
@@ -444,7 +466,8 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             load: inventory.fullness(world.items()),
             sim: SimStats::default(),
         };
-        let ui = build_overlay(&renderer, &menus, &state);
+        let raise = if matches!(options.ui, UiMode::Deck(_)) { 1.0 } else { 0.0 };
+        let ui = build_overlay(&renderer, &menus, &state, raise);
         renderer.set_overlay(&context.device, &context.queue, &ui);
     }
 
@@ -544,6 +567,8 @@ struct App {
     last_save: Instant,
     /// Drives simulation at a fixed rate, independent of frame rate.
     clock: TickClock,
+    /// The deck raise animation, 0 stowed to 1 up, eased per frame.
+    deck_raise: f32,
 }
 
 impl App {
@@ -564,6 +589,7 @@ impl App {
             last_fps: 0.0,
             last_save: Instant::now(),
             clock: TickClock::new(TICKS_PER_SECOND),
+            deck_raise: 0.0,
         }
     }
 
@@ -890,7 +916,15 @@ impl App {
                 skipped: self.clock.skipped(),
             },
         };
-        let ui = build_overlay(&active.renderer, &active.menus, &state);
+        // Ease the deck toward its target: quick up, slightly quicker down.
+        let target = if active.menus.screen() == Screen::Deck { 1.0 } else { 0.0 };
+        let rate = if target > self.deck_raise { 12.0 } else { 15.0 };
+        self.deck_raise += (target - self.deck_raise) * (dt * rate).min(1.0);
+        if (self.deck_raise - target).abs() < 0.002 {
+            self.deck_raise = target;
+        }
+
+        let ui = build_overlay(&active.renderer, &active.menus, &state, self.deck_raise);
         active
             .renderer
             .set_overlay(&active.context.device, &active.context.queue, &ui);
