@@ -225,12 +225,13 @@ mod tests {
 
     #[test]
     fn the_panel_mentions_the_stage_that_built_it() {
-        // Self-referential truthfulness: if 10C's own row cannot be found,
-        // the parse is reading the wrong part of the file.
+        // Self-referential truthfulness: the newest shipped stage has to
+        // appear in the panel that stage built. If it does not, the parse is
+        // reading the wrong part of the file.
         let lines = changelog();
         assert!(
-            lines.iter().any(|line| line.starts_with("10C")),
-            "stage 10c missing from its own welcome panel: {lines:#?}"
+            lines.iter().any(|line| line.starts_with("11 ")),
+            "the newest stage is missing from its own welcome panel: {lines:#?}"
         );
     }
 

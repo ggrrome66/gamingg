@@ -22,6 +22,7 @@ mod intro;
 mod journal;
 mod map;
 mod mining;
+mod permits;
 mod movement;
 mod rig;
 mod shop;
@@ -53,6 +54,7 @@ const FEED_SLOT: usize = 4;
 const BOARD_SLOT: usize = 5;
 const HOME_SLOT: usize = 6;
 const INTRO_SLOT: usize = 7;
+const PERMIT_SLOT: usize = 8;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -131,10 +133,16 @@ struct Options {
     time: f32,
     /// Chunks visible in every direction, when playing windowed.
     view_distance: i32,
+    /// Pin the sheriff's badge on the player. A development override, like
+    /// `--drones`: the badge is won at the ballot box in stage 13, and this is
+    /// how the override is exercised before then.
+    sheriff: bool,
     /// Print the derived changelog and exit.
     changelog: bool,
     /// Draw the welcome panel over the capture.
     welcome: bool,
+    /// Draw a neighbour's lockbox panel over the capture.
+    permit: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -153,8 +161,10 @@ fn parse_args() -> Result<Options, String> {
         height: 720,
         world: "world".to_string(),
         view_distance: 8,
+        sheriff: false,
         changelog: false,
         welcome: false,
+        permit: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -212,8 +222,10 @@ fn parse_args() -> Result<Options, String> {
             "--shop" => options.shop = true,
             "--board" => options.board = true,
             "--replay" => options.replay = true,
+            "--sheriff" => options.sheriff = true,
             "--changelog" => options.changelog = true,
             "--welcome" => options.welcome = true,
+            "--permit" => options.permit = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -278,8 +290,10 @@ fn parse_args() -> Result<Options, String> {
                      --device            draw the handheld fleet roster over the capture\n  \
                      --handheld-map      draw the handheld's map page instead\n  \
                      --view-distance <n> chunks visible in every direction (4-16, default 8)\n  \
+                     --sheriff           wear the badge (dev override; won at the ballot box later)\n  \
                      --changelog         print the welcome panel's changelog and exit\n  \
                      --welcome           draw the welcome panel over the capture\n  \
+                     --permit            draw a lockbox panel over the capture\n  \
                      --time <0..1>       hour of the day to light the capture by\n  \
                      --night             shorthand for --time 0\n  \
                      --dawn --noon --dusk\n  \
@@ -636,6 +650,8 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             level_up: None,
             greeting: None,
             reconnecting: false,
+            bounty: 40,
+            watched: true,
             movement: hud::MovementReadout {
                 stance: "SPRINT",
                 stamina: 0.72,
@@ -810,6 +826,38 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                 },
             );
         }
+    }
+
+    if options.permit {
+        // A neighbour's lock, seen by somebody with no business there — the
+        // panel's whole job this round is telling you that plainly.
+        let here = vx_world::town::home_site();
+        let mut book = permits::Permits::new();
+        book.set_sites(vec![here]);
+        book.caught(permits::BOUNTY_BREACH, 1);
+        let claim = permits::claims_for(&here)
+            .into_iter()
+            .find(|claim| matches!(claim.owner, permits::Claimant::Resident(_)))
+            .expect("the hometown has residents");
+        let mut panel = permits::PermitPanel::default();
+        let lock = claim.lock.unwrap_or(vx_core::BlockPos::new(0, 0, 0));
+        panel.open_at(lock, claim);
+        let pixels = permits::render_permit(&panel, &book);
+        let panel_width = permits::PERMIT_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = permits::PERMIT_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            PERMIT_SLOT,
+            &context.device,
+            &context.queue,
+            (permits::PERMIT_WIDTH, permits::PERMIT_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
     }
 
     if options.welcome {
@@ -1001,6 +1049,7 @@ fn run_windowed(options: &Options) -> Result<(), String> {
         options.world.clone(),
         options.drones,
         options.view_distance,
+        options.sheriff,
     );
     event_loop
         .run_app(&mut app)
@@ -1088,6 +1137,15 @@ struct Active {
     offers: Vec<shop::Offer>,
     /// The welcome panel, open on the first boot of this machine.
     intro: intro::Intro,
+    /// Who may edit what, and what the town has caught you doing. Shared with
+    /// the edit gate on the event bus, which is why it is behind an `Rc`.
+    permits: permits::Shared,
+    /// The lockbox panel.
+    permit_panel: permits::PermitPanel,
+    /// Whether anybody can see the player right now, for the HUD's eye.
+    watched: bool,
+    /// Enter is held at a lockbox: keep working at it.
+    picking: bool,
     /// The chest panel's cursor and feedback.
     home_panel: homestead::HomePanel,
     /// The town whose counter is open. `TownSite` is `Copy`, so this can be
@@ -1111,6 +1169,8 @@ struct App {
     crew: u32,
     /// Chunks visible in every direction.
     view_distance: i32,
+    /// Start wearing the sheriff's badge.
+    sheriff: bool,
     active: Option<Active>,
     fly: FlyController,
     walk: WalkController,
@@ -1131,6 +1191,7 @@ impl App {
         world_name: String,
         crew: u32,
         view_distance: i32,
+        sheriff: bool,
     ) -> Self {
         App {
             seed,
@@ -1139,6 +1200,7 @@ impl App {
             world_name,
             crew,
             view_distance,
+            sheriff,
             active: None,
             fly: FlyController::default(),
             drill_held: false,
@@ -1199,6 +1261,7 @@ impl App {
             || active.board.open
             || active.device.open
             || active.home_panel.open
+            || active.permit_panel.open
             || active.intro.open
             || feed.is_some();
         if busy || active.resuming {
@@ -1304,6 +1367,30 @@ impl App {
         }
         let Some(active) = &mut self.active else { return };
 
+        // The town puts its broken locks back up. Recorded as an ordinary
+        // `Place` so a replay puts them back at the same tick — the repair is
+        // a world edit, and a world edit the journal cannot see is a world
+        // edit that makes the oracle lie.
+        {
+            let now = active.journal.tick();
+            let due = active.permits.borrow_mut().due_rebuilds(now);
+            for at in due {
+                let tier = active.permits.borrow().lock_tier_at(at);
+                let Some(tier) = tier else { continue };
+                let name = tier.block_name();
+                let Some(block) = active.world.registry().id_of(name) else {
+                    continue;
+                };
+                if active.world.set_block(at, block).is_some() {
+                    active.journal.record(Command::Place {
+                        at,
+                        block: name.to_string(),
+                    });
+                }
+            }
+        }
+
+
         // The townsfolk take their stroll, notice what is about, and one of
         // them may say hello. Machines count as things worth watching, so a
         // villager will turn to follow a drone trundling past.
@@ -1328,12 +1415,63 @@ impl App {
                 )
             }))
             .collect();
+        // The player's stance decides how tall they are to look at, which is
+        // the whole of the stealth system: prone is 0.35 m, and a one-block
+        // wall is 1.0 m.
         let around = awareness::Surroundings {
+            player_eye: active.player.eye_height,
             world: Some(&active.world),
             player: Some(active.player.position),
             machines: &machines,
         };
+        active.watched = active.villagers.witnesses(&around) > 0;
+
+        // Picking a lock: you stand still and exposed while it runs, which is
+        // the whole cost of the quiet route. Being seen finishing one is what
+        // puts it on your sheet.
+        if active.permit_panel.open && active.picking {
+            let level = active.skills.level(skills::SECURITY);
+            let outcome = {
+                let mut permits = active.permits.borrow_mut();
+                active.permit_panel.work_bypass(&mut permits, level, dt)
+            };
+            match outcome {
+                permits::Bypass::Working(_) => {}
+                permits::Bypass::Opened { xp } => {
+                    active.picking = false;
+                    let seen = usize::from(active.watched);
+                    let caught = active
+                        .permits
+                        .borrow_mut()
+                        .caught(permits::BOUNTY_HACK, seen);
+                    if let Some(level) = active.skills.add_xp(skills::SECURITY, xp) {
+                        active.level_up =
+                            Some((skills::SECURITY.to_string(), level, Instant::now()));
+                    }
+                    active.permit_panel.feedback = Some(
+                        if caught { "OPEN - AND YOU WERE SEEN" } else { "OPEN. NOBODY SAW A THING" }
+                            .into(),
+                    );
+                }
+                permits::Bypass::Refused(why) => {
+                    active.picking = false;
+                    active.permit_panel.feedback = Some(why);
+                }
+            }
+        }
         active.villagers.update(dt, active.clock, &around);
+
+        // The law in force is the law of the towns you are standing near. A
+        // fixed set taken at startup would enforce spawn's rules on the far
+        // side of the map and none at all on the near side.
+        {
+            let column = (
+                active.player.position.x as i32,
+                active.player.position.z as i32,
+            );
+            let nearby = active.world.generator().towns_near(column, RADIO_RANGE);
+            active.permits.borrow_mut().set_sites(nearby);
+        }
         if let Some(line) = active.villagers.greeting_for() {
             active.greeting = Some((line.to_string(), Instant::now()));
         }
@@ -1583,6 +1721,7 @@ impl App {
         self.refresh_hud();
         self.refresh_shop();
         self.refresh_home();
+        self.refresh_permit();
         self.refresh_intro();
         self.refresh_board();
         self.refresh_device();
@@ -1684,17 +1823,42 @@ impl App {
             * wallet::drill_multiplier(active.wallet.upgrade(wallet::DRILL));
         let step = dt * power / hardness.max(0.05);
 
-        match &mut active.digging {
-            Some((target, progress)) if *target == hit.block => {
-                *progress += step;
-                if *progress < 1.0 {
-                    return;
-                }
+        // A lockbox is not an ordinary block. It has a power gate below which
+        // the bit simply skates, and its progress *persists* — a breach is a
+        // project you come back to, where ordinary drilling resets the moment
+        // your aim wobbles. At twenty-odd seconds of continuous hold for the
+        // softest grade, the ordinary rule would make grade I miserable and
+        // the higher grades impossible in practice.
+        let lock_tier = permits::tier_of(active.world.registry(), hit.id);
+        if let Some(tier) = lock_tier {
+            let needed = permits::min_power(tier);
+            if power < needed {
+                active.digging = None;
+                active.greeting = Some((
+                    "YOUR DRILL IS TOO WEAK FOR THIS LOCK".into(),
+                    Instant::now(),
+                ));
+                return;
             }
-            other => {
-                *other = Some((hit.block, step.min(1.0)));
-                if step < 1.0 {
-                    return;
+            let carried = active.permits.borrow().breach_progress(hit.block) + step;
+            if carried < 1.0 {
+                active.permits.borrow_mut().set_breach(hit.block, carried);
+                active.digging = Some((hit.block, carried));
+                return;
+            }
+        } else {
+            match &mut active.digging {
+                Some((target, progress)) if *target == hit.block => {
+                    *progress += step;
+                    if *progress < 1.0 {
+                        return;
+                    }
+                }
+                other => {
+                    *other = Some((hit.block, step.min(1.0)));
+                    if step < 1.0 {
+                        return;
+                    }
                 }
             }
         }
@@ -1702,7 +1866,15 @@ impl App {
         // Through: break it, learn from it.
         active.digging = None;
         match break_block(&mut active.world, &active.events, hit.block) {
-            Err(error) => log::debug!("could not break {:?}: {error}", hit.block),
+            Err(error) => {
+                // `Cancelled` covers both a permission refusal and plain
+                // bedrock, and bedrock never emits an event — so the refusal
+                // is only believed when it names this very block.
+                if let Some(line) = Self::charge_for_refusal(active, hit.block, permits::BOUNTY_PRYING) {
+                    active.greeting = Some((line, Instant::now()));
+                }
+                log::debug!("could not break {:?}: {error}", hit.block);
+            }
             Ok(_) => {
                 active.journal.record(Command::Break { at: hit.block });
                 let xp = (hardness * skills::MINING_XP_PER_HARDNESS) as u64;
@@ -1726,6 +1898,28 @@ impl App {
                             pile.total()
                         );
                     }
+                }
+
+                // A lock went down. The claim it held sleeps until the town
+                // puts a new box up, and if anybody saw, that is the loudest
+                // thing on the sheet.
+                if let Some(_tier) = lock_tier {
+                    let now = active.journal.tick();
+                    let claim = active.permits.borrow().claim_here(hit.block);
+                    let label = claim.map_or_else(|| "SOMETHING".into(), |claim| claim.label);
+                    let seen = usize::from(active.watched);
+                    let mut permits = active.permits.borrow_mut();
+                    permits.broke(hit.block, now);
+                    let caught = permits.caught(permits::BOUNTY_BREACH, seen);
+                    drop(permits);
+                    active.greeting = Some((
+                        if caught {
+                            format!("{label} IS OPEN - AND YOU WERE SEEN")
+                        } else {
+                            format!("{label} IS OPEN")
+                        },
+                        Instant::now(),
+                    ));
                 }
 
                 // Breaking the chest packs it up: the block is forgotten, the
@@ -1795,6 +1989,11 @@ impl App {
             }
         }
         if let Err(error) = result {
+            if let Some(line) =
+                Self::charge_for_refusal(active, hit.placement(), permits::BOUNTY_PRYING)
+            {
+                active.greeting = Some((line, Instant::now()));
+            }
             log::debug!("could not place at {:?}: {error}", hit.placement());
         }
     }
@@ -1935,6 +2134,21 @@ impl App {
                     active.renderer.clear_overlay(INTRO_SLOT);
                     intro::mark_seen();
                 }
+                _ => {}
+            }
+            return;
+        }
+
+        // The lockbox panel, while open, owns the keyboard.
+        if self.active.as_ref().is_some_and(|active| active.permit_panel.open) {
+            let Some(active) = &mut self.active else { return };
+            match code {
+                KeyCode::KeyE | KeyCode::Escape => {
+                    active.permit_panel.close();
+                    active.picking = false;
+                    active.renderer.clear_overlay(PERMIT_SLOT);
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => active.picking = true,
                 _ => {}
             }
             return;
@@ -2160,6 +2374,22 @@ impl App {
             log::info!("no drones owned");
             return;
         }
+        // Ask before dispatching, rather than letting a drone find out block
+        // by block and stall halfway through somebody's kitchen wall.
+        if let Some(area) = area {
+            let blocked = active
+                .permits
+                .borrow()
+                .blocked_span(area.min, area.max);
+            if let Some(claim) = blocked {
+                active.greeting = Some((
+                    format!("THAT DIG CROSSES {}", claim.label),
+                    Instant::now(),
+                ));
+                log::info!("dispatch refused: the area overlaps {}", claim.label);
+                return;
+            }
+        }
         match active.mining.start(&mut active.world, crew) {
             Some(method) => {
                 if let Some(area) = area {
@@ -2284,6 +2514,13 @@ impl App {
                 active.ledger.visit(site.centre);
                 active.console = Some((site, postings, runs));
                 active.board.open_at_beacon();
+            }
+            "engine:permit_box_i" | "engine:permit_box_ii" | "engine:permit_box_iii" => {
+                let claim = active.permits.borrow().claim_here(hit.block);
+                match claim {
+                    Some(claim) => active.permit_panel.open_at(hit.block, claim),
+                    None => log::warn!("a lockbox at {:?} with no claim behind it", hit.block),
+                }
             }
             "engine:chest" => {
                 active.home_panel.open_at_chest();
@@ -2590,6 +2827,51 @@ impl App {
         );
     }
 
+    /// Turn a refused edit into a line for the player, and a mark against them
+    /// if anybody was looking.
+    ///
+    /// Only refusals naming *this* block count: bedrock returns the same error
+    /// without ever emitting an event, so a stale refusal would otherwise be
+    /// read as fresh and the player told that bedrock belongs to the mayor.
+    ///
+    /// The witness check is the flag the frame already computed. Being seen is
+    /// the whole rule — crouch, get behind something, and the town never knows.
+    fn charge_for_refusal(active: &mut Active, at: vx_core::BlockPos, points: u64) -> Option<String> {
+        let mut permits = active.permits.borrow_mut();
+        let line = permits.refusal_for(at).map(|refusal| refusal.line())?;
+        let witnesses = usize::from(active.watched);
+        if permits.caught(points, witnesses) {
+            Some(format!("{line} - SEEN"))
+        } else {
+            Some(line)
+        }
+    }
+
+    /// Rebuild and upload the lockbox panel while it is open.
+    fn refresh_permit(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.permit_panel.open {
+            return;
+        }
+        let pixels = permits::render_permit(&active.permit_panel, &active.permits.borrow());
+        let (width, height) = active.renderer.size();
+        let panel_width = permits::PERMIT_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = permits::PERMIT_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            PERMIT_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (permits::PERMIT_WIDTH, permits::PERMIT_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     /// Rebuild and upload the chest panel while it is open.
     fn refresh_home(&mut self) {
         let Some(active) = &mut self.active else { return };
@@ -2691,6 +2973,8 @@ impl App {
             drilling: active.digging.map(|(_, progress)| progress),
             level_up,
             greeting,
+            bounty: active.permits.borrow().bounty,
+            watched: active.watched,
             movement: hud::MovementReadout {
                 stance: active.movement.stance.label(),
                 stamina: active.movement.stamina_fraction(),
@@ -2869,6 +3153,9 @@ impl App {
         }
         if let Err(error) = active.homestead.save(save.root()) {
             log::error!("could not save the homestead: {error}");
+        }
+        if let Err(error) = active.permits.borrow().save(save.root()) {
+            log::error!("could not save the permits: {error}");
         }
         // The region files above are the keyframe; the journal is everything
         // ordered since. Both are written every save for now — the journal
@@ -3062,6 +3349,7 @@ impl ApplicationHandler for App {
         let mut economy = economy::Economy::new();
         let mut garage = garage::Garage::new();
         let mut homestead = homestead::Homestead::new();
+        let mut town_permits = permits::Permits::new();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -3072,7 +3360,21 @@ impl ApplicationHandler for App {
             economy.load(save.root());
             garage.load(save.root());
             homestead.load(save.root());
+            town_permits.load(save.root());
         }
+        if self.sheriff {
+            town_permits.take_office(permits::Office::Sheriff);
+            log::info!("wearing the sheriff's badge");
+        }
+        let shared_permits: permits::Shared =
+            std::rc::Rc::new(std::cell::RefCell::new(town_permits));
+
+        // The bus's first production subscriber since stage 2.x. It hooks the
+        // events rather than the call sites, so the player's drill, a drone's
+        // cutter and anything added later are all covered without one caller
+        // changing. Built here, before the world is moved into `Active`.
+        let mut events = EventBus::new();
+        permits::install(&mut events, shared_permits.clone(), world.registry());
         // The dev override starts you with a crew, so the swarm tests and the
         // capture flags still mean what they meant before machines cost money.
         if self.crew > 0 {
@@ -3092,7 +3394,7 @@ impl ApplicationHandler for App {
             camera,
             player,
             mode: MovementMode::Walk,
-            events: EventBus::new(),
+            events,
             save,
             palette,
             selected: 0,
@@ -3130,6 +3432,10 @@ impl ApplicationHandler for App {
             garage,
             homestead,
             home_panel: homestead::HomePanel::default(),
+            permits: shared_permits,
+            permit_panel: permits::PermitPanel::default(),
+            watched: false,
+            picking: false,
             offers: Vec::new(),
             intro: {
                 let mut panel = intro::Intro::new();
@@ -3195,7 +3501,16 @@ impl ApplicationHandler for App {
                         }
                         self.input.press(code);
                     }
-                    ElementState::Released => self.input.release(code),
+                    ElementState::Released => {
+                        // Letting go of Enter stops picking, the same way
+                        // letting go of the mouse stops the drill.
+                        if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
+                            if let Some(active) = &mut self.active {
+                                active.picking = false;
+                            }
+                        }
+                        self.input.release(code);
+                    }
                 }
             }
 

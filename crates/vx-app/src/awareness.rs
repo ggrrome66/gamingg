@@ -31,8 +31,26 @@ pub const RECHECK_PER_UPDATE: usize = 1;
 /// Eye heights, so sight lines leave and arrive at faces rather than feet —
 /// standing on a kerb should not break eye contact.
 pub const VILLAGER_EYE: f32 = 1.55;
+/// The player's eye *standing*. A crouching or prone player carries their own
+/// height instead — see [`Surroundings::player_eye`], which is the whole of the
+/// stealth system.
 pub const PLAYER_EYE: f32 = 1.62;
 pub const MACHINE_EYE: f32 = 0.8;
+
+/// Half the width of an observer's sight cone, as a cosine.
+///
+/// Sight used to be a full circle, which made hiding impossible to reason
+/// about: there was no behind. Roughly sixty degrees either side of where
+/// somebody is actually looking is generous enough that they are not blind and
+/// tight enough that getting behind them means something.
+pub const CONE_COS: f32 = 0.5;
+
+/// Inside this, the cone stops mattering.
+///
+/// You do not have to be looking at somebody to know they are at your elbow,
+/// and a cone without this exception lets a player stand nose-to-nose with a
+/// villager unnoticed, which reads as a bug rather than as stealth.
+pub const CLOSE_RANGE: f32 = 3.5;
 
 /// What kind of thing was seen. Kept as a plain enum rather than a trait: the
 /// three cases have nothing in common but a position, and a shared entity
@@ -65,6 +83,26 @@ pub struct Sighting {
     /// Where it was when it was seen.
     pub position: Vec3,
     pub distance: f32,
+    /// Where this target's own eyes sit above `position`.
+    ///
+    /// Carried per sighting rather than taken from the kind, because the
+    /// player's changes: standing 1.62, crouched 1.10, prone 0.35. That single
+    /// number is what makes going flat behind a one-block wall work — the
+    /// existing raycast simply misses.
+    pub eye: f32,
+}
+
+impl Sighting {
+    /// A sighting at its kind's default eye height.
+    pub fn new(kind: TargetKind, index: usize, position: Vec3, distance: f32) -> Self {
+        Sighting {
+            kind,
+            index,
+            position,
+            distance,
+            eye: kind.eye_height(),
+        }
+    }
 }
 
 /// Everything an observer could notice this update, gathered once for the
@@ -77,6 +115,10 @@ pub struct Sighting {
 pub struct Surroundings<'a> {
     pub world: Option<&'a World>,
     pub player: Option<Vec3>,
+    /// How high the player's eyes are right now — their stance decides it.
+    /// Zero means "use the standing default", so a caller that does not care
+    /// about stealth can leave it alone.
+    pub player_eye: f32,
     /// Ground points of the machines about: diggers and fliers.
     pub machines: &'a [(TargetKind, Vec3)],
 }
@@ -86,6 +128,31 @@ impl Surroundings<'_> {
     pub fn empty() -> Self {
         Surroundings::default()
     }
+
+    /// The player's eye height, falling back to standing.
+    pub fn eye(&self) -> f32 {
+        if self.player_eye > 0.0 {
+            self.player_eye
+        } else {
+            PLAYER_EYE
+        }
+    }
+}
+
+/// Is this target inside the observer's cone — or simply too close to miss?
+pub fn in_cone(from: Vec3, facing: Option<Vec3>, target: Vec3, distance: f32) -> bool {
+    let Some(facing) = facing else {
+        return true;
+    };
+    if distance <= CLOSE_RANGE {
+        return true;
+    }
+    let to = Vec3::new(target.x - from.x, 0.0, target.z - from.z);
+    let facing = Vec3::new(facing.x, 0.0, facing.z);
+    if to.length_squared() < 1.0e-6 || facing.length_squared() < 1.0e-6 {
+        return true;
+    }
+    to.normalize().dot(facing.normalize()) >= CONE_COS
 }
 
 /// One observer's senses.
@@ -105,11 +172,15 @@ impl Perception {
     ///
     /// Pure in `(world, from, targets)` — no time, no randomness — which is
     /// what keeps the villagers' bit-identical determinism intact.
+    /// `facing` is a level direction. `None` looks in every direction at
+    /// once, which is what the headless tests and anything without a heading
+    /// want.
     pub fn observe(
         &mut self,
         world: Option<&World>,
         registry: Option<&BlockRegistry>,
         from: Vec3,
+        facing: Option<Vec3>,
         targets: &[Sighting],
         range: f32,
     ) {
@@ -118,12 +189,15 @@ impl Perception {
             if candidate.distance > range {
                 continue;
             }
+            if !in_cone(from, facing, candidate.position, candidate.distance) {
+                continue;
+            }
             let clear = match (world, registry) {
                 (Some(world), Some(registry)) => sight::sees(
                     world,
                     registry,
                     from,
-                    candidate.position + Vec3::Y * candidate.kind.eye_height(),
+                    candidate.position + Vec3::Y * candidate.eye,
                     range,
                 ),
                 // No terrain to get in the way.
@@ -189,12 +263,7 @@ mod tests {
     use vx_core::{BlockPos, ChunkPos};
 
     fn sighting(kind: TargetKind, index: usize, position: Vec3, from: Vec3) -> Sighting {
-        Sighting {
-            kind,
-            index,
-            position,
-            distance: (position - from).length(),
-        }
+        Sighting::new(kind, index, position, (position - from).length())
     }
 
     #[test]
@@ -204,7 +273,7 @@ mod tests {
         let far = sighting(TargetKind::Player, 0, Vec3::new(9.0, 0.0, 0.0), eye);
 
         let mut perception = Perception::default();
-        perception.observe(None, None, eye, &[far, near], SIGHT_RANGE);
+        perception.observe(None, None, eye, None, &[far, near], SIGHT_RANGE);
         assert_eq!(perception.visible.unwrap().index, 1);
         assert_eq!(perception.visible.unwrap().kind, TargetKind::Villager);
     }
@@ -214,7 +283,7 @@ mod tests {
         let eye = Vec3::ZERO;
         let distant = sighting(TargetKind::Player, 0, Vec3::new(500.0, 0.0, 0.0), eye);
         let mut perception = Perception::default();
-        perception.observe(None, None, eye, &[distant], SIGHT_RANGE);
+        perception.observe(None, None, eye, None, &[distant], SIGHT_RANGE);
         assert!(perception.visible.is_none());
     }
 
@@ -231,13 +300,7 @@ mod tests {
         let target = sighting(TargetKind::Player, 0, target_at, eye);
 
         let mut perception = Perception::default();
-        perception.observe(
-            Some(&world),
-            Some(world.registry()),
-            eye,
-            &[target],
-            SIGHT_RANGE,
-        );
+        perception.observe(Some(&world), Some(world.registry()), eye, None, &[target], SIGHT_RANGE);
         assert!(perception.visible.is_some(), "clear line was not seen");
 
         for dy in 0..4 {
@@ -250,6 +313,7 @@ mod tests {
             Some(&world),
             Some(world.registry()),
             eye,
+            None,
             &[target],
             SIGHT_RANGE,
         );
@@ -261,10 +325,10 @@ mod tests {
         let eye = Vec3::ZERO;
         let target = sighting(TargetKind::Player, 0, Vec3::new(4.0, 0.0, 0.0), eye);
         let mut perception = Perception::default();
-        perception.observe(None, None, eye, &[target], SIGHT_RANGE);
+        perception.observe(None, None, eye, None, &[target], SIGHT_RANGE);
 
         // Out of sight: still remembered, and still worth facing.
-        perception.observe(None, None, eye, &[], SIGHT_RANGE);
+        perception.observe(None, None, eye, None, &[], SIGHT_RANGE);
         assert!(perception.visible.is_none());
         assert_eq!(perception.last_seen.map(|seen| seen.position), Some(target.position));
         assert_eq!(perception.watching().map(|seen| seen.position), Some(target.position));
@@ -281,11 +345,11 @@ mod tests {
         let eye = Vec3::ZERO;
         let villager = sighting(TargetKind::Villager, 2, Vec3::new(2.0, 0.0, 0.0), eye);
         let mut perception = Perception::default();
-        perception.observe(None, None, eye, &[villager], SIGHT_RANGE);
+        perception.observe(None, None, eye, None, &[villager], SIGHT_RANGE);
         assert!(perception.sees_player().is_none());
 
         let player = sighting(TargetKind::Player, 0, Vec3::new(1.0, 0.0, 0.0), eye);
-        perception.observe(None, None, eye, &[villager, player], SIGHT_RANGE);
+        perception.observe(None, None, eye, None, &[villager, player], SIGHT_RANGE);
         assert!(perception.sees_player().is_some());
     }
 
@@ -312,8 +376,8 @@ mod tests {
         ];
         let mut a = Perception::default();
         let mut b = Perception::default();
-        a.observe(None, None, eye, &targets, SIGHT_RANGE);
-        b.observe(None, None, eye, &targets, SIGHT_RANGE);
+        a.observe(None, None, eye, None, &targets, SIGHT_RANGE);
+        b.observe(None, None, eye, None, &targets, SIGHT_RANGE);
         assert_eq!(a, b);
     }
 }

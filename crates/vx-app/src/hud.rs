@@ -15,7 +15,7 @@ use crate::skills::{self, Skills};
 /// Panel size in texture pixels. Displayed 2x, so text is comfortably
 /// readable without a big texture.
 pub const HUD_WIDTH: u32 = 220;
-pub const HUD_HEIGHT: u32 = 80;
+pub const HUD_HEIGHT: u32 = 94;
 
 /// On-screen scale factor for the panel.
 pub const HUD_SCALE: f32 = 2.0;
@@ -32,6 +32,9 @@ const WIND: [u8; 4] = [110, 200, 255, 255];
 const WIND_LOW: [u8; 4] = [235, 90, 70, 255];
 /// The load bar. Warms as the pack fills, because a full pack is a decision.
 const LOAD: [u8; 4] = [200, 170, 110, 255];
+/// A bounty on your head, and the eye that says somebody can see you.
+const WANTED: [u8; 4] = [235, 90, 70, 255];
+const EYE: [u8; 4] = [255, 210, 120, 255];
 
 /// Everything the HUD shows this frame.
 pub struct HudContent<'a> {
@@ -50,6 +53,14 @@ pub struct HudContent<'a> {
     /// True while the body waits for its own ground to stream back in after a
     /// feed. Worth saying out loud: the controls are briefly dead on purpose.
     pub reconnecting: bool,
+    /// Bounty points the town has written against you. Zero draws nothing.
+    pub bounty: u64,
+    /// True while at least one villager can actually see you.
+    ///
+    /// Without this the stealth rules are invisible mechanics: a player has no
+    /// way to learn that crouching behind a wall worked except by not being
+    /// arrested, which is far too slow a teacher.
+    pub watched: bool,
     /// Stance, wind left, and how full the pack is.
     ///
     /// Passed in rather than read, like the hour above: the HUD stays a pure
@@ -177,7 +188,28 @@ pub fn render_hud(content: &HudContent) -> Vec<u8> {
     }
     y += LINE_HEIGHT as i32;
 
-    // Line 5: the drill.
+    // Line 5: what the town thinks of you, and whether anyone is looking.
+    if content.bounty > 0 || content.watched {
+        if content.bounty > 0 {
+            let line = format!("WANTED {}", content.bounty);
+            font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, WANTED, &line);
+        }
+        if content.watched {
+            let seen = "SEEN";
+            font::draw_text(
+                &mut pixels,
+                HUD_WIDTH,
+                HUD_WIDTH as i32 - margin - font::text_width(seen, 1) as i32,
+                y,
+                1,
+                EYE,
+                seen,
+            );
+        }
+        y += LINE_HEIGHT as i32;
+    }
+
+    // Line 6: the drill.
     if let Some(progress) = content.drilling {
         let line = format!("DRILLING {:.0}%", progress.clamp(0.0, 1.0) * 100.0);
         font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, TEXT, &line);
@@ -208,6 +240,8 @@ mod tests {
             level_up: None,
             greeting: None,
             reconnecting: false,
+            bounty: 0,
+            watched: false,
             movement: MovementReadout::default(),
         }
     }
@@ -347,6 +381,45 @@ mod tests {
         };
 
         assert_ne!(render_hud(&blank), render_hud(&loud));
+    }
+
+    #[test]
+    fn the_wanted_line_and_the_eye_only_show_when_they_mean_something() {
+        let skills = Skills::new();
+        let clean = base_content(&skills);
+
+        let mut wanted = base_content(&skills);
+        wanted.bounty = 40;
+
+        let mut watched = base_content(&skills);
+        watched.watched = true;
+
+        assert_ne!(render_hud(&clean), render_hud(&wanted), "bounty does not show");
+        assert_ne!(render_hud(&clean), render_hud(&watched), "the eye does not show");
+        assert_ne!(
+            render_hud(&wanted),
+            render_hud(&watched),
+            "bounty and being seen render the same"
+        );
+    }
+
+    #[test]
+    fn a_clean_sheet_draws_no_accusation() {
+        // A player who has done nothing should never see the word WANTED.
+        let skills = Skills::new();
+        let clean = base_content(&skills);
+        let mut also_clean = base_content(&skills);
+        also_clean.bounty = 0;
+        assert_eq!(render_hud(&clean), render_hud(&also_clean));
+    }
+
+    #[test]
+    fn every_crime_readout_is_drawable() {
+        for line in ["WANTED 40", "SEEN"] {
+            for character in line.chars() {
+                assert!(font::knows(character), "undrawable {character:?} in {line}");
+            }
+        }
     }
 
     #[test]

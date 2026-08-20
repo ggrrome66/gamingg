@@ -175,9 +175,16 @@ build in it, and it survives quitting — skills included.
 
 ### Known rough edges
 
-- Prone is a stance with nothing yet that makes lying down worth doing. It stays
-  because removing a stance later is more disruptive than leaving one
-  unexercised, but it is dead weight until there is something to take cover from.
+- Bounty never decays. The town's memory is perfect and permanent, which will
+  want a statute of limitations once the warrant chain exists.
+- The player cannot hold an office in ordinary play, so the sheriff's override
+  is exercised only by the `--sheriff` development flag until the ballot box
+  lands. It is built and tested; it is simply not reachable yet.
+- Villager sight is a cone about their heading with a close-range exception, and
+  the cone width is a guess that has had no real playtesting.
+- A drone caught digging somebody's wall on the far side of town is not traced
+  back to you: the witness check is on the player's position. Convenient, and
+  arguably correct, but it is a hole a patient player could drive through.
 - The mantle arc is an interpolation, not an animation: the body slides up a
   ledge rather than climbing it, the same way villagers glide rather than walk.
   Stance poses are the standing rig scaled vertically — the parts are boxes and
@@ -629,6 +636,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run --release -p vx-app          # opens a window
 ```
 
+Every building in a town carries a lockbox saying who may edit it, ranked
+sheriff over mayor over owner over guest. Your own house is yours; the streets
+are the town's; past the town line you build where you like. Getting into
+somebody else's means earning it, picking the lock, or drilling the box out —
+and any of it only costs you a bounty if somebody actually sees you, which is
+what crouching and going prone are for.
+
 New players wake up inside their own house in the starting village, with a
 storage chest, a mailbox for mail orders, and a one-time welcome panel whose
 changelog is parsed straight out of `ROADMAP.md` (`--changelog` prints it).
@@ -669,6 +683,9 @@ Controls:
 | `Escape` | (on a feed) Hang up and return to your body |
 | `E` | Trade at the shop counter: sell at that town's prices, buy drones and fliers, or order goods by mail from another town (arrows pick, `Enter` trades, `E` leaves) |
 | `E` | Open your chest at home (arrows pick, `Enter` moves goods to the base pile), or collect the mailbox outside |
+| `E` | Read a lockbox: who owns the building, where you stand with them, and the grade of the lock |
+| `Enter` | (at a lockbox you have no right to) Hold to pick it. Needs the Security skill; you stand still and exposed while it runs |
+| `Z` / `Left Shift` | Go prone or crouch — cover and a low profile are what stop anyone seeing what you are up to |
 | `E` | Read the beacon console at the foot of a radio mast — take work, or sign for a delivery (arrows pick, `Enter` acts, `E` leaves) |
 | `M` | Mark a corner of an ore body (two marks make an area) |
 | `Tab` | Cycle the proposed mining method |

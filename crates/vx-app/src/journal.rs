@@ -47,14 +47,17 @@ use crate::mining::Mining;
 use crate::movement::{self, MoveCommand, Movement};
 
 const MAGIC: &[u8; 4] = b"VXLG";
-// Bumped to 2 when a dispatch gained its crew size, to 3 when the player's own
-// movement joined the log, and to 4 when the player's house joined the
-// hometown — not a format change, a *world* change: a v3 log replays against
-// ground that no longer generates, so the oracle honestly restarts rather than
-// reporting divergence that is nobody's fault. A journal is an oracle rather
-// than a load path — region files are still written every save — so an old one
-// being rejected costs a determinism check, not a world.
-const VERSION: u32 = 4;
+// Bumped to 2 when a dispatch gained its crew size and to 3 when the player's
+// own movement joined the log — both format changes.
+//
+// Four and five are *world* changes: the player's house joined the hometown,
+// then the lockboxes and the security office did. An older log replays against
+// ground that no longer generates, so it would report a divergence that is
+// nobody's fault. Refusing it lets the oracle restart honestly instead. A
+// journal is an oracle rather than a load path — region files are still written
+// every save — so an old one being rejected costs a determinism check, not a
+// world.
+const VERSION: u32 = 5;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///

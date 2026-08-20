@@ -58,6 +58,15 @@ pub struct TerrainBlocks {
     /// and the beacon: unbreakable, which is what deletes every "what if the
     /// mailbox is gone when the mail lands" edge case.
     pub mailbox: BlockId,
+    /// The lockboxes that hold a building's permissions, in three grades.
+    ///
+    /// Deliberately *breakable*, unlike the counter and the beacon. A lock you
+    /// cannot attack is a wall with extra steps; the whole design rests on
+    /// there being a loud, slow, expensive way through, so that the quiet
+    /// legitimate way is worth preferring.
+    pub permit_box_i: BlockId,
+    pub permit_box_ii: BlockId,
+    pub permit_box_iii: BlockId,
 }
 
 impl TerrainBlocks {
@@ -121,6 +130,18 @@ impl TerrainBlocks {
             ),
             chest: register(BlockDef::uniform("engine:chest", 28).with_hardness(Some(1.5))),
             mailbox: register(BlockDef::uniform("engine:mailbox", 29).with_hardness(None)),
+            // Hardness sets how long a breach takes once you are past the
+            // tier's power gate; the gate itself lives in the drill, because
+            // "impossible for a new player" cannot be expressed in seconds.
+            permit_box_i: register(
+                BlockDef::uniform("engine:permit_box_i", 30).with_hardness(Some(30.0)),
+            ),
+            permit_box_ii: register(
+                BlockDef::uniform("engine:permit_box_ii", 31).with_hardness(Some(150.0)),
+            ),
+            permit_box_iii: register(
+                BlockDef::uniform("engine:permit_box_iii", 32).with_hardness(Some(400.0)),
+            ),
         }
     }
 
@@ -150,6 +171,9 @@ impl TerrainBlocks {
             copper_bar: registry.id_of("engine:copper_bar")?,
             chest: registry.id_of("engine:chest")?,
             mailbox: registry.id_of("engine:mailbox")?,
+            permit_box_i: registry.id_of("engine:permit_box_i")?,
+            permit_box_ii: registry.id_of("engine:permit_box_ii")?,
+            permit_box_iii: registry.id_of("engine:permit_box_iii")?,
         })
     }
 }

@@ -46,8 +46,11 @@ pub mod slot {
     pub const COPPER_BAR: u32 = 27;
     pub const CHEST: u32 = 28;
     pub const MAILBOX: u32 = 29;
+    pub const PERMIT_I: u32 = 30;
+    pub const PERMIT_II: u32 = 31;
+    pub const PERMIT_III: u32 = 32;
     /// Total generated tiles.
-    pub const COUNT: u32 = 30;
+    pub const COUNT: u32 = 33;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -330,6 +333,36 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.35, 0.37, 0.40], noise * 0.05)
                     } else {
                         shade([0.70, 0.72, 0.75], noise * 0.06)
+                    }
+                }
+                slot::PERMIT_I | slot::PERMIT_II | slot::PERMIT_III => {
+                    // A lockbox: dark housing, a recessed panel, and a row of
+                    // status pips whose count *is* the grade. Reading a lock's
+                    // tier across the room is the point — you should be able to
+                    // decide whether it is worth your afternoon before you
+                    // start drilling.
+                    let pips = match tile {
+                        slot::PERMIT_I => 1,
+                        slot::PERMIT_II => 2,
+                        _ => 3,
+                    };
+                    // Housing tints upward with grade, so tiers differ at a
+                    // glance even before the pips resolve.
+                    let housing = [
+                        0.20 + pips as f32 * 0.03,
+                        0.21 + pips as f32 * 0.02,
+                        0.25 + pips as f32 * 0.04,
+                    ];
+                    let lit = [0.35, 0.95, 0.55];
+                    let panel = (4..12).contains(&x) && (3..9).contains(&y);
+                    let pip_row = (11..13).contains(&y);
+                    let pip_index = (x.saturating_sub(4)) / 3;
+                    if pip_row && x >= 4 && pip_index < pips && (x - 4) % 3 < 2 {
+                        shade(lit, noise * 0.04)
+                    } else if panel {
+                        shade([0.13, 0.15, 0.18], noise * 0.05)
+                    } else {
+                        shade(housing, noise * 0.06)
                     }
                 }
                 // Unknown slots get magenta, the universal "missing texture".

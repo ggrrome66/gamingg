@@ -65,6 +65,38 @@ const ROSTER: &[(Patch, HomeRoute, &str, usize)] = &[
     ),
 ];
 
+/// Which way a yaw points, on the level. The inverse of
+/// [`crate::rig::yaw_towards`], which is what set it.
+fn heading(yaw: f32) -> Vec3 {
+    Vec3::new(yaw.cos(), 0.0, -yaw.sin())
+}
+
+/// Everyone worth looking at from `from`: the player, the other townsfolk, and
+/// the machines trundling past.
+fn sightings_around(
+    around: &Surroundings,
+    from: Vec3,
+    skip_villager: Option<usize>,
+) -> Vec<Sighting> {
+    let mut targets = Vec::new();
+    if let Some(player) = around.player {
+        let mut seen = Sighting::new(
+            TargetKind::Player,
+            0,
+            player,
+            (player - from).length(),
+        );
+        // The player's stance decides how tall they are to look at.
+        seen.eye = around.eye();
+        targets.push(seen);
+    }
+    for (machine, (kind, at)) in around.machines.iter().enumerate() {
+        targets.push(Sighting::new(*kind, machine, *at, (*at - from).length()));
+    }
+    let _ = skip_villager;
+    targets
+}
+
 /// Where a villager is in their day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -348,44 +380,74 @@ impl Villagers {
 
             // Everyone worth looking at: the player, the other townsfolk, and
             // the machines trundling past.
-            let mut targets = Vec::new();
-            if let Some(player) = around.player {
-                targets.push(Sighting {
-                    kind: TargetKind::Player,
-                    index: 0,
-                    position: player,
-                    distance: (player - positions[index]).length(),
-                });
-            }
+            let mut targets = sightings_around(around, positions[index], Some(index));
             for (other, at) in positions.iter().enumerate() {
                 if other == index {
                     continue;
                 }
-                targets.push(Sighting {
-                    kind: TargetKind::Villager,
-                    index: other,
-                    position: *at,
-                    distance: (*at - positions[index]).length(),
-                });
-            }
-            for (machine, (kind, at)) in around.machines.iter().enumerate() {
-                targets.push(Sighting {
-                    kind: *kind,
-                    index: machine,
-                    position: *at,
-                    distance: (*at - positions[index]).length(),
-                });
+                targets.push(Sighting::new(
+                    TargetKind::Villager,
+                    other,
+                    *at,
+                    (*at - positions[index]).length(),
+                ));
             }
 
             let registry = around.world.map(|world| world.registry());
+            let facing = Self::facing_of(&self.folk[index]);
             self.folk[index].perception.observe(
                 around.world,
                 registry,
                 eye,
+                Some(facing),
                 &targets,
                 awareness::SIGHT_RANGE,
             );
         }
+    }
+
+    /// Which way somebody is looking, for the sight cone.
+    fn facing_of(villager: &Villager) -> Vec3 {
+        heading(villager.yaw)
+    }
+
+    /// How many townsfolk can see the player *right now*.
+    ///
+    /// A fresh cast over everybody, not the cached answer: sight is refreshed
+    /// one villager per frame, so the cache can be several frames stale — fine
+    /// for deciding whether to say good morning, useless for deciding whether
+    /// somebody watched you jemmy a lock. Three raycasts, once, at the moment
+    /// of the crime.
+    pub fn witnesses(&self, around: &Surroundings) -> usize {
+        let Some(player) = around.player else {
+            return 0;
+        };
+        let registry = around.world.map(|world| world.registry());
+        let eye_of_player = player + Vec3::Y * around.eye();
+
+        self.folk
+            .iter()
+            .filter(|villager| {
+                let eye = villager.position + Vec3::Y * TargetKind::Villager.eye_height();
+                let distance = (player - villager.position).length();
+                if distance > awareness::SIGHT_RANGE {
+                    return false;
+                }
+                if !awareness::in_cone(eye, Some(Self::facing_of(villager)), player, distance) {
+                    return false;
+                }
+                match (around.world, registry) {
+                    (Some(world), Some(registry)) => vx_world::sight::sees(
+                        world,
+                        registry,
+                        eye,
+                        eye_of_player,
+                        awareness::SIGHT_RANGE,
+                    ),
+                    _ => true,
+                }
+            })
+            .count()
     }
 
     /// Turn what each villager can see into what they do about it.
@@ -500,6 +562,7 @@ mod tests {
     /// long enough for the round-robin to have looked at everybody.
     fn look_around(town: &mut Villagers, player: Vec3) {
         let around = Surroundings {
+            player_eye: awareness::PLAYER_EYE,
             world: None,
             player: Some(player),
             machines: &[],
@@ -579,6 +642,7 @@ mod tests {
         }
 
         let around = Surroundings {
+            player_eye: awareness::PLAYER_EYE,
             world: Some(&world),
             player: Some(player),
             machines: &[],
@@ -602,6 +666,7 @@ mod tests {
         let player = Vec3::new(at.x + 1.5, walk_height(&town::home_site()), at.z);
 
         let around = Surroundings {
+            player_eye: awareness::PLAYER_EYE,
             world: None,
             player: Some(player),
             machines: &[],
@@ -636,6 +701,7 @@ mod tests {
         let drone = Vec3::new(at.x + 3.0, at.y, at.z);
         let machines = [(TargetKind::Digger, drone)];
         let around = Surroundings {
+            player_eye: awareness::PLAYER_EYE,
             world: None,
             player: None,
             machines: &machines,
@@ -665,6 +731,7 @@ mod tests {
                     (step as f32 * 0.017).cos() * 6.0,
                 );
                 let around = Surroundings {
+                    player_eye: awareness::PLAYER_EYE,
                     world: Some(&world),
                     player: Some(player),
                     machines: &[],
@@ -768,5 +835,141 @@ mod tests {
             .map(|villager| rigs[villager.variant % rigs.len()].parts.len())
             .sum();
         assert_eq!(objects.len(), parts);
+    }
+}
+
+#[cfg(test)]
+mod witness_tests {
+    use super::*;
+    use vx_core::{BlockPos, ChunkPos};
+    use vx_world::World;
+
+    /// A flat world with a floor, so a wall can be built to hide behind.
+    fn walled_world() -> World {
+        let mut world = World::new(9);
+        world.load_around(ChunkPos::new(0, 0), 1);
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        for x in -20..20 {
+            for z in -20..20 {
+                for y in 0..80 {
+                    let fill = if y == 40 { stone } else { vx_core::BlockId::AIR };
+                    world.set_block(BlockPos::new(x, y, z), fill);
+                }
+            }
+        }
+        world
+    }
+
+    /// One villager, planted, facing the player.
+    fn watcher(at: Vec3, facing_towards: Vec3) -> Villagers {
+        let mut town = Villagers::new();
+        town.folk.truncate(1);
+        town.folk[0].position = at;
+        let to = facing_towards - at;
+        town.folk[0].yaw = crate::rig::yaw_towards(to.x, to.z).unwrap_or(0.0);
+        town
+    }
+
+    fn seen_by(town: &Villagers, world: &World, player: Vec3, eye: f32) -> usize {
+        town.witnesses(&Surroundings {
+            player_eye: eye,
+            world: Some(world),
+            player: Some(player),
+            machines: &[],
+        })
+    }
+
+    #[test]
+    fn a_villager_looking_at_you_is_a_witness() {
+        let world = walled_world();
+        let player = Vec3::new(6.0, 41.0, 0.0);
+        let town = watcher(Vec3::new(0.0, 41.0, 0.0), player);
+        assert_eq!(seen_by(&town, &world, player, awareness::PLAYER_EYE), 1);
+    }
+
+    #[test]
+    fn a_villager_facing_away_sees_nothing() {
+        // There is a behind now. Before this round sight was a full circle and
+        // hiding was impossible to reason about.
+        let world = walled_world();
+        let player = Vec3::new(6.0, 41.0, 0.0);
+        let away = Vec3::new(-30.0, 41.0, 0.0);
+        let town = watcher(Vec3::new(0.0, 41.0, 0.0), away);
+        assert_eq!(seen_by(&town, &world, player, awareness::PLAYER_EYE), 0);
+    }
+
+    #[test]
+    fn somebody_at_your_elbow_notices_regardless() {
+        // A cone with no close-range exception lets you stand nose to nose
+        // with a villager unnoticed, which reads as a bug, not as stealth.
+        let world = walled_world();
+        let player = Vec3::new(1.5, 41.0, 0.0);
+        let away = Vec3::new(-30.0, 41.0, 0.0);
+        let town = watcher(Vec3::new(0.0, 41.0, 0.0), away);
+        assert_eq!(seen_by(&town, &world, player, awareness::PLAYER_EYE), 1);
+    }
+
+    #[test]
+    fn a_wall_between_you_is_not_a_witness() {
+        let mut world = walled_world();
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        for y in 41..45 {
+            for z in -6..6 {
+                world.set_block(BlockPos::new(3, y, z), stone);
+            }
+        }
+        let player = Vec3::new(6.0, 41.0, 0.0);
+        let town = watcher(Vec3::new(0.0, 41.0, 0.0), player);
+        assert_eq!(seen_by(&town, &world, player, awareness::PLAYER_EYE), 0);
+    }
+
+    #[test]
+    fn going_prone_behind_cover_hides_you() {
+        // The whole stealth system in one assertion. The wall is one block
+        // tall: standing, your eyes clear it and the villager's ray finds you;
+        // flat on your belly at 0.35 m it does not. No visibility stat, no
+        // detection meter — the raycast that was already running simply misses.
+        let mut world = walled_world();
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        for z in -6..6 {
+            world.set_block(BlockPos::new(3, 41, z), stone);
+        }
+
+        let player = Vec3::new(6.0, 41.0, 0.0);
+        let town = watcher(Vec3::new(0.0, 41.0, 0.0), player);
+
+        let standing = crate::movement::Stance::Grounded.eye_cm() as f32 / 100.0;
+        let prone = crate::movement::Stance::Prone.eye_cm() as f32 / 100.0;
+
+        assert_eq!(seen_by(&town, &world, player, standing), 1, "standing was hidden");
+        assert_eq!(seen_by(&town, &world, player, prone), 0, "prone was still seen");
+    }
+
+    #[test]
+    fn crouching_helps_less_than_going_flat() {
+        // Crouch is the compromise: quicker than prone, and it clears a
+        // one-block wall, so it buys you nothing against this particular
+        // cover. That ordering is what makes prone worth its speed penalty.
+        let standing = crate::movement::Stance::Grounded.eye_cm();
+        let crouched = crate::movement::Stance::Crouched.eye_cm();
+        let prone = crate::movement::Stance::Prone.eye_cm();
+        assert!(crouched < standing);
+        assert!(prone < crouched);
+    }
+
+    #[test]
+    fn distance_still_hides_you() {
+        let world = walled_world();
+        let player = Vec3::new(awareness::SIGHT_RANGE + 4.0, 41.0, 0.0);
+        let town = watcher(Vec3::new(0.0, 41.0, 0.0), player);
+        assert_eq!(seen_by(&town, &world, player, awareness::PLAYER_EYE), 0);
+    }
+
+    #[test]
+    fn nobody_about_means_nobody_saw() {
+        let world = walled_world();
+        let mut town = Villagers::new();
+        town.folk.clear();
+        assert_eq!(seen_by(&town, &world, Vec3::new(0.0, 41.0, 0.0), 1.62), 0);
     }
 }

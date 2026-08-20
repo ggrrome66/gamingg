@@ -31,6 +31,9 @@ use std::sync::OnceLock;
 pub const MINING: &str = "mining";
 pub const PROSPECTING: &str = "prospecting";
 pub const LOGISTICS: &str = "logistics";
+/// Picking locks. Levelled by doing it, which means the only way to get good
+/// at bypassing a door is to bypass easier ones first.
+pub const SECURITY: &str = "security";
 
 /// The level cap.
 pub const MAX_LEVEL: u32 = 99;
@@ -109,6 +112,18 @@ pub const SWEEP_XP: u64 = 100;
 pub const PING_XP: u64 = 40;
 /// XP per block a flier lands in the base.
 pub const DELIVERY_XP: u64 = 2;
+/// XP for talking a lock open, by grade. A house teaches you little; the
+/// sheriff's door teaches you a great deal.
+pub const BYPASS_XP: [u64; 3] = [120, 900, 4_000];
+
+/// Seconds to talk a lock open, given the grade's base time and your level.
+///
+/// Time is the whole cost of a bypass — you stand still and exposed while it
+/// runs, so the danger is being *seen*, not being refused. Levelling buys speed
+/// rather than certainty: there is no roll, which keeps house rule 2 intact.
+pub fn bypass_seconds(base: f32, security_level: u32) -> f32 {
+    base / (1.0 + 0.03 * (security_level.saturating_sub(1)) as f32)
+}
 
 /// The player's skill sheet.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

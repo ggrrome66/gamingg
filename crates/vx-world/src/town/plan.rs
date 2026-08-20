@@ -10,7 +10,7 @@
 //!
 //! Doors and windows are gaps in the wall grid. Nothing is carved afterwards.
 
-use vx_core::{ChunkPos, LocalPos, CHUNK_SIZE};
+use vx_core::{BlockPos, ChunkPos, LocalPos, CHUNK_SIZE};
 
 use crate::chunk::Chunk;
 use crate::gen::TerrainBlocks;
@@ -37,12 +37,110 @@ pub enum Cell {
     Chest,
     /// The mailbox outside the player's door, where ordered goods land.
     Mailbox,
+    /// The lockbox that says who may edit this building.
+    Permit(Tier),
+}
+
+/// How hard a lockbox is to get past.
+///
+/// The tier is the block, because no per-instance block state exists: three
+/// tiers, three registered blocks, three tiles. That is not a workaround — it
+/// means you can *see* a lock's grade across the room and decide whether it is
+/// worth your afternoon before you start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// A house. Slow with a starter drill, but it will give.
+    One,
+    /// A shop, the tower, the sheriff's office. Not without real gear.
+    Two,
+    /// Bunkers and military outposts. Endgame; nothing stamps one yet.
+    Three,
+}
+
+impl Tier {
+    /// The namespaced block that carries this tier.
+    pub fn block_name(self) -> &'static str {
+        match self {
+            Tier::One => "engine:permit_box_i",
+            Tier::Two => "engine:permit_box_ii",
+            Tier::Three => "engine:permit_box_iii",
+        }
+    }
+
+    /// The ASCII character the blueprints author it with.
+    pub fn glyph(self) -> u8 {
+        match self {
+            Tier::One => b'1',
+            Tier::Two => b'2',
+            Tier::Three => b'3',
+        }
+    }
+}
+
+/// What a building is for.
+///
+/// Purpose and geometry, never ownership — who holds a claim is fiction and
+/// lives in `vx-app`, on the far side of the crate boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Somebody lives here.
+    Dwelling,
+    /// The player's own house.
+    PlayerHouse,
+    /// The supply counter.
+    Shop,
+    /// Where the sheriff and the deputies work.
+    Security,
+    /// The radio tower: the town's own infrastructure.
+    Civic,
+    /// Paving. Town property, but nothing to lock.
+    Paving,
+}
+
+impl Role {
+    /// The grade of lock this kind of building carries.
+    pub fn tier(self) -> Option<Tier> {
+        match self {
+            Role::Dwelling | Role::PlayerHouse => Some(Tier::One),
+            Role::Shop | Role::Security | Role::Civic => Some(Tier::Two),
+            Role::Paving => None,
+        }
+    }
+}
+
+/// One building at a site, with the ground it claims.
+///
+/// Bounds run one below the floor and one above the roof, so nobody tunnels
+/// under a wall or drops a lid on a roof and calls it untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Building {
+    pub role: Role,
+    pub min: BlockPos,
+    pub max: BlockPos,
 }
 
 /// One authored building, positioned relative to the town centre.
 struct Blueprint {
+    role: Role,
     min: (i32, i32),
     layers: &'static [&'static [&'static str]],
+}
+
+impl Blueprint {
+    /// Width in x and depth in z, from layer zero.
+    ///
+    /// Safe only because every blueprint is rectangular on every layer, which
+    /// `a_blueprint_is_rectangular_on_every_layer` exists to keep true —
+    /// `cell_at` tolerates raggedness silently, so nothing else would notice.
+    fn extent(&self) -> (i32, i32) {
+        let depth = self.layers.first().map_or(0, |rows| rows.len()) as i32;
+        let width = self
+            .layers
+            .first()
+            .and_then(|rows| rows.first())
+            .map_or(0, |line| line.len()) as i32;
+        (width, depth)
+    }
 }
 
 /// The radio tower: the one structure every town on the frontier shares.
@@ -51,12 +149,13 @@ struct Blueprint {
 /// beacon console at its foot facing the plaza. `T` mast, `G` grate, `B`
 /// console.
 const RADIO_TOWER: Blueprint = Blueprint {
+    role: Role::Civic,
     min: (-2, -16),
     layers: &[
         // Deck at ground level.
         &["GGGGG", "GGGGG", "GGGGG", "GGGGG", "GGGGG"],
         // The console stands on the deck's south edge, facing the plaza.
-        &["T...T", ".....", ".....", ".....", "T.B.T"],
+        &["T..2T", ".....", ".....", ".....", "T.B.T"],
         &["T...T", ".....", ".....", ".....", "T...T"],
         &["T...T", ".....", ".....", ".....", "T...T"],
         &["T...T", ".....", ".....", ".....", "T...T"],
@@ -78,6 +177,7 @@ const RADIO_TOWER: Blueprint = Blueprint {
 /// The supply shed: a container with the trading counter along its back wall.
 /// `M` metal, `X` rusted, `G` roof decking, `C` counter.
 const SUPPLY_SHED: Blueprint = Blueprint {
+    role: Role::Shop,
     min: (-4, 6),
     layers: &[
         &[
@@ -95,7 +195,7 @@ const SUPPLY_SHED: Blueprint = Blueprint {
             "X.......X",
             "M.CCCCC.M",
             "X.......X",
-            "M.......M",
+            "M2......M",
             "MMMXMMMXM",
         ],
         &[
@@ -122,7 +222,7 @@ const SUPPLY_SHED: Blueprint = Blueprint {
 /// A dwelling: one container, door in the east wall.
 const CONTAINER_EAST_DOOR: &[&[&str]] = &[
     &["GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG"],
-    &["MMMXMMM", "M.....X", "M......", "X......", "M.....M", "MXMMMXM"],
+    &["MMMXMMM", "M1....X", "M......", "X......", "M.....M", "MXMMMXM"],
     // The doorway runs two blocks high, or nothing could walk through it.
     &["MMMMMMM", "X.....M", "M......", "M......", "X.....M", "MMMXMMM"],
     &["GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG"],
@@ -131,7 +231,7 @@ const CONTAINER_EAST_DOOR: &[&[&str]] = &[
 /// The same, door in the west wall.
 const CONTAINER_WEST_DOOR: &[&[&str]] = &[
     &["GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG"],
-    &["MMMXMMM", "X.....M", "......M", "......X", "M.....M", "MXMMMXM"],
+    &["MMMXMMM", "X....1M", "......M", "......X", "M.....M", "MXMMMXM"],
     &["MMMMMMM", "M.....X", "......M", "......M", "M.....X", "MMMXMMM"],
     &["GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG"],
 ];
@@ -140,7 +240,7 @@ const CONTAINER_WEST_DOOR: &[&[&str]] = &[
 /// catwalk over the lower roof.
 const CONTAINER_STACK: &[&[&str]] = &[
     &["GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG"],
-    &["MMMXMMM", "M.....M", "X.....X", "M.....M", "M.....X", "MM...MM"],
+    &["MMMXMMM", "M1....M", "X.....X", "M.....M", "M.....X", "MM...MM"],
     &["MMMMMMM", "X.....M", "M.....X", "M.....M", "X.....M", "MM...MM"],
     &["GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG"],
     &["XXXMXXX", "X.....X", "M.....M", "X.....X", "M.....M", "XXXXXXX"],
@@ -156,6 +256,7 @@ const CONTAINER_STACK: &[&[&str]] = &[
 /// The eighth column sits outside the walls — no floor, no roof — so the
 /// mailbox stands on the town's ground like the street furniture it is.
 const PLAYER_HOUSE: Blueprint = Blueprint {
+    role: Role::PlayerHouse,
     min: (-17, 6),
     layers: &[
         &[
@@ -171,7 +272,7 @@ const PLAYER_HOUSE: Blueprint = Blueprint {
             "M.....XO",
             "MS......",
             "X.......",
-            "M.....M.",
+            "M1....M.",
             "MXMMMXM.",
         ],
         // The doorway runs two blocks high, or nothing could walk through it.
@@ -194,7 +295,53 @@ const PLAYER_HOUSE: Blueprint = Blueprint {
     ],
 };
 
+/// Where the sheriff and the deputies work.
+///
+/// The mirror of the player's house across the plaza, door on the west face
+/// looking down the high street. Its lockbox is a grade above a dwelling's:
+/// the office that answers break-ins is not itself an easy break-in.
+const SECURITY_OFFICE: Blueprint = Blueprint {
+    role: Role::Security,
+    min: (10, 6),
+    layers: &[
+        &[
+            "GGGGGGG",
+            "GGGGGGG",
+            "GGGGGGG",
+            "GGGGGGG",
+            "GGGGGGG",
+            "GGGGGGG",
+        ],
+        &[
+            "MMMXMMM",
+            "X....2M",
+            "......M",
+            "......X",
+            "M.....M",
+            "MXMMMXM",
+        ],
+        // The doorway runs two blocks high, or nothing could walk through it.
+        &[
+            "MMMMMMM",
+            "M.....X",
+            "......M",
+            "......M",
+            "M.....X",
+            "MMMXMMM",
+        ],
+        &[
+            "GGGGGGG",
+            "GGGGGGG",
+            "GGGGGGG",
+            "GGGGGGG",
+            "GGGGGGG",
+            "GGGGGGG",
+        ],
+    ],
+};
+
 const PATHS: Blueprint = Blueprint {
+    role: Role::Paving,
     min: (-16, -9),
     layers: &[&[
         "...............PPP...............",
@@ -220,14 +367,17 @@ const DEPOT_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
     SUPPLY_SHED,
     Blueprint {
+        role: Role::Dwelling,
         min: (-17, -3),
         layers: CONTAINER_EAST_DOOR,
     },
     Blueprint {
+        role: Role::Dwelling,
         min: (10, -3),
         layers: CONTAINER_WEST_DOOR,
     },
     Blueprint {
+        role: Role::Dwelling,
         min: (-4, -24),
         layers: CONTAINER_STACK,
     },
@@ -239,10 +389,12 @@ const MINE_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
     SUPPLY_SHED,
     Blueprint {
+        role: Role::Dwelling,
         min: (-17, -3),
         layers: CONTAINER_STACK,
     },
     Blueprint {
+        role: Role::Dwelling,
         min: (10, -3),
         layers: CONTAINER_STACK,
     },
@@ -254,14 +406,17 @@ const REFINERY_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
     SUPPLY_SHED,
     Blueprint {
+        role: Role::Dwelling,
         min: (-17, -3),
         layers: CONTAINER_WEST_DOOR,
     },
     Blueprint {
+        role: Role::Dwelling,
         min: (10, -3),
         layers: CONTAINER_STACK,
     },
     Blueprint {
+        role: Role::Dwelling,
         min: (-4, -24),
         layers: CONTAINER_EAST_DOOR,
     },
@@ -277,18 +432,22 @@ const HOME_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
     SUPPLY_SHED,
     Blueprint {
+        role: Role::Dwelling,
         min: (-17, -3),
         layers: CONTAINER_EAST_DOOR,
     },
     Blueprint {
+        role: Role::Dwelling,
         min: (10, -3),
         layers: CONTAINER_WEST_DOOR,
     },
     Blueprint {
+        role: Role::Dwelling,
         min: (-4, -24),
         layers: CONTAINER_STACK,
     },
     PLAYER_HOUSE,
+    SECURITY_OFFICE,
     PATHS,
 ];
 
@@ -334,6 +493,12 @@ pub fn spawn_offset() -> (i32, i32) {
     (-14, 9)
 }
 
+/// Your own lockbox, in the corner of your house. Named so the geometry tests
+/// and the blueprint cannot drift apart.
+pub fn permit_offset_player_house() -> (i32, i32) {
+    (-16, 10)
+}
+
 /// The authored cell at a world position for one site, if any.
 pub fn cell_at(site: &TownSite, x: i32, y: i32, z: i32) -> Option<Cell> {
     let layer = y - site.ground;
@@ -363,6 +528,9 @@ pub fn cell_at(site: &TownSite, x: i32, y: i32, z: i32) -> Option<Cell> {
             Some(b'P') => return Some(Cell::Path),
             Some(b'S') => return Some(Cell::Chest),
             Some(b'O') => return Some(Cell::Mailbox),
+            Some(b'1') => return Some(Cell::Permit(Tier::One)),
+            Some(b'2') => return Some(Cell::Permit(Tier::Two)),
+            Some(b'3') => return Some(Cell::Permit(Tier::Three)),
             _ => continue,
         }
     }
@@ -379,6 +547,63 @@ pub fn cell_at_any(
     sites
         .iter()
         .find_map(|site| cell_at(site, x, y, z).map(|cell| (site, cell)))
+}
+
+/// Every building this site puts up, with the ground each one claims.
+///
+/// Pure in the site, like everything else here: the same town always yields the
+/// same buildings in the same order, which is what lets a claim be *derived*
+/// rather than stored.
+pub fn buildings(site: &TownSite) -> Vec<Building> {
+    plan_for(site)
+        .iter()
+        .map(|blueprint| {
+            let (width, depth) = blueprint.extent();
+            Building {
+                role: blueprint.role,
+                // One below the floor and one above the roof: a claim you can
+                // tunnel under is not a claim.
+                min: BlockPos::new(
+                    site.centre.0 + blueprint.min.0,
+                    site.ground - 1,
+                    site.centre.1 + blueprint.min.1,
+                ),
+                max: BlockPos::new(
+                    site.centre.0 + blueprint.min.0 + width - 1,
+                    site.ground + blueprint.layers.len() as i32,
+                    site.centre.1 + blueprint.min.1 + depth - 1,
+                ),
+            }
+        })
+        .collect()
+}
+
+/// Where this site's lockboxes stand, with the grade of each.
+pub fn lockboxes(site: &TownSite) -> Vec<(BlockPos, Tier)> {
+    let mut found = Vec::new();
+    for blueprint in plan_for(site) {
+        for (layer, rows) in blueprint.layers.iter().enumerate() {
+            for (row, line) in rows.iter().enumerate() {
+                for (col, byte) in line.bytes().enumerate() {
+                    let tier = match byte {
+                        b'1' => Tier::One,
+                        b'2' => Tier::Two,
+                        b'3' => Tier::Three,
+                        _ => continue,
+                    };
+                    found.push((
+                        BlockPos::new(
+                            site.centre.0 + blueprint.min.0 + col as i32,
+                            site.ground + layer as i32,
+                            site.centre.1 + blueprint.min.1 + row as i32,
+                        ),
+                        tier,
+                    ));
+                }
+            }
+        }
+    }
+    found
 }
 
 /// The tallest authored layer of a site's plan, for the stamping loop's bound.
@@ -428,6 +653,9 @@ pub fn stamp(chunk: &mut Chunk, position: ChunkPos, sites: &[TownSite], blocks: 
                         Cell::Path => blocks.stone,
                         Cell::Chest => blocks.chest,
                         Cell::Mailbox => blocks.mailbox,
+                        Cell::Permit(Tier::One) => blocks.permit_box_i,
+                        Cell::Permit(Tier::Two) => blocks.permit_box_ii,
+                        Cell::Permit(Tier::Three) => blocks.permit_box_iii,
                     };
                     if let Some(local) = LocalPos::new(local_x, world_y, local_z) {
                         chunk.set(local, block);
@@ -496,9 +724,10 @@ mod tests {
     fn the_players_house_stands_hollow_with_a_working_door() {
         let site = town::home_site();
         // Interior air across both wall layers.
+        let fittings = [chest_offset(), permit_offset_player_house()];
         for x in -16..=-12 {
             for z in 7..=10 {
-                if (x, z) == chest_offset() {
+                if fittings.contains(&(x, z)) {
                     continue;
                 }
                 for y in [HOME_GROUND_Y + 1, HOME_GROUND_Y + 2] {
@@ -557,6 +786,147 @@ mod tests {
             cell_at(&elsewhere, elsewhere.centre.0 + cx, HOME_GROUND_Y + 1, elsewhere.centre.1 + cz),
             None,
             "a stranger's depot grew the player's chest"
+        );
+    }
+
+    #[test]
+    fn a_blueprint_is_rectangular_on_every_layer() {
+        // `extent` reads width and depth off layer zero, and `cell_at`
+        // tolerates a ragged row in silence — so a stray character would give
+        // every claim in the game slightly wrong edges and nothing would say
+        // so. This is the guard for that.
+        for site in [
+            town::home_site(),
+            TownSite { centre: (512, 0), speciality: Speciality::Mine, ..town::home_site() },
+            TownSite { centre: (0, 512), speciality: Speciality::Refinery, ..town::home_site() },
+        ] {
+            for blueprint in plan_for(&site) {
+                let (width, depth) = blueprint.extent();
+                for (layer, rows) in blueprint.layers.iter().enumerate() {
+                    assert_eq!(
+                        rows.len() as i32,
+                        depth,
+                        "layer {layer} at {:?} has a different depth",
+                        blueprint.min
+                    );
+                    for (row, line) in rows.iter().enumerate() {
+                        assert_eq!(
+                            line.len() as i32,
+                            width,
+                            "row {row} of layer {layer} at {:?} is ragged",
+                            blueprint.min
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_building_carries_a_lockbox_of_its_tier() {
+        // Paving has nothing to lock; everything else does, and at the grade
+        // its role calls for.
+        for site in [
+            town::home_site(),
+            TownSite { centre: (512, 0), speciality: Speciality::Mine, ..town::home_site() },
+            TownSite { centre: (0, 512), speciality: Speciality::Refinery, ..town::home_site() },
+        ] {
+            let boxes = lockboxes(&site);
+            for building in buildings(&site) {
+                let Some(tier) = building.role.tier() else {
+                    continue;
+                };
+                let found = boxes.iter().find(|(at, _)| {
+                    at.x >= building.min.x
+                        && at.x <= building.max.x
+                        && at.z >= building.min.z
+                        && at.z <= building.max.z
+                });
+                let (_, grade) = found.unwrap_or_else(|| {
+                    panic!("{:?} at {:?} has no lockbox", building.role, building.min)
+                });
+                assert_eq!(*grade, tier, "{:?} carries the wrong grade", building.role);
+            }
+        }
+    }
+
+    #[test]
+    fn a_lockbox_never_blocks_a_door_or_a_home_route() {
+        // The doorways every plan promises, and the interior points the
+        // villagers walk to at night. A box in either would wall somebody in.
+        let site = town::home_site();
+        let blocked: Vec<BlockPos> = lockboxes(&site).into_iter().map(|(at, _)| at).collect();
+
+        let doorways = [
+            BlockPos::new(0, HOME_GROUND_Y + 1, 6),    // the shed
+            BlockPos::new(-11, HOME_GROUND_Y + 1, -1), // east-door container
+            BlockPos::new(10, HOME_GROUND_Y + 1, -1),  // west-door container
+            BlockPos::new(-11, HOME_GROUND_Y + 1, 8),  // the player's house
+            BlockPos::new(10, HOME_GROUND_Y + 1, 8),   // the security office
+        ];
+        for door in doorways {
+            assert!(!blocked.contains(&door), "a lockbox blocks the door at {door:?}");
+        }
+
+        // The roster's three home routes end inside their containers.
+        for bed in [(-14.0, -0.5), (-1.0, -21.0), (13.0, -0.5)] {
+            for y in [HOME_GROUND_Y + 1, HOME_GROUND_Y + 2] {
+                let at = BlockPos::new(bed.0 as i32, y, bed.1 as i32);
+                assert!(!blocked.contains(&at), "a lockbox stands where somebody sleeps");
+            }
+        }
+    }
+
+    #[test]
+    fn the_security_office_stands_only_in_the_hometown() {
+        let home = town::home_site();
+        assert!(buildings(&home).iter().any(|b| b.role == Role::Security));
+
+        let elsewhere = TownSite { centre: (2048, 2048), ..home };
+        assert!(
+            !buildings(&elsewhere).iter().any(|b| b.role == Role::Security),
+            "a stranger's depot grew a sheriff"
+        );
+    }
+
+    #[test]
+    fn building_bounds_cover_every_authored_cell() {
+        // A claim is only as honest as its edges: every block a plan actually
+        // stamps has to fall inside the box that claims it.
+        let site = town::home_site();
+        let boxes = buildings(&site);
+        for layer in 0..max_layers(&site) {
+            let y = site.ground + layer;
+            for x in -30..=30 {
+                for z in -30..=30 {
+                    if cell_at(&site, x, y, z).is_none() {
+                        continue;
+                    }
+                    assert!(
+                        boxes.iter().any(|b| {
+                            x >= b.min.x && x <= b.max.x
+                                && y >= b.min.y && y <= b.max.y
+                                && z >= b.min.z && z <= b.max.z
+                        }),
+                        "authored cell at ({x},{y},{z}) is inside no building"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_claim_reaches_under_the_floor_and_over_the_roof() {
+        // Otherwise the answer to a locked door is a shovel.
+        let site = town::home_site();
+        let house = buildings(&site)
+            .into_iter()
+            .find(|b| b.role == Role::PlayerHouse)
+            .expect("the hometown has the player's house");
+        assert!(house.min.y < site.ground, "you could tunnel in from below");
+        assert!(
+            house.max.y > site.ground + 3,
+            "you could build a lid on the roof"
         );
     }
 

@@ -85,7 +85,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 9b | `dbfe091` | Town books, moving prices, inter-town freight, player trade runs, copper bars |
 | 10a | `63da370` | Machines cost credits, trade map on the console, handheld map page |
 | 10b | `b12b1e2` | Player movement on a fixed clock: stance, sprint, slide, vault, mantle, stamina, carried mass |
-| 10c | _this_ | Pregenerated spawn, streaming off the frame thread, the player's house, mail-order, the welcome panel |
+| 10c | `67aa3a6` | Pregenerated spawn, streaming off the frame thread, the player's house, mail-order, the welcome panel |
+| 11 | _this_ | Permits: ranked claims, three grades of lockbox, witnesses and sneaking, bounty, breaching and lock-picking |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -341,6 +342,85 @@ load as ever, and player edits win over regeneration, which is correct.
 
 ---
 
+## Shipped — Stage 11: permits
+
+You could walk up to anybody's house and pull the walls off, and not one soul
+said a word. This round the town grew a spine — and three ways past a locked
+door, priced so the honest one is the best one.
+
+**The bus finally has a subscriber.** `break_block` and `place_block` have
+emitted cancellable events since stage 2.x with the module doc promising "mods
+will, without any of these call sites changing". Eight stages later, that is
+exactly what happened: the permission gate hooks the events, so the player's
+drill, a drone's cutter and anything added later are all covered, and not one
+caller changed.
+
+**No actor identity was needed, and that was the finding.** The obvious design
+threads an `Actor` through `break_block`'s seven call sites. It turned out the
+only distinction that matters is live-versus-replay, and that already existed
+structurally: `journal::replay` is handed a fresh `EventBus` by every caller, so
+the oracle never sees the gate. `the_replay_oracle_runs_without_the_gate` is the
+tripwire for anyone who later "helpfully" passes the live bus in.
+
+**Claims are derived, never stored.** A town's buildings are a pure function of
+its site, so `plan::buildings` gives every building a role and an AABB — one
+below the floor and one above the roof, because a claim you can tunnel under is
+not a claim. What is *stored* is only what cannot be derived: who has been let
+in, who holds office, what you have been caught doing, and how far through a
+lock you have drilled.
+
+The ranking is **Sheriff > Mayor > owner > guest > everyone**. The sheriff opens
+anything, because a lock the law cannot pass is a lock that makes crime safe.
+The mayor is not an override — they own the streets, the paving, the tower and
+every scrap of open ground inside the town line, which is status, not a skeleton
+key. Outside the town line nothing is claimed and you build where you like.
+
+**Stealth was already in the engine; nothing was reading it.**
+`awareness::PLAYER_EYE` was a flat 1.62 and the villagers' sight ray aimed there
+no matter what the player was doing. It now carries the player's *live stance*
+eye height — 0.35 m prone — so going flat behind a one-block wall is occluded by
+the raycast that was already running. No visibility stat, no detection meter:
+stealth is geometry. `Stance::Prone`, which the stage 10b notes flagged as dead
+weight, now has a job. Villager sight also gained a cone about the heading they
+already track, because before this there was no *behind* to get to.
+
+**Seen is the rule.** Prying at a claimed wall, picking a lock, smashing one —
+all of it costs bounty only if somebody can actually see you, checked with a
+fresh cast at the moment of the crime rather than the round-robin cache, which
+is several frames stale. The HUD grew an eye, because without it the stealth
+rules are invisible mechanics and the only teacher is being arrested.
+
+**Three ways through a door.** Locks come in three grades and are deliberately
+*breakable* — a lock you cannot attack is a wall with extra steps.
+- **Authenticate**: free, permanent, no risk. Trust through trade is stage 12;
+  this round only the owner qualifies.
+- **Pick it**: needs the new `SECURITY` skill, leaves the lock standing so
+  nobody need ever know. Deterministic — no roll — because what levelling buys
+  is *speed*, and the real cost is standing there exposed while it runs.
+- **Drill it**: each grade carries a hard `min_power` floor as well as a
+  hardness, because "impossible for a new player" cannot be said in seconds
+  (drilling is `hardness / power`, so any hardness eventually gives). Breach
+  progress *persists* where ordinary drilling resets on a wobble — a breach is a
+  project you come back to; a pick is not, and that asymmetry is what makes
+  choosing between loud and quiet a decision.
+
+Breaking a lock leaves the building open until the town puts a new box up. The
+rebuild is recorded as an ordinary `Command::Place`, so a replay puts the lock
+back at the same tick — a world edit the journal cannot see is a world edit that
+makes the oracle lie.
+
+**Stated plainly rather than hidden:** the player holds no office in ordinary
+play, so the sheriff override is built and tested but exercised only through the
+`--sheriff` development flag until stage 13's ballot box. And with town land
+claimed, your chest and your base container can no longer go anywhere in town
+except inside your own house — the toast says so rather than leaving you jabbing
+at the dirt.
+
+Journal VERSION 5: the lockboxes and the security office changed generated
+ground, so an older log would replay against terrain that no longer generates.
+
+---
+
 ## Planned — Stage 10d: the arsenal, and what robbing costs
 
 Caravans can be intercepted. Doing it makes you wanted.
@@ -408,32 +488,9 @@ the data-driven shape means hostiles slot in later without a rewrite.
 The town-law arc, in three rounds. The user's design, recorded whole so none of
 it gets lost between rounds.
 
-### B1 — Build permissions and the bounty ledger
+### B1 — Build permissions and the bounty ledger — **shipped as stage 11**
 
-Each building carries an **authorization container** — tool-cupboard-shaped,
-with **no upkeep and no decay**: houses persist indefinitely. Editing a
-building's blocks requires being authorized on its container. Outside town
-limits, free building everywhere.
-
-Authorization is **ranked, not binary**. The town priority order, top down:
-**Sheriff > Mayor > building owner > authorized guests > everyone**. The
-sheriff's rank is the point: a sheriff can enter — and later, when doors and
-locks exist, unlock — buildings they were never authorized on, because
-enforcement has to reach where bounties hide. Shops and the **security office**
-(where the sheriff and deputies live) sit at a much higher authorization
-difficulty than houses.
-
-**Bounty points**: playing the loop legally — mine, haul, trade — accrues zero.
-Every attempted edit of a building you are not authorized on adds bounty points
-to your ledger; attempts count, the wall does not have to fall. This is the
-ledger the 10d arsenal's bounty ("economic plus a contract on your head")
-reads.
-
-The mechanism is already waiting: `BlockBreakEvent`/`BlockPlaceEvent` are
-`Cancellable`, the bus has priority subscriptions and `emit_cancellable`, and
-there are **zero subscribers today** — B1 is the first, with no call-site
-changes. Prerequisites: `Blueprint` gains names/roles and exposed per-building
-bounds; the 10c chest is the prototype authorization container.
+See the stage 11 section above.
 
 ### B2 — Towns that work: offices and the warrant chain
 

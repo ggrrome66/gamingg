@@ -35,5 +35,6 @@ pub use save::{SaveError, WorldSave};
 pub use seed::SeedPath;
 pub use sight::{obstruction, sees};
 pub use storage::{PalettedStorage, StorageError};
+pub use town::plan::{Building, Role, Tier};
 pub use town::{Speciality, TownName, TownSite};
 pub use world::World;
