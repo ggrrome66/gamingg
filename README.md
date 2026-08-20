@@ -168,13 +168,36 @@ build in it, and it survives quitting — skills included.
 | `vx-mesh` | Greedy meshing + crossed-quad plants, packed into 8-byte quads | Done |
 | `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
-| `vx-app` | Window, walk/fly/third-person camera, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, garage, handheld, beacon board, town economy, maps, command journal, `gamingg` binary | Done |
+| `vx-app` | Window, walk/fly/third-person camera, tick-based player movement, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, garage, handheld, beacon board, town economy, maps, command journal, `gamingg` binary | Done |
 | `vx-agent` | Job board, flow fields, mine planning, scanner, flier + fleet, manual piloting | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
 
 ### Known rough edges
 
+- Prone is a stance with nothing yet that makes lying down worth doing. It stays
+  because removing a stance later is more disruptive than leaving one
+  unexercised, but it is dead weight until there is something to take cover from.
+- The mantle arc is an interpolation, not an animation: the body slides up a
+  ledge rather than climbing it, the same way villagers glide rather than walk.
+  Stance poses are the standing rig scaled vertically — the parts are boxes and
+  there are no joints to bend.
+- Swimming slows you and stops you sprinting, and that is all it does. There is
+  nothing to do underwater and no aquatic machine to do it with.
+- Slide friction is one constant for every surface, so gravel, metal grating and
+  a wet town street all feel the same. Per-block friction is a small registry
+  change and a large tuning job.
+- No view bob, camera roll on strafe, sprint FOV shift or landing dip. The
+  cheapest way to make movement feel good and the fastest way to make people
+  motion sick, so they want individual toggles rather than arriving on by
+  default.
+- Toggle-versus-hold for sprint, crouch and prone is not configurable, and input
+  is not remappable. There are no gamepad bindings at all.
+- The third-person camera does not swing clear of the body during a slide, so a
+  slide into a wall can fill the frame with your own back. An existing rough
+  edge, now reachable at higher speed.
+- A 2.2 m mantle lets the player leave a hole a ground drone cannot drive out
+  of. The planner does not warn about it yet.
 - Saves store a full chunk snapshot per modified chunk — about 24 KiB whether
   one block changed or ten thousand. An edit journal would cost bytes instead.
   Harmless until worlds get large.
@@ -606,14 +629,28 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run --release -p vx-app          # opens a window
 ```
 
+### A build you can just run
+
+`dist/` holds a stripped release binary for x86-64 Linux, for testing on a Steam
+Deck without a toolchain. One file, no assets, no installer — the shaders are
+compiled in. It needs **glibc 2.39 or newer** (SteamOS 3.7+ is fine, 3.6 is not);
+`dist/README.md` has the check and the rest of the Deck notes.
+
+```sh
+./dist/gamingg-linux-x86_64
+```
+
 Controls:
 
 | Input | Action |
 |---|---|
 | `WASD` | Move |
-| `Space` | Jump (walk) / rise (fly) |
-| `Left Shift` | Descend (fly) |
+| `Space` | Jump (walk) / rise (fly). Held into a ledge above waist height, mantle it |
+| `Left Shift` | Crouch (walk) / descend (fly) |
 | `Left Ctrl` | Sprint |
+| `Left Ctrl` + `Left Shift` | Slide, from a sprint. A slide-jump keeps the speed it built |
+| `Z` | Go prone |
+| — | Vaulting a waist-high ledge is automatic; you do not press anything |
 | Click | Capture the mouse |
 | Hold left button | Run the drill — harder rock takes longer |
 | Right click | Place the selected block |

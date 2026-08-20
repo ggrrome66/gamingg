@@ -10,7 +10,9 @@
 use glam::Vec3;
 use vx_platform::InputState;
 use vx_render::Camera;
-use vx_world::{PlayerBody, World};
+use winit::keyboard::KeyCode;
+
+use crate::movement::{self, MoveCommand};
 
 /// How the player moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,60 +93,49 @@ impl FlyController {
     }
 }
 
-/// Walking controls: input drives a physical body, and the camera rides its
-/// eyes rather than being positioned directly.
+/// Walking controls.
+///
+/// This is a *sampler*, not an integrator. It reads the held keys once per
+/// frame and hands back a [`MoveCommand`]; the simulation then consumes one
+/// command per movement tick. Nothing here touches the body, and nothing here
+/// sees a `dt` — that is the whole point of the movement round. See
+/// [`crate::movement`] for why.
 #[derive(Debug, Clone, Copy)]
 pub struct WalkController {
-    /// Blocks per second on the ground.
-    pub speed: f32,
-    pub sprint_multiplier: f32,
     pub sensitivity: f32,
 }
 
 impl Default for WalkController {
     fn default() -> Self {
-        WalkController {
-            speed: 4.8,
-            sprint_multiplier: 1.9,
-            sensitivity: 0.0022,
-        }
+        WalkController { sensitivity: 0.0022 }
     }
 }
 
 impl WalkController {
-    /// Advance the body by `dt` seconds of input.
+    /// Turn this frame's input into one command.
     ///
-    /// The camera is *not* moved here: it owns orientation only, and where it
-    /// physically sits is decided afterwards by `view::camera_placement`, so
-    /// first and third person differ in exactly one place instead of being
-    /// wired through every controller.
-    pub fn apply(
-        &self,
-        camera: &mut Camera,
-        player: &mut PlayerBody,
-        world: &World,
-        input: &mut InputState,
-        dt: f32,
-    ) {
+    /// Mouse look still applies at frame rate — the camera's orientation is a
+    /// presentation concern and nobody replays it — but the angle that reaches
+    /// the simulation is the quantised one carried in the command.
+    pub fn sample(&self, camera: &mut Camera, input: &mut InputState) -> MoveCommand {
         apply_mouse_look(camera, input, self.sensitivity);
 
-        let axes = input.movement_axes();
-        let speed = if input.is_sprinting() {
-            self.speed * self.sprint_multiplier
-        } else {
-            self.speed
+        let mut bits = 0u16;
+        let mut set = |key: KeyCode, bit: u16| {
+            if input.is_down(key) {
+                bits |= bit;
+            }
         };
+        set(KeyCode::KeyW, movement::FWD);
+        set(KeyCode::KeyS, movement::BACK);
+        set(KeyCode::KeyA, movement::LEFT);
+        set(KeyCode::KeyD, movement::RIGHT);
+        set(KeyCode::Space, movement::JUMP);
+        set(KeyCode::ControlLeft, movement::SPRINT);
+        set(KeyCode::ShiftLeft, movement::CROUCH);
+        set(KeyCode::KeyZ, movement::PRONE);
 
-        // Walking follows the camera's heading but stays level, so looking up
-        // does not slow you down or launch you.
-        let wish = (camera.right() * axes.x + camera.forward_level() * axes.z) * speed;
-
-        // Space jumps rather than flying upward.
-        if axes.y > 0.0 {
-            player.jump();
-        }
-
-        player.step(world, wish, dt);
+        MoveCommand::looking(bits, camera.yaw, camera.pitch)
     }
 }
 
@@ -302,23 +293,12 @@ mod tests {
         assert!(camera.forward().is_finite());
     }
 
-    fn walk_world() -> World {
-        let mut world = World::new(2024);
-        world.load_around(vx_core::ChunkPos::new(0, 0), 1);
-        world
-    }
-
-    /// A body standing on the terrain at the origin, already settled.
-    fn standing(world: &World) -> PlayerBody {
-        let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
-        let mut player = PlayerBody {
-            position: Vec3::new(0.5, surface as f32, 0.5),
-            ..PlayerBody::default()
-        };
-        for _ in 0..60 {
-            player.step(world, Vec3::ZERO, 1.0 / 60.0);
-        }
-        player
+    fn sampler() -> (Camera, InputState, WalkController) {
+        (
+            Camera { yaw: 0.0, pitch: 0.0, ..Camera::default() },
+            InputState::new(),
+            WalkController::default(),
+        )
     }
 
     #[test]
@@ -329,144 +309,79 @@ mod tests {
     }
 
     #[test]
-    fn walking_moves_the_body_and_carries_the_camera_along() {
-        let world = walk_world();
-        let mut player = standing(&world);
-        let mut camera = Camera { yaw: 0.0, pitch: 0.0, ..Camera::default() };
-        let mut input = InputState::new();
-        let controller = WalkController::default();
-
+    fn held_keys_become_bits_in_a_command() {
+        let (mut camera, mut input, controller) = sampler();
         input.press(KeyCode::KeyW);
-        let start = player.position;
-        for _ in 0..60 {
-            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
-        }
+        input.press(KeyCode::ControlLeft);
 
-        assert!(player.position.z < start.z - 1.0, "did not walk forward");
-        // Placement, not the controller, decides where the camera sits — and
-        // in first person that is the body's eyes, not its feet.
-        camera.position =
-            crate::view::camera_placement(&world, &camera, player.eye_position(), crate::view::ViewMode::FirstPerson);
-        assert_eq!(camera.position, player.eye_position());
-        assert!(camera.position.y > player.position.y);
+        let command = controller.sample(&mut camera, &mut input);
+
+        assert!(command.held(movement::FWD));
+        assert!(command.held(movement::SPRINT));
+        assert!(!command.held(movement::BACK));
+        assert!(!command.held(movement::CROUCH));
     }
 
     #[test]
-    fn the_walk_controller_no_longer_writes_the_camera_position() {
-        // The whole third-person design rests on this: one owner for where
-        // the camera sits.
-        let world = walk_world();
-        let mut player = standing(&world);
-        let parked = Vec3::new(123.0, 45.0, 67.0);
-        let mut camera = Camera { position: parked, ..Camera::default() };
-        let mut input = InputState::new();
-        let controller = WalkController::default();
+    fn every_movement_key_reaches_the_command() {
+        // A key that samples into nothing is a control that silently does not
+        // exist, which is exactly the kind of gap a test should hold shut.
+        let cases = [
+            (KeyCode::KeyW, movement::FWD),
+            (KeyCode::KeyS, movement::BACK),
+            (KeyCode::KeyA, movement::LEFT),
+            (KeyCode::KeyD, movement::RIGHT),
+            (KeyCode::Space, movement::JUMP),
+            (KeyCode::ControlLeft, movement::SPRINT),
+            (KeyCode::ShiftLeft, movement::CROUCH),
+            (KeyCode::KeyZ, movement::PRONE),
+        ];
+        for (key, bit) in cases {
+            let (mut camera, mut input, controller) = sampler();
+            input.press(key);
+            let command = controller.sample(&mut camera, &mut input);
+            assert_eq!(command.bits, bit, "{key:?} did not sample to its own bit");
+        }
+    }
 
+    #[test]
+    fn the_sampler_does_not_move_anything() {
+        // It reads input and returns a value. The body is advanced on the tick
+        // clock, somewhere else entirely — that separation is the round.
+        let (mut camera, mut input, controller) = sampler();
+        let parked = camera.position;
         input.press(KeyCode::KeyW);
+
         for _ in 0..30 {
-            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
+            controller.sample(&mut camera, &mut input);
         }
-        assert_eq!(camera.position, parked, "the controller moved the camera");
+
+        assert_eq!(camera.position, parked, "the sampler moved the camera");
     }
 
     #[test]
-    fn walking_does_not_sink_into_the_ground() {
-        let world = walk_world();
-        let mut player = standing(&world);
-        let mut camera = Camera::default();
-        let mut input = InputState::new();
-        let controller = WalkController::default();
-        input.press(KeyCode::KeyD);
+    fn looking_around_still_works_while_sampling() {
+        let (mut camera, mut input, controller) = sampler();
+        input.mouse_captured = true;
+        input.add_mouse_delta(100.0, 0.0);
 
-        for _ in 0..180 {
-            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
-            assert!(
-                !vx_world::collides(&world, &player.aabb()),
-                "walked into geometry at {:?}",
-                player.position
-            );
-        }
+        let command = controller.sample(&mut camera, &mut input);
 
-        // Terrain has real slopes now, so the walk may well end mid-stride down
-        // a hillside — being airborne at an arbitrary tick is correct, not a
-        // bug. Let go of the controls and let the body settle before checking
-        // it found ground again.
-        input.release(KeyCode::KeyD);
-        for _ in 0..240 {
-            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
-        }
+        assert!(camera.yaw > 0.0, "the view did not turn");
+        assert_ne!(command.yaw_q, 0, "the command did not carry the new heading");
+    }
 
-        assert!(player.on_ground, "never landed after walking");
+    #[test]
+    fn the_command_carries_the_camera_heading_to_within_a_bucket() {
+        let (mut camera, mut input, controller) = sampler();
+        camera.yaw = 1.234;
+        let command = controller.sample(&mut camera, &mut input);
+        let bucket = std::f32::consts::TAU / movement::YAW_STEPS as f32;
         assert!(
-            !vx_world::collides(&world, &player.aabb()),
-            "settled inside geometry at {:?}",
-            player.position
+            (command.yaw() - 1.234).abs() <= bucket,
+            "heading {} did not survive quantisation",
+            command.yaw()
         );
-        assert!(
-            player.position.y > 1.0,
-            "sank through the world to y={}",
-            player.position.y
-        );
-    }
-
-    #[test]
-    fn space_jumps_rather_than_flying_upward() {
-        let world = walk_world();
-        let mut player = standing(&world);
-        let mut camera = Camera::default();
-        let mut input = InputState::new();
-        let controller = WalkController::default();
-
-        let ground = player.position.y;
-        input.press(KeyCode::Space);
-        controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
-        assert!(player.velocity.y > 0.0, "space did not jump");
-
-        // Holding space must not levitate. It does hop repeatedly — each
-        // landing allows the next jump, which is the usual behaviour — so the
-        // check is that height stays bounded, not that the body is grounded at
-        // any particular tick.
-        let mut peak: f32 = ground;
-        for _ in 0..300 {
-            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
-            peak = peak.max(player.position.y);
-        }
-        assert!(peak < ground + 3.0, "held space climbed {} blocks", peak - ground);
-
-        // Releasing it settles back onto the ground.
-        input.release(KeyCode::Space);
-        for _ in 0..180 {
-            controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
-        }
-        assert!(player.on_ground, "never landed after releasing jump");
-        assert!((player.position.y - ground).abs() < 0.05);
-    }
-
-    #[test]
-    fn sprinting_covers_more_ground_than_walking() {
-        let world = walk_world();
-        let controller = WalkController::default();
-        let mut camera = Camera { yaw: 0.0, pitch: 0.0, ..Camera::default() };
-
-        let distance = |sprint: bool| {
-            let mut player = standing(&world);
-            let mut input = InputState::new();
-            input.press(KeyCode::KeyW);
-            if sprint {
-                input.press(KeyCode::ControlLeft);
-            }
-            let start = player.position;
-            let mut camera = camera;
-            for _ in 0..60 {
-                controller.apply(&mut camera, &mut player, &world, &mut input, 1.0 / 60.0);
-            }
-            (player.position - start).length()
-        };
-
-        let walked = distance(false);
-        let sprinted = distance(true);
-        assert!(sprinted > walked * 1.5, "walk {walked}, sprint {sprinted}");
-        let _ = &mut camera;
     }
 
     #[test]

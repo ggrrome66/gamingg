@@ -20,6 +20,7 @@ mod hud;
 mod journal;
 mod map;
 mod mining;
+mod movement;
 mod rig;
 mod shop;
 mod skills;
@@ -328,13 +329,23 @@ fn run_replay(options: &Options) -> Result<(), String> {
     let mut world = World::new(seed);
     let events = EventBus::new();
     let started = Instant::now();
-    journal::replay(&journal, &mut world, &events);
+    let walked = journal::replay(&journal, &mut world, &events);
     let rebuilt = vx_world::world_hash(&world);
 
     println!(
         "rebuilt {} chunks in {:.2}s, hash {rebuilt:#018x}",
         world.loaded_chunk_count(),
         started.elapsed().as_secs_f32()
+    );
+    // The player's path is covered now too. The absolute start is not recorded,
+    // so this is a path from the world origin rather than from wherever they
+    // actually spawned — what it proves is that the same log walks the same
+    // walk, which is the property the oracle is for.
+    println!(
+        "player path ends at {:?}, {:?}, {:.0}% wind",
+        walked.player.position,
+        walked.movement.stance,
+        walked.movement.stamina_fraction() * 100.0
     );
     // The books are not rebuilt by a replay — the network's reach follows the
     // player, and where the player stood is not in the journal. Reported so
@@ -592,6 +603,11 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             level_up: None,
             greeting: None,
             reconnecting: false,
+            movement: hud::MovementReadout {
+                stance: "SPRINT",
+                stamina: 0.72,
+                load: 0.4,
+            },
         });
         renderer.set_overlay(
             HUD_SLOT,
@@ -949,6 +965,13 @@ struct Active {
     /// The physical body. Only drives the camera in walk mode; in fly mode the
     /// camera moves freely and the body is carried along behind it.
     player: PlayerBody,
+    /// Stance, stamina and the ledge verbs. See `movement`.
+    movement: movement::Movement,
+    /// Turns elapsed wall-clock into whole movement ticks, so the player runs
+    /// on a fixed clock like everything else in the world.
+    move_ticks: movement::Ticker,
+    /// The last command written to the journal, so only changes are recorded.
+    last_move: Option<movement::MoveCommand>,
     mode: MovementMode,
     /// Carries block edits to any listeners. Mods hook in here in M3.
     events: EventBus,
@@ -1123,13 +1146,40 @@ impl App {
             // streaming in. Stepping physics now drops it through the world.
             MovementMode::Walk if active.resuming => {}
             MovementMode::Walk => {
-                self.walk.apply(
-                    &mut active.camera,
-                    &mut active.player,
-                    &active.world,
-                    &mut self.input,
-                    dt,
+                // Sample once, then run whole ticks of it. This is the seam the
+                // movement round exists for: nothing below this line sees `dt`.
+                let carried = active
+                    .mining
+                    .fleet
+                    .base
+                    .as_ref()
+                    .map(|base| base.stockpile.total())
+                    .unwrap_or(0);
+                let capacity = skills::capacity(
+                    vx_agent::DEFAULT_CAPACITY,
+                    active.skills.level(skills::LOGISTICS),
                 );
+                let load = movement::load_byte(carried, capacity);
+                let command = self
+                    .walk
+                    .sample(&mut active.camera, &mut self.input)
+                    .laden(load);
+
+                if active.last_move != Some(command) {
+                    active.journal.record(journal::Command::moving(command));
+                    active.last_move = Some(command);
+                }
+
+                let ticks = active.move_ticks.take(dt);
+                for _ in 0..ticks {
+                    active.movement.advance(
+                        &mut active.player,
+                        &active.world,
+                        command,
+                        command.mass(),
+                        movement::MOVE_TICK,
+                    );
+                }
             }
         }
 
@@ -1422,11 +1472,18 @@ impl App {
 
         // Your own body, once you can actually see it.
         if active.view.draws_body() {
-            objects.extend(active.player_rig.objects(
-                active.player.position,
-                drill_yaw,
-                0.0,
-            ));
+            // Faced by the quantised heading rather than the raw camera angle:
+            // the drawn body should point where the simulation thinks it is
+            // pointing, not a hair off it.
+            let facing = active
+                .last_move
+                .filter(|_| active.mode == MovementMode::Walk)
+                .map_or(drill_yaw, |command| command.yaw());
+            let stance = active.movement.stance;
+            let posed = active
+                .player_rig
+                .compressed(stance.body_height() / movement::STAND_HEIGHT);
+            objects.extend(posed.objects(active.player.position, facing, 0.0));
         }
 
         active
@@ -2350,6 +2407,13 @@ impl App {
             drilling: active.digging.map(|(_, progress)| progress),
             level_up,
             greeting,
+            movement: hud::MovementReadout {
+                stance: active.movement.stance.label(),
+                stamina: active.movement.stamina_fraction(),
+                load: active.last_move.map_or(0.0, |command| {
+                    command.load as f32 / 255.0
+                }),
+            },
         };
         let pixels = hud::render_hud(&content);
 
@@ -2689,6 +2753,9 @@ impl ApplicationHandler for App {
         }
 
         self.active = Some(Active {
+            movement: movement::Movement::default(),
+            move_ticks: movement::Ticker::default(),
+            last_move: None,
             window,
             context,
             surface,

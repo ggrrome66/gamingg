@@ -9,6 +9,15 @@
 //!
 //! Lives in `vx-world` rather than the app so it stays on the simulation side
 //! of the networking seam, and so it can be tested without a window.
+//!
+//! # What this file does not know
+//!
+//! Stamina, stance, cargo, skills and the shop. This answers exactly one
+//! question — given a box, a velocity and a tick, where does it end up and what
+//! did it touch — and [`MoveParams`] carries the numbers that shape the answer
+//! without carrying any reason for them. The state machine that picks those
+//! numbers lives in `vx-app` with the rest of the fiction, the same line that
+//! keeps `vx-agent` free of quests and economy.
 
 use glam::Vec3;
 use vx_core::BlockPos;
@@ -24,24 +33,50 @@ pub const GRAVITY: f32 = -30.0;
 /// between frames.
 pub const TERMINAL_VELOCITY: f32 = -60.0;
 
-/// Upward velocity applied by a jump. Clears one block comfortably.
-pub const JUMP_SPEED: f32 = 9.2;
+/// Upward velocity applied by a jump. Clears one block with margin.
+pub const JUMP_SPEED: f32 = 8.4;
 
-/// How high a step the player walks up without jumping.
+/// How high a step the player walks up without asking.
 ///
-/// Just over one block, deliberately. Measured from the feet, so clearing a
-/// block whose top is 1.0 above them needs slightly more than 1.0 — a smaller
-/// value (0.6 is the common choice elsewhere) cannot climb a full block at all,
-/// only half-height ones.
+/// Slabs, rubble and kerbs are free; a full block is not. Keeping a one-block
+/// ledge a deliberate act is what makes vaulting a verb rather than decoration,
+/// and it keeps the player legible against the drone planner's one-block step —
+/// the unit the whole mining system is built around.
 ///
-/// Terrain here is generated as one-block terraces, so requiring a jump for
-/// every step would make walking anywhere miserable. The trade-off is that a
-/// wall must be two blocks tall to stop anyone.
-pub const STEP_HEIGHT: f32 = 1.05;
+/// This was 1.05 before the movement round, which let you stroll up a full
+/// block without noticing. The terraced terrain that justified it is still
+/// there; what changed is that the player can now vault, automatically, so the
+/// terraces cost a gesture instead of a keypress.
+pub const STEP_HEIGHT: f32 = 0.6;
 
-/// Kept between the body and the blocks it rests against, so a body sitting
-/// exactly on a boundary is not counted as intersecting it.
+/// Collision sub-steps per tick.
+///
+/// Not about tunnelling — nine blocks a second over a sixty-fourth of a second
+/// is a seventh of a block, so nothing is passed through. It is about the seam
+/// between two coplanar cube faces catching a fast-moving box, which reads as
+/// the world grabbing you at random. Cheap enough to apply always rather than
+/// only while sliding.
+pub const SUBSTEPS: u32 = 4;
+
+/// Kept between the body and the blocks it rests against, so a body snapped
+/// flush to a grid line is not counted as intersecting what is past it.
 const SKIN: f32 = 1.0e-3;
+
+/// How far past a grid line a box may reach before it claims the block there.
+///
+/// This is the design note's "collision box inset by a hair", implemented as a
+/// tolerance in the block query rather than as a physically smaller box. The
+/// smaller box is the obvious reading and it is wrong: a sweep that only ever
+/// guarantees the *shrunken* hull is clear lets the real hull penetrate by
+/// exactly the amount you shrank it, which is the bug the inset was there to
+/// prevent — and the error compounds across sub-steps until the body is
+/// genuinely embedded.
+///
+/// Distinct from [`SKIN`], which snaps a blocked body flush to the line it
+/// crossed. Two jobs, two constants, and this one must stay the smaller of the
+/// pair or a body snapped flush would immediately re-collide with what it was
+/// snapped against.
+pub const INSET: f32 = 1.0e-5;
 
 /// An axis-aligned box.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -65,6 +100,14 @@ impl Aabb {
         Aabb {
             min: self.min + delta,
             max: self.max + delta,
+        }
+    }
+
+    /// The same box shrunk by `amount` on every face.
+    pub fn shrunk(&self, amount: f32) -> Self {
+        Aabb {
+            min: self.min + Vec3::splat(amount),
+            max: self.max - Vec3::splat(amount),
         }
     }
 
@@ -100,15 +143,255 @@ impl Aabb {
             self.min.z.floor() as i32,
         ];
         let hi = [
-            (self.max.x - SKIN).floor() as i32,
-            (self.max.y - SKIN).floor() as i32,
-            (self.max.z - SKIN).floor() as i32,
+            (self.max.x - INSET).floor() as i32,
+            (self.max.y - INSET).floor() as i32,
+            (self.max.z - INSET).floor() as i32,
         ];
 
         (lo[1]..=hi[1].max(lo[1])).flat_map(move |y| {
             (lo[2]..=hi[2].max(lo[2]))
                 .flat_map(move |z| (lo[0]..=hi[0].max(lo[0])).map(move |x| BlockPos::new(x, y, z)))
         })
+    }
+}
+
+/// Numbers that shape a step, with no opinion about where they came from.
+///
+/// The app builds one of these per tick out of stance, stamina and how much
+/// rock you are carrying. This crate only ever reads them.
+#[derive(Debug, Clone, Copy)]
+pub struct MoveParams {
+    /// How hard horizontal velocity is pulled toward `wish`, blocks per second
+    /// squared.
+    pub accel: f32,
+    /// Exponential drag on horizontal velocity, per second. The whole
+    /// difference between sliding and crouching is this number.
+    pub friction: f32,
+    /// How high a step is climbed without asking.
+    pub step_height: f32,
+    /// Whether gravity is integrated. A mantle suspends it.
+    pub gravity: bool,
+}
+
+/// Ordinary walking.
+impl Default for MoveParams {
+    fn default() -> Self {
+        MoveParams {
+            accel: 60.0,
+            friction: 10.0,
+            step_height: STEP_HEIGHT,
+            gravity: true,
+        }
+    }
+}
+
+/// Where a swept box ended up, and what it touched on the way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepResult {
+    /// The box's new minimum corner. Callers that track a different origin —
+    /// the player tracks its feet — take the difference against the corner they
+    /// started from rather than reading this directly.
+    pub position: Vec3,
+    pub velocity: Vec3,
+    pub grounded: bool,
+    /// The face the box came to rest against, or `Vec3::ZERO` in open air.
+    ///
+    /// Every surface in a voxel world is axis-aligned, so this is `+Y` on any
+    /// block top and never a ramp normal. It earns its place by telling a wall
+    /// apart from a floor, not by describing a slope — there are no slopes,
+    /// only stairs.
+    pub ground_normal: Vec3,
+    pub hit_ceiling: bool,
+}
+
+/// Sweep `aabb` through the world by `velocity * dt` and report where it lands.
+///
+/// Pure: no gravity, no acceleration, no state. The caller integrates velocity
+/// however it likes and this moves the box. Sub-stepped [`SUBSTEPS`] times and
+/// sub-stepped [`SUBSTEPS`] times unconditionally, because it is cheap and
+/// wrong to skip at speed.
+pub fn step_aabb(
+    world: &World,
+    aabb: Aabb,
+    velocity: Vec3,
+    dt: f32,
+    step_height: f32,
+) -> StepResult {
+    let mut sweep = Sweep {
+        aabb,
+        moved: Vec3::ZERO,
+        stepped: false,
+    };
+    let mut velocity = velocity;
+    // Established before the first sub-step rather than discovered during the
+    // vertical pass. The horizontal pass is what needs to know — it will not
+    // climb a step unless it believes it is standing on something — and it runs
+    // first. Discovering it afterwards means the one sub-step that hits the
+    // ledge is the one sub-step that does not yet know it is on the ground.
+    let mut grounded = supported(world, &sweep.aabb);
+    let mut normal = if grounded { Vec3::Y } else { Vec3::ZERO };
+    let mut ceiling = false;
+
+    let slice = dt / SUBSTEPS as f32;
+    for _ in 0..SUBSTEPS {
+        let delta = velocity * slice;
+
+        // Horizontal first, so the vertical pass below reports the ground the
+        // body actually ends up over rather than the one it started on.
+        let (blocked_x, blocked_z) = sweep.walk(world, delta.x, delta.z, step_height, grounded);
+        if blocked_x {
+            velocity.x = 0.0;
+            normal.x = -delta.x.signum();
+        }
+        if blocked_z {
+            velocity.z = 0.0;
+            normal.z = -delta.z.signum();
+        }
+
+        if !sweep.slide(world, Vec3::Y * delta.y) {
+            // Stopped while descending means standing on it; while ascending it
+            // is a bumped head.
+            if delta.y < 0.0 {
+                grounded = true;
+                normal.y = 1.0;
+            } else if delta.y > 0.0 {
+                ceiling = true;
+                normal.y = -1.0;
+            }
+            velocity.y = 0.0;
+        } else if delta.y != 0.0 {
+            grounded = false;
+            normal.y = 0.0;
+        }
+
+        if sweep.stepped {
+            grounded = true;
+            normal.y = 1.0;
+            sweep.stepped = false;
+        }
+    }
+
+    StepResult {
+        position: aabb.min + sweep.moved,
+        velocity,
+        grounded,
+        ground_normal: normal,
+        hit_ceiling: ceiling,
+    }
+}
+
+/// A box being pushed through the world, one axis at a time.
+struct Sweep {
+    aabb: Aabb,
+    /// Total translation applied so far, so the caller can recover a position
+    /// in whatever origin it happens to track.
+    moved: Vec3,
+    /// Set when `walk` climbed something, so the caller counts it as ground.
+    stepped: bool,
+}
+
+impl Sweep {
+    /// Move along x and z, climbing low obstacles rather than stopping at them.
+    ///
+    /// Returns which axes were refused.
+    fn walk(
+        &mut self,
+        world: &World,
+        dx: f32,
+        dz: f32,
+        step_height: f32,
+        grounded: bool,
+    ) -> (bool, bool) {
+        let before = self.moved;
+
+        let moved_x = self.slide(world, Vec3::X * dx);
+        let moved_z = self.slide(world, Vec3::Z * dz);
+
+        let blocked = (dx != 0.0 && !moved_x) || (dz != 0.0 && !moved_z);
+        if !blocked || !grounded || step_height <= 0.0 {
+            return (!moved_x, !moved_z);
+        }
+
+        // Blocked while walking. Try to climb it in three phases: rise, move
+        // across, then settle back down onto whatever is now underfoot.
+        //
+        // The final descent is the part that matters. Rising and moving alone
+        // leaves the body hovering, and gravity drags it back against the step
+        // before it has cleared — so it bumps the same edge forever instead of
+        // climbing it.
+        let plain = self.moved;
+        let plain_gain = (plain.x - before.x).abs() + (plain.z - before.z).abs();
+
+        let mut probe = Sweep {
+            aabb: self.aabb.translated(before - self.moved),
+            moved: before,
+            stepped: false,
+        };
+
+        // No headroom to rise into means no step is possible.
+        if !probe.slide(world, Vec3::Y * step_height) {
+            return (!moved_x, !moved_z);
+        }
+        probe.slide(world, Vec3::X * dx);
+        probe.slide(world, Vec3::Z * dz);
+        probe.slide(world, Vec3::Y * -step_height);
+
+        let gain = (probe.moved.x - before.x).abs() + (probe.moved.z - before.z).abs();
+
+        // Only worth taking if it got further than walking into the obstacle
+        // did, and left the body somewhere legal.
+        if gain > plain_gain + SKIN && !collides(world, &probe.aabb) {
+            self.aabb = probe.aabb;
+            self.moved = probe.moved;
+            self.stepped = true;
+            (false, false)
+        } else {
+            (!moved_x, !moved_z)
+        }
+    }
+
+    /// Try to move by `delta` along a single axis.
+    ///
+    /// Returns `true` if the whole move was made. On collision the box is
+    /// placed flush against the blocking surface and `false` is returned.
+    fn slide(&mut self, world: &World, delta: Vec3) -> bool {
+        let axis = if delta.x != 0.0 {
+            0
+        } else if delta.y != 0.0 {
+            1
+        } else if delta.z != 0.0 {
+            2
+        } else {
+            return true;
+        };
+
+        let target = self.aabb.translated(delta);
+        if !collides(world, &target) {
+            self.aabb = target;
+            self.moved += delta;
+            return true;
+        }
+
+        // Snap flush to the grid line just crossed. Blocks are unit cubes, so
+        // the blocking surface is always at an integer coordinate.
+        let shift = if delta[axis] > 0.0 {
+            target.max[axis].floor() - SKIN - self.aabb.max[axis]
+        } else {
+            target.min[axis].floor() + 1.0 + SKIN - self.aabb.min[axis]
+        };
+
+        // A shift that would move the box backwards past where it already sits
+        // means it started overlapping; leave it alone rather than teleporting.
+        if shift.signum() == delta[axis].signum() && shift.abs() <= delta[axis].abs() {
+            let step = Vec3::new(
+                if axis == 0 { shift } else { 0.0 },
+                if axis == 1 { shift } else { 0.0 },
+                if axis == 2 { shift } else { 0.0 },
+            );
+            self.aabb = self.aabb.translated(step);
+            self.moved += step;
+        }
+        false
     }
 }
 
@@ -123,6 +406,9 @@ pub struct PlayerBody {
     pub height: f32,
     /// Height of the camera above the feet.
     pub eye_height: f32,
+    /// The face last rested against. See [`StepResult::ground_normal`].
+    pub ground_normal: Vec3,
+    pub hit_ceiling: bool,
 }
 
 impl Default for PlayerBody {
@@ -134,6 +420,8 @@ impl Default for PlayerBody {
             width: 0.6,
             height: 1.8,
             eye_height: 1.62,
+            ground_normal: Vec3::ZERO,
+            hit_ceiling: false,
         }
     }
 }
@@ -158,149 +446,70 @@ impl PlayerBody {
         true
     }
 
-    /// Advance one tick.
+    /// Advance one tick under ordinary walking rules.
     ///
     /// `wish` is the desired horizontal velocity in blocks per second; vertical
     /// motion comes from gravity and jumping, not from `wish`.
     pub fn step(&mut self, world: &World, wish: Vec3, dt: f32) {
-        // Horizontal velocity is set directly rather than accelerated: crisp
-        // control suits a building game better than momentum.
-        self.velocity.x = wish.x;
-        self.velocity.z = wish.z;
-
-        self.velocity.y = (self.velocity.y + GRAVITY * dt).max(TERMINAL_VELOCITY);
-
-        let delta = self.velocity * dt;
-
-        // Horizontal first, so `on_ground` from the vertical pass below
-        // reflects where the body ends up this tick.
-        self.move_horizontally(world, delta.x, delta.z);
-        self.move_vertically(world, delta.y);
+        self.step_with(world, wish, dt, MoveParams::default());
     }
 
-    /// Move along x and z, attempting to step up over low obstacles.
-    fn move_horizontally(&mut self, world: &World, dx: f32, dz: f32) {
-        let before = self.position;
-
-        let moved_x = self.slide(world, Vec3::X * dx);
-        let moved_z = self.slide(world, Vec3::Z * dz);
-
-        let blocked = (dx != 0.0 && !moved_x) || (dz != 0.0 && !moved_z);
-        if !blocked || !self.on_ground {
-            if !moved_x {
-                self.velocity.x = 0.0;
-            }
-            if !moved_z {
-                self.velocity.z = 0.0;
-            }
-            return;
-        }
-
-        // Blocked while walking. Try to step over it in three phases: rise,
-        // move across, then settle back down onto whatever is now underfoot.
+    /// Advance one tick with the numbers the caller chose.
+    pub fn step_with(&mut self, world: &World, wish: Vec3, dt: f32, params: MoveParams) {
+        // Friction first, then acceleration along the wish direction only.
         //
-        // The final descent is the part that matters. Rising and moving alone
-        // leaves the body hovering, and gravity drags it back against the step
-        // before it has cleared — so it bumps the same edge forever instead of
-        // climbing it.
-        let plain = self.position;
-        let plain_gain = (plain.x - before.x).abs() + (plain.z - before.z).abs();
+        // The obvious model — pull velocity toward `wish` from wherever it is —
+        // also *decelerates* anything faster than `wish`, which quietly deletes
+        // every impulse the moment it is applied: a slide dies in a tick and a
+        // slide-jump lands at walking pace. Accelerating only up to the target,
+        // and only along the direction asked for, leaves momentum alone and
+        // hands decay entirely to `friction`. That is what makes a slide a
+        // velocity that outlives the input that made it.
+        let mut horizontal = Vec3::new(self.velocity.x, 0.0, self.velocity.z);
 
-        let mut probe = *self;
-        probe.position = before;
-
-        let stop = |body: &mut PlayerBody, moved_x: bool, moved_z: bool| {
-            if !moved_x {
-                body.velocity.x = 0.0;
-            }
-            if !moved_z {
-                body.velocity.z = 0.0;
-            }
-        };
-
-        // No headroom to rise into means no step is possible.
-        if !probe.slide(world, Vec3::Y * STEP_HEIGHT) {
-            self.position = plain;
-            stop(self, moved_x, moved_z);
-            return;
-        }
-        probe.slide(world, Vec3::X * dx);
-        probe.slide(world, Vec3::Z * dz);
-        probe.slide(world, Vec3::Y * -STEP_HEIGHT);
-
-        let stepped_gain = (probe.position.x - before.x).abs() + (probe.position.z - before.z).abs();
-
-        // Only worth taking if it actually got further than walking into the
-        // obstacle did, and left the body somewhere legal.
-        if stepped_gain > plain_gain + SKIN && !collides(world, &probe.aabb()) {
-            self.position = probe.position;
-            self.on_ground = true;
-        } else {
-            self.position = plain;
-            stop(self, moved_x, moved_z);
-        }
-    }
-
-    /// Move along y, updating `on_ground`.
-    fn move_vertically(&mut self, world: &World, dy: f32) {
-        let landed = !self.slide(world, Vec3::Y * dy);
-        if landed {
-            // Hitting something while descending means we are standing on it;
-            // while ascending it just means a bumped head.
-            self.on_ground = dy < 0.0;
-            self.velocity.y = 0.0;
-        } else if dy != 0.0 {
-            self.on_ground = false;
-        }
-    }
-
-    /// Try to move by `delta` along a single axis.
-    ///
-    /// Returns `true` if the whole move was made. On collision the body is
-    /// placed flush against the blocking surface and `false` is returned.
-    fn slide(&mut self, world: &World, delta: Vec3) -> bool {
-        let axis = if delta.x != 0.0 {
-            0
-        } else if delta.y != 0.0 {
-            1
-        } else if delta.z != 0.0 {
-            2
-        } else {
-            return true;
-        };
-        let amount = delta[axis];
-
-        let target = self.aabb().translated(delta);
-        if !collides(world, &target) {
-            self.position += delta;
-            return true;
+        let speed = horizontal.length();
+        if speed > 1.0e-6 && params.friction > 0.0 {
+            let kept = (1.0 - params.friction * dt).clamp(0.0, 1.0);
+            horizontal *= kept;
         }
 
-        // Snap flush to the grid line just crossed. Blocks are unit cubes, so
-        // the blocking surface is always at an integer coordinate.
-        //
-        // The box's faces are offset from `position` by fixed amounts (the
-        // origin is the feet, not the centre), so those offsets are taken from
-        // the *current* position before it is moved.
-        let extent = self.aabb();
-        let offset_to_max = extent.max[axis] - self.position[axis];
-        let offset_to_min = self.position[axis] - extent.min[axis];
-
-        if amount > 0.0 {
-            // Leading face stops just short of the boundary it crossed.
-            let barrier = target.max[axis].floor();
-            self.position[axis] = barrier - offset_to_max - SKIN;
-        } else {
-            let barrier = target.min[axis].floor() + 1.0;
-            self.position[axis] = barrier + offset_to_min + SKIN;
+        let target = Vec3::new(wish.x, 0.0, wish.z);
+        let want = target.length();
+        if want > 1.0e-6 {
+            let direction = target / want;
+            let along = horizontal.dot(direction);
+            let add = (want - along).clamp(0.0, params.accel * dt);
+            horizontal += direction * add;
         }
-        false
+
+        self.velocity.x = horizontal.x;
+        self.velocity.z = horizontal.z;
+
+        if params.gravity {
+            self.velocity.y = (self.velocity.y + GRAVITY * dt).max(TERMINAL_VELOCITY);
+        }
+
+        let before = self.aabb().min;
+        let result = step_aabb(world, self.aabb(), self.velocity, dt, params.step_height);
+        self.position += result.position - before;
+        self.velocity = result.velocity;
+        self.on_ground = result.grounded;
+        self.ground_normal = result.ground_normal;
+        self.hit_ceiling = result.hit_ceiling;
     }
 }
 
 /// Does this box overlap any block that blocks movement?
 pub fn collides(world: &World, aabb: &Aabb) -> bool {
     aabb.overlapping_blocks().any(|block| world.is_solid(block))
+}
+
+/// Is there something solid immediately under this box?
+///
+/// A hair below, not a block below: a body resting flush on a surface is not
+/// intersecting it, so "on the ground" cannot be answered by [`collides`] alone.
+pub fn supported(world: &World, aabb: &Aabb) -> bool {
+    collides(world, &aabb.translated(Vec3::Y * -(SKIN * 2.0)))
 }
 
 #[cfg(test)]
@@ -468,19 +677,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_single_block_step_is_walked_over_without_jumping() {
+    /// A raised plateau one block up, walked into from below.
+    ///
+    /// Not a one-block ridge: stepping over a ridge and straight back down
+    /// would pass a weaker version of this. It must also outlast the walk, or
+    /// the body strolls off the far edge.
+    fn plateau_world(top: i32) -> World {
         let mut world = flat_world();
         let stone = world.registry().id_of("engine:stone").unwrap();
-        // A raised plateau, not a one-block ridge: stepping over a ridge and
-        // straight back down would pass a weaker version of this test. It must
-        // also outlast the walk below, or the body strolls off the far edge.
         for x in 8..30 {
             for z in -5..15 {
-                world.set_block(BlockPos::new(x, 41, z), stone);
+                for y in 41..=top {
+                    world.set_block(BlockPos::new(x, y, z), stone);
+                }
             }
         }
+        world
+    }
 
+    #[test]
+    fn a_full_block_is_no_longer_walked_up() {
+        // STEP_HEIGHT is 0.6 now. A full block is a vault, and vaulting is the
+        // app's job — down here it must simply stop you, or the ledge verbs in
+        // `vx-app` never get a chance to fire.
+        let world = plateau_world(41);
         let mut body = body_at(5.0, 41.0, 4.5);
         settle(&mut body, &world, 30);
 
@@ -489,16 +709,108 @@ mod tests {
         }
 
         assert!(
-            body.position.x > 9.0,
-            "did not step up: stopped at x={}",
+            body.position.x < 8.1,
+            "walked up a full block to x={}",
             body.position.x
         );
+        assert!(!collides(&world, &body.aabb()));
+    }
+
+    #[test]
+    fn a_half_height_step_is_still_walked_over_without_jumping() {
+        // The other half of the same trade: rubble and kerbs stay free.
+        let world = flat_world();
+        let mut world = world;
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        // A plateau whose top sits half a block up, built by standing the body
+        // on a floor at y=40 and raising the far ground to y=40.5 — which the
+        // grid cannot express, so instead: walk from a floor of 41 onto 41 with
+        // a deliberately small step height, proving the mechanism rather than
+        // the geometry.
+        for x in 8..30 {
+            for z in -5..15 {
+                world.set_block(BlockPos::new(x, 41, z), stone);
+            }
+        }
+
+        let mut body = body_at(5.0, 41.0, 4.5);
+        settle(&mut body, &world, 30);
+        let params = MoveParams {
+            step_height: 1.05,
+            ..MoveParams::default()
+        };
+
+        for _ in 0..240 {
+            body.step_with(&world, Vec3::new(4.0, 0.0, 0.0), 1.0 / 60.0, params);
+        }
+
         assert!(
-            (body.position.y - 42.0).abs() < 0.05,
-            "ended at y={} rather than on top of the plateau",
-            body.position.y
+            body.position.x > 9.0,
+            "a generous step height did not climb: stopped at x={}",
+            body.position.x
         );
+        assert!((body.position.y - 42.0).abs() < 0.05, "ended at y={}", body.position.y);
         assert!(body.on_ground);
+    }
+
+    #[test]
+    fn step_aabb_reports_a_floor_as_up_and_a_wall_as_sideways() {
+        // The ground normal exists to tell a floor from a wall. Every surface
+        // here is axis-aligned, so that is all it can ever say — and all the
+        // slide needs it to say.
+        let mut world = flat_world();
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        for y in 41..44 {
+            for z in -5..15 {
+                world.set_block(BlockPos::new(8, y, z), stone);
+            }
+        }
+
+        let box_at = |x: f32, y: f32| Aabb::standing_on(Vec3::new(x, y, 4.5), 0.6, 1.8);
+
+        let falling = step_aabb(&world, box_at(4.5, 41.1), Vec3::new(0.0, -20.0, 0.0), 1.0 / 60.0, 0.6);
+        assert!(falling.grounded, "did not find the floor");
+        assert_eq!(falling.ground_normal.y, 1.0);
+
+        // Standing on the floor *and* pressed against a wall: the normal has to
+        // report both, or a slide cannot tell "stop dead" from "keep going down".
+        let into_wall =
+            step_aabb(&world, box_at(7.6, 41.0), Vec3::new(20.0, 0.0, 0.0), 1.0 / 60.0, 0.6);
+        assert!(
+            into_wall.ground_normal.x < 0.0,
+            "wall normal points the wrong way: {:?}",
+            into_wall.ground_normal
+        );
+        assert_eq!(into_wall.ground_normal.y, 1.0, "lost the floor while hitting a wall");
+        assert!(into_wall.velocity.x.abs() < 1e-6, "kept driving into the wall");
+    }
+
+    #[test]
+    fn step_aabb_never_leaves_a_box_inside_rock() {
+        // Sub-stepping earns its keep here: the same sweep at speed, from many
+        // starts, must never end up embedded.
+        let world = plateau_world(45);
+        for i in 0..400 {
+            let x = 4.0 + (i % 20) as f32 * 0.17;
+            let y = 41.0 + (i / 20) as f32 * 0.11;
+            let speed = 3.0 + (i % 7) as f32 * 2.0;
+            let result = step_aabb(
+                &world,
+                Aabb::standing_on(Vec3::new(x, y, 4.5), 0.6, 1.8),
+                Vec3::new(speed, -speed, speed * 0.5),
+                1.0 / 64.0,
+                0.6,
+            );
+            let landed = Aabb {
+                min: result.position,
+                max: result.position + Vec3::new(0.6, 1.8, 0.6),
+            };
+            assert!(
+                !collides(&world, &landed),
+                "sweep {i} ended inside rock at {:?}",
+                result.position
+            );
+        }
     }
 
     #[test]
@@ -650,5 +962,3 @@ mod tests {
         assert!(!body.on_ground);
     }
 }
-
-

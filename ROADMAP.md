@@ -81,9 +81,10 @@ Written down because they are easy to forget and expensive to get wrong.
 | 6.5 | `229a299` | Starting village, villagers, trading shop, trees |
 | 7 | `42fb8ab` | Third person, drone piloting, NPC senses |
 | 8 | `f050c16` | Day/night, container towns on a lattice, the beacon network |
+| 9a | `b77aedc` | Residency pinning, content hashes, the command journal, seed tree, body ids, a real crew, 8-byte packed quads |
 | 9b | `dbfe091` | Town books, moving prices, inter-town freight, player trade runs, copper bars |
 | 10a | `63da370` | Machines cost credits, trade map on the console, handheld map page |
-| 9a | `b77aedc` | Residency pinning, content hashes, the command journal, seed tree, body ids, a real crew, 8-byte packed quads |
+| 10b | _this_ | Player movement on a fixed clock: stance, sprint, slide, vault, mantle, stamina, carried mass |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -202,7 +203,78 @@ handheld gains a map page on `Tab`.
 
 ---
 
-## In flight — Stage 10b: the arsenal, and what robbing costs
+## Shipped — Stage 10b: player movement
+
+The player was the last actor in the world still integrated off the frame clock.
+Everything else took ticks; the player took `dt`, which meant where you ended up
+depended on how fast your machine drew. House rule 2 says agents are
+bit-identical given the same inputs, and the player is an agent.
+
+**Movement is a command now.** Held keys become a `MoveCommand` once per frame;
+the simulation consumes one per tick at 64 Hz. Same idiom as `PilotCommand`,
+same reason. Look angles are quantised into the command as `i16` and resolved
+through a direction table, so nothing in the integration path calls `sin` every
+tick on the value the whole simulation keys off.
+
+**Sixty-four hertz, not sixty.** The journal speaks in mining ticks and mining
+runs at 8 Hz. Sixty over eight is seven and a half; sixty-four over eight is
+exactly eight. The integer ratio means `Advance { ticks }` keeps the meaning it
+already had and replay runs eight movement sub-ticks per journal tick.
+
+**The verbs.** Sprint, crouch, prone, slide, vault, mantle, coyote time, jump
+buffering. `STEP_HEIGHT` dropped from 1.05 to 0.6, so a full block can no longer
+be strolled up — but vaulting is **automatic on contact**, which is what keeps
+the benched pits the mine planner cuts pleasant to walk through rather than four
+hundred keypresses an hour. Above 2.2 m there is nothing to do but go around.
+
+**Sliding is an impulse and a decay curve.** Entering one kicks horizontal speed
+to 1.4× and installs low friction; a slide-jump keeps every bit of the speed it
+built. The design note wanted gravity projected onto the surface normal so a
+slide would carry downhill — but there are no ramps in a voxel world. A decline
+is a staircase and every normal is exactly `+Y`, so the projection yields
+nothing. What actually differs downhill is that the run is spent falling off
+one-block steps, so a slide converts a slice of each drop into forward speed.
+Same behaviour, honest mechanism.
+
+**Carried mass is the movement stat.** Speed scales from 1.0 empty down to a
+floor of 0.55 fully laden, and mass raises the sprint drain. This wires three
+systems that did not touch: `Stockpile`, the `Logistics` skill and the wallet's
+cargo upgrades all became movement upgrades without a single new item — every
+upgrade that lets you carry more is also a tax on using it. The load rides in
+the command as a quantised byte, so a replay reproduces the laden player rather
+than a lighter, faster one.
+
+**The journal covers the player now.** `Command::Move` is recorded on *change* —
+`Advance` already folds, so holding W for a minute is two entries — and
+`--replay` reports where the walk ended. The regression test is the determinism
+oracle that already existed rather than a fixture built beside it.
+
+Three bugs worth recording, because each was found by a test rather than by
+looking:
+
+- **Ground speed was capped below sprint.** With exponential drag and capped
+  acceleration the fastest a body holds is `accel / friction`. The note's 60 and
+  10 put that ceiling at 6.0 m/s, making `SPRINT` at 6.5 a number you could
+  never reach. `ACCEL_GROUND` is 100.
+- **The inset made penetration worse, not better.** Shrinking the sweep box
+  guarantees only the *shrunken* hull is clear, which lets the real hull
+  penetrate by exactly the amount you shrank it — and the error compounded across
+  sub-steps until the body was embedded in a wall. It is a tolerance in the block
+  query now, ordered `INSET < SKIN` on purpose.
+- **A slide died on the first step it fell off.** Leaving the ground ended the
+  stance, and going downhill *is* leaving the ground, so the one case the verb
+  exists for was the one case it could not do.
+
+### Deferred from this round
+
+The drone-traversability warning. A 2.2 m mantle means a hole the player can
+climb out of is not necessarily one a drone can drive out of; breaking that
+invariant is fine, breaking it *quietly* is what strands machines. Surfacing it
+on the handheld is a mine-planner change and waits.
+
+---
+
+## In flight — Stage 10c: the arsenal, and what robbing costs
 
 Caravans can be intercepted. Doing it makes you wanted.
 
@@ -242,7 +314,7 @@ constraints above.
 | EMP burst | Drops a drone *without* wrecking its cargo — the thief's weapon | machine state rather than damage |
 | Guided missile | Slow, tracking, expensive | steering, and a reason for countermeasures |
 
-10b ships the slug launcher and the EMP burst. The rest are rows.
+10c ships the slug launcher and the EMP burst. The rest are rows.
 
 ### Interception and bounty
 
@@ -256,10 +328,10 @@ prices up. Then its mast starts **posting a contract on your head** through the
 board that already exists — groundwork that bites properly once there is
 somebody to take it.
 
-### What is deliberately not in 10b
+### What is deliberately not in 10c
 
 Player health, hostile escorts, and death. Nothing shoots back yet. That keeps
-10b to a weapon system and a consequence rather than a whole combat model, and
+10c to a weapon system and a consequence rather than a whole combat model, and
 the data-driven shape means hostiles slot in later without a rewrite.
 
 ---
@@ -350,11 +422,11 @@ rolled twice. This also gives the economy a **source** to match the sink stage
   world, and `Perception` with `sight::obstruction` (stage 7) is already the
   "can it see you, with rock in between counting" primitive. The movement half
   is close to free.
-- *Military.* The same movement, carrying the stage 10b weapons, and aligned to
+- *Military.* The same movement, carrying the stage 10c weapons, and aligned to
   something — which is what makes them a faction problem rather than a monster
   problem.
 
-**The honest sequencing problem:** both flavours attack you, and stage 10b
+**The honest sequencing problem:** both flavours attack you, and stage 10c
 deliberately leaves out player health, hostiles and death. So bunkers split in
 two. The **built** half — sited, shelled, entered, laid out, looted — can ship
 as soon as caves have paid for the 3D carve. The **occupied** half waits for
@@ -397,9 +469,9 @@ if the traffic it produces reads as dull.
 | 14 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
 | 15 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
 | 16 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
-| 17 | Hostiles and health | The half of combat 10b leaves out. `Perception` (stage 7) is already the shape a hostile needs, and 10b's bounty contracts are already something for one to take |
+| 17 | Hostiles and health | The half of combat 10c leaves out. `Perception` (stage 7) is already the shape a hostile needs, and 10c's bounty contracts are already something for one to take |
 | 18 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 17 brings |
-| 19 | Factions and reputation | Bounty (10b) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to |
+| 19 | Factions and reputation | Bounty (10c) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to |
 | 20 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
 | 21 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
@@ -409,4 +481,6 @@ Tracked in `README.md` under "Known rough edges" — currently ~25 entries, the
 notable ones being: saves store a whole chunk snapshot per modified chunk;
 water is alpha-blended without depth sorting; a running excavation is not
 persisted; only one drone and one flier are ever created; and there is no
-player-carried inventory, so everything routes through the fleet's base pile.
+player-carried inventory, so everything routes through the fleet's base pile —
+which is also what the movement system now weighs you down by, for want of a
+real backpack.

@@ -41,15 +41,17 @@ use std::path::Path;
 
 use vx_agent::{MineMethod, VoxelAabb};
 use vx_core::{BlockPos, EventBus};
-use vx_world::World;
+use vx_world::{PlayerBody, World};
 
 use crate::mining::Mining;
+use crate::movement::{self, MoveCommand, Movement};
 
 const MAGIC: &[u8; 4] = b"VXLG";
-// Bumped to 2 when a dispatch gained its crew size. A journal is an oracle
-// rather than a load path — region files are still written every save — so an
-// old one being rejected costs a determinism check, not a world.
-const VERSION: u32 = 2;
+// Bumped to 2 when a dispatch gained its crew size, and to 3 when the player's
+// own movement joined the log. A journal is an oracle rather than a load path —
+// region files are still written every save — so an old one being rejected
+// costs a determinism check, not a world.
+const VERSION: u32 = 3;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -82,8 +84,36 @@ pub enum Command {
     },
     /// The plan abandoned.
     Cancel,
+    /// The player's held input changed.
+    ///
+    /// Recorded on *change*, not per tick. `Advance` already folds, so holding
+    /// W for a minute is one `Move` and one `Advance` rather than four thousand
+    /// entries — run-length encoding for free, out of machinery that was
+    /// already there.
+    ///
+    /// This is what extends the oracle to cover where the player walked. It did
+    /// not before: the log knew every block a drone cut and nothing at all
+    /// about the person who ordered it.
+    Move {
+        bits: u16,
+        yaw_q: i16,
+        pitch_q: i16,
+        load: u8,
+    },
     /// Simulation ticks run. The unit of time the log speaks in.
     Advance { ticks: u32 },
+}
+
+impl Command {
+    /// A `Move` carrying this command.
+    pub fn moving(command: MoveCommand) -> Self {
+        Command::Move {
+            bits: command.bits,
+            yaw_q: command.yaw_q,
+            pitch_q: command.pitch_q,
+            load: command.load,
+        }
+    }
 }
 
 /// A command and when it happened, in ticks since the world began.
@@ -202,19 +232,63 @@ impl CommandLog {
     }
 }
 
-/// Replay a log over a world, returning the mining state it rebuilt.
-///
-/// The world must already be at the log's keyframe — region files loaded, or a
-/// bare generated world when `keyframe_tick` is zero.
-pub fn replay(log: &CommandLog, world: &mut World, events: &EventBus) -> Mining {
-    let mut mining = Mining::default();
-    for entry in log.entries() {
-        apply(&entry.command, world, events, &mut mining);
-    }
-    mining
+/// Everything a replay reconstructs.
+pub struct Rebuilt {
+    pub mining: Mining,
+    pub player: PlayerBody,
+    pub movement: Movement,
+    /// The command in force, carried across every `Advance` that follows it.
+    held: MoveCommand,
 }
 
-fn apply(command: &Command, world: &mut World, events: &EventBus, mining: &mut Mining) {
+/// Replay a log over a world.
+///
+/// The world must already be at the log's keyframe — region files loaded, or a
+/// bare generated world when `keyframe_tick` is zero. `start` is where the
+/// player's feet begin: the log records what they *did*, not where they were
+/// standing when they started, so the caller supplies the origin the path is
+/// measured from.
+impl Default for Rebuilt {
+    fn default() -> Self {
+        Rebuilt {
+            mining: Mining::default(),
+            player: PlayerBody::default(),
+            movement: Movement::default(),
+            held: MoveCommand::default(),
+        }
+    }
+}
+
+pub fn replay_from(
+    log: &CommandLog,
+    world: &mut World,
+    events: &EventBus,
+    start: glam::Vec3,
+) -> Rebuilt {
+    let mut state = Rebuilt {
+        player: PlayerBody {
+            position: start,
+            ..PlayerBody::default()
+        },
+        ..Rebuilt::default()
+    };
+    for entry in log.entries() {
+        apply(&entry.command, world, events, &mut state);
+    }
+    state
+}
+
+/// Replay from the surface at the world origin.
+///
+/// Deterministic from the seed, which is what an oracle needs; it is not
+/// necessarily where the player actually stood.
+pub fn replay(log: &CommandLog, world: &mut World, events: &EventBus) -> Rebuilt {
+    let ground = world.surface_y(0, 0).unwrap_or(64) as f32;
+    replay_from(log, world, events, glam::Vec3::new(0.5, ground, 0.5))
+}
+
+fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Rebuilt) {
+    let mining = &mut state.mining;
     match command {
         Command::Break { at } => {
             let _ = vx_world::break_block(world, events, *at);
@@ -245,8 +319,33 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, mining: &mut M
             mining.start(world, *crew);
         }
         Command::Cancel => mining.cancel(world),
+        Command::Move {
+            bits,
+            yaw_q,
+            pitch_q,
+            load,
+        } => {
+            state.held = MoveCommand {
+                bits: *bits,
+                yaw_q: *yaw_q,
+                pitch_q: *pitch_q,
+                load: *load,
+            };
+        }
         Command::Advance { ticks } => {
             mining.advance(world, events, *ticks);
+            // The held command is re-issued for every tick it covers, at
+            // `SUBTICKS` movement steps each. This is the same call the live
+            // game makes, which is what makes the log an oracle for the
+            // player's path rather than a second implementation of it.
+            for _ in 0..*ticks {
+                movement::advance_journal_tick(
+                    &mut state.movement,
+                    &mut state.player,
+                    world,
+                    state.held,
+                );
+            }
         }
     }
 }
@@ -279,6 +378,18 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
         Command::Advance { ticks } => {
             file.write_all(&[4u8])?;
             file.write_all(&ticks.to_le_bytes())?;
+        }
+        Command::Move {
+            bits,
+            yaw_q,
+            pitch_q,
+            load,
+        } => {
+            file.write_all(&[5u8])?;
+            file.write_all(&bits.to_le_bytes())?;
+            file.write_all(&yaw_q.to_le_bytes())?;
+            file.write_all(&pitch_q.to_le_bytes())?;
+            file.write_all(&[*load])?;
         }
     }
     Ok(())
@@ -350,6 +461,22 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
         4 => Command::Advance {
             ticks: read_u32(file)?,
         },
+        5 => {
+            let mut bits = [0u8; 2];
+            file.read_exact(&mut bits)?;
+            let mut yaw = [0u8; 2];
+            file.read_exact(&mut yaw)?;
+            let mut pitch = [0u8; 2];
+            file.read_exact(&mut pitch)?;
+            let mut load = [0u8; 1];
+            file.read_exact(&mut load)?;
+            Command::Move {
+                bits: u16::from_le_bytes(bits),
+                yaw_q: i16::from_le_bytes(yaw),
+                pitch_q: i16::from_le_bytes(pitch),
+                load: load[0],
+            }
+        }
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
     Ok(Entry { tick, command })
@@ -412,19 +539,19 @@ mod tests {
         let (mut world, area) = site();
         let events = EventBus::new();
         let mut journal = CommandLog::new();
-        let mut mining = Mining::default();
+        let mut rebuilt = Rebuilt::default();
 
         let dispatch = Command::Dispatch {
             area,
             method: MineMethod::Pit,
             crew: 3,
         };
-        apply(&dispatch, &mut world, &events, &mut mining);
+        apply(&dispatch, &mut world, &events, &mut rebuilt);
         journal.record(dispatch);
 
         // Frames of wildly different lengths, as a real session has.
         for ticks in [1u32, 7, 3, 16, 2, 11, 16, 16, 9, 4] {
-            mining.advance(&mut world, &events, ticks);
+            rebuilt.mining.advance(&mut world, &events, ticks);
             journal.record(Command::Advance { ticks });
         }
 
@@ -455,17 +582,17 @@ mod tests {
         let (mut world, area) = site();
         let events = EventBus::new();
         let mut journal = CommandLog::new();
-        let mut mining = Mining::default();
+        let mut rebuilt = Rebuilt::default();
 
         let dispatch = Command::Dispatch {
             area,
             method: MineMethod::Pit,
             crew: 3,
         };
-        apply(&dispatch, &mut world, &events, &mut mining);
+        apply(&dispatch, &mut world, &events, &mut rebuilt);
         journal.record(dispatch);
         for ticks in [5u32, 16, 16, 16, 11] {
-            mining.advance(&mut world, &events, ticks);
+            rebuilt.mining.advance(&mut world, &events, ticks);
             journal.record(Command::Advance { ticks });
         }
 
@@ -485,19 +612,19 @@ mod tests {
         let (mut world, area) = site();
         let events = EventBus::new();
         let mut journal = CommandLog::new();
-        let mut mining = Mining::default();
+        let mut rebuilt = Rebuilt::default();
 
         let dispatch = Command::Dispatch {
             area,
             method: MineMethod::Pit,
             crew: 3,
         };
-        apply(&dispatch, &mut world, &events, &mut mining);
+        apply(&dispatch, &mut world, &events, &mut rebuilt);
         journal.record(dispatch);
         // Frames of wildly different lengths, as a real session has.
         for _ in 0..200 {
             for ticks in [1u32, 7, 3, 16, 2, 11, 16, 9] {
-                mining.advance(&mut world, &events, ticks);
+                rebuilt.mining.advance(&mut world, &events, ticks);
                 journal.record(Command::Advance { ticks });
             }
         }
@@ -639,17 +766,17 @@ mod tests {
         let (mut world, area) = site();
         let events = EventBus::new();
         let mut journal = CommandLog::new();
-        let mut mining = Mining::default();
+        let mut rebuilt = Rebuilt::default();
 
         let dispatch = Command::Dispatch {
             area,
             method: MineMethod::Pit,
             crew: 3,
         };
-        apply(&dispatch, &mut world, &events, &mut mining);
+        apply(&dispatch, &mut world, &events, &mut rebuilt);
         journal.record(dispatch);
         for _ in 0..40 {
-            mining.advance(&mut world, &events, 16);
+            rebuilt.mining.advance(&mut world, &events, 16);
             journal.record(Command::Advance { ticks: 16 });
         }
         let ground = world.generator().height_at(20, 20);
@@ -689,5 +816,121 @@ mod tests {
         assert_eq!(restored.block(by_hand), vx_core::BlockId::AIR);
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+}
+
+#[cfg(test)]
+mod movement_replay_tests {
+    use super::*;
+    use crate::movement::{self, MoveCommand};
+    use vx_core::ChunkPos;
+
+    fn world() -> World {
+        let mut world = World::new(2024);
+        world.load_around(ChunkPos::new(0, 0), 2);
+        world
+    }
+
+    /// A short recorded run: walk, sprint, jump, slide, stop.
+    fn recorded() -> CommandLog {
+        let mut journal = CommandLog::default();
+        let east = std::f32::consts::FRAC_PI_2;
+        let script: [(u16, u32); 5] = [
+            (movement::FWD, 12),
+            (movement::FWD | movement::SPRINT, 20),
+            (movement::FWD | movement::SPRINT | movement::JUMP, 4),
+            (movement::FWD | movement::SPRINT | movement::CROUCH, 16),
+            (0, 8),
+        ];
+        for (bits, ticks) in script {
+            let command = MoveCommand::looking(bits, east, 0.0).laden(40);
+            journal.record(Command::moving(command));
+            journal.record(Command::Advance { ticks });
+        }
+        journal
+    }
+
+    #[test]
+    fn the_same_journal_walks_the_same_walk() {
+        // The regression test the design note asked for, run against the log
+        // that already existed rather than a fixture built beside it.
+        let journal = recorded();
+        let events = EventBus::new();
+
+        let once = replay(&journal, &mut world(), &events);
+        let twice = replay(&journal, &mut world(), &events);
+
+        assert_eq!(once.player.position, twice.player.position);
+        assert_eq!(once.player.velocity, twice.player.velocity);
+        assert_eq!(once.movement.stance, twice.movement.stance);
+        assert_eq!(once.movement.stamina, twice.movement.stamina);
+    }
+
+    #[test]
+    fn a_journal_that_records_movement_actually_moves_the_player() {
+        // Guards against the whole thing passing by moving nobody at all.
+        let journal = recorded();
+        let events = EventBus::new();
+        let mut world = world();
+        let start = {
+            let ground = world.surface_y(0, 0).unwrap_or(64) as f32;
+            glam::Vec3::new(0.5, ground, 0.5)
+        };
+
+        let walked = replay(&journal, &mut world, &events);
+
+        let travelled = (walked.player.position - start).length();
+        assert!(travelled > 3.0, "the replayed player only moved {travelled}");
+    }
+
+    #[test]
+    fn splitting_an_advance_does_not_change_where_the_player_ends_up() {
+        // `Advance` folds when recorded, so the same run can be logged as one
+        // long entry or several short ones. Both must replay identically, or
+        // the fold is silently lossy.
+        let east = std::f32::consts::FRAC_PI_2;
+        let command = MoveCommand::looking(movement::FWD | movement::SPRINT, east, 0.0);
+
+        let mut whole = CommandLog::default();
+        whole.record(Command::moving(command));
+        whole.record(Command::Advance { ticks: 60 });
+
+        let mut split = CommandLog::default();
+        split.record(Command::moving(command));
+        for _ in 0..12 {
+            split.record(Command::Advance { ticks: 5 });
+        }
+
+        let events = EventBus::new();
+        let a = replay(&whole, &mut world(), &events);
+        let b = replay(&split, &mut world(), &events);
+        assert_eq!(a.player.position, b.player.position);
+    }
+
+    #[test]
+    fn a_move_survives_a_round_trip_through_the_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "vx-journal-move-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let journal = recorded();
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let moves: Vec<_> = read_back
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.command, Command::Move { .. }))
+            .map(|entry| entry.command.clone())
+            .collect();
+        assert_eq!(moves.len(), 5, "movement entries did not survive the file");
+        assert!(
+            matches!(moves[0], Command::Move { load: 40, .. }),
+            "the load did not survive: {:?}",
+            moves[0]
+        );
     }
 }

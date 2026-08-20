@@ -15,7 +15,7 @@ use crate::skills::{self, Skills};
 /// Panel size in texture pixels. Displayed 2x, so text is comfortably
 /// readable without a big texture.
 pub const HUD_WIDTH: u32 = 220;
-pub const HUD_HEIGHT: u32 = 64;
+pub const HUD_HEIGHT: u32 = 80;
 
 /// On-screen scale factor for the panel.
 pub const HUD_SCALE: f32 = 2.0;
@@ -26,6 +26,12 @@ const ACCENT: [u8; 4] = [255, 170, 60, 255];
 const BAR_BACK: [u8; 4] = [45, 48, 55, 255];
 const BACKGROUND: [u8; 4] = [12, 14, 18, 165];
 const NIGHT: [u8; 4] = [130, 150, 200, 255];
+/// Wind left. Goes red when there is not enough for a slide or a mantle, which
+/// is the only moment the number changes what you can do.
+const WIND: [u8; 4] = [110, 200, 255, 255];
+const WIND_LOW: [u8; 4] = [235, 90, 70, 255];
+/// The load bar. Warms as the pack fills, because a full pack is a decision.
+const LOAD: [u8; 4] = [200, 170, 110, 255];
 
 /// Everything the HUD shows this frame.
 pub struct HudContent<'a> {
@@ -44,6 +50,22 @@ pub struct HudContent<'a> {
     /// True while the body waits for its own ground to stream back in after a
     /// feed. Worth saying out loud: the controls are briefly dead on purpose.
     pub reconnecting: bool,
+    /// Stance, wind left, and how full the pack is.
+    ///
+    /// Passed in rather than read, like the hour above: the HUD stays a pure
+    /// function of its inputs so a capture cannot wobble.
+    pub movement: MovementReadout,
+}
+
+/// What the HUD says about how the player is moving.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MovementReadout {
+    /// Short stance label: STAND, SPRINT, CROUCH, PRONE, SLIDE, AIR, CLIMB.
+    pub stance: &'static str,
+    /// Wind remaining, 0..1.
+    pub stamina: f32,
+    /// Pack fullness, 0..1.
+    pub load: f32,
 }
 
 /// Paint a horizontal bar with a filled fraction.
@@ -126,7 +148,36 @@ pub fn render_hud(content: &HudContent) -> Vec<u8> {
     }
     y += LINE_HEIGHT as i32;
 
-    // Line 4: the drill.
+    // Line 4: how the body is moving. Two bars, because both numbers change
+    // what you can do right now: wind gates the slide and the mantle, and load
+    // is the tax on every upgrade that let you carry it.
+    let readout = content.movement;
+    if !readout.stance.is_empty() {
+        font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, DIM, readout.stance);
+        let bars = margin + 40;
+        let width = (HUD_WIDTH as i32 - bars - margin - 6) as u32 / 2;
+        draw_bar(
+            &mut pixels,
+            bars as u32,
+            y as u32 + 1,
+            width,
+            5,
+            readout.stamina,
+            if readout.stamina < 0.15 { WIND_LOW } else { WIND },
+        );
+        draw_bar(
+            &mut pixels,
+            (bars as u32) + width + 6,
+            y as u32 + 1,
+            width,
+            5,
+            readout.load,
+            LOAD,
+        );
+    }
+    y += LINE_HEIGHT as i32;
+
+    // Line 5: the drill.
     if let Some(progress) = content.drilling {
         let line = format!("DRILLING {:.0}%", progress.clamp(0.0, 1.0) * 100.0);
         font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, TEXT, &line);
@@ -157,6 +208,7 @@ mod tests {
             level_up: None,
             greeting: None,
             reconnecting: false,
+            movement: MovementReadout::default(),
         }
     }
 
@@ -254,5 +306,76 @@ mod tests {
         assert_ne!(day, night, "the clock does not show on the panel");
         // And the panel stays a pure function of its inputs.
         assert_eq!(day, render_hud(&noon));
+    }
+
+    #[test]
+    fn the_movement_line_draws_both_bars() {
+        // Two numbers that change what you can do right now: wind gates the
+        // slide and the mantle, load taxes every cargo upgrade you bought.
+        let skills = Skills::new();
+        let mut empty = base_content(&skills);
+        empty.movement = MovementReadout {
+            stance: "SPRINT",
+            stamina: 0.0,
+            load: 0.0,
+        };
+        let mut full = base_content(&skills);
+        full.movement = MovementReadout {
+            stance: "SPRINT",
+            stamina: 1.0,
+            load: 1.0,
+        };
+
+        assert_ne!(
+            render_hud(&empty),
+            render_hud(&full),
+            "the bars do not respond to their own numbers"
+        );
+    }
+
+    #[test]
+    fn no_stance_means_no_movement_line() {
+        // Fly mode and the capture path have nothing to say here, and a blank
+        // label must leave the row empty rather than draw an empty bar.
+        let skills = Skills::new();
+        let blank = base_content(&skills);
+        let mut loud = base_content(&skills);
+        loud.movement = MovementReadout {
+            stance: "PRONE",
+            stamina: 0.5,
+            load: 0.5,
+        };
+
+        assert_ne!(render_hud(&blank), render_hud(&loud));
+    }
+
+    #[test]
+    fn every_stance_label_is_drawable() {
+        // A label the font cannot draw renders as a row of missing-glyph boxes.
+        use crate::movement::Stance;
+        let labels = [
+            Stance::Grounded,
+            Stance::Sprinting,
+            Stance::Crouched,
+            Stance::Prone,
+            Stance::Swimming,
+            Stance::Sliding { ticks: 0 },
+            Stance::Airborne { coyote: 0 },
+            Stance::Mantling {
+                from: glam::Vec3::ZERO,
+                to: glam::Vec3::ZERO,
+                t: 0,
+                span: 1,
+            },
+        ];
+        for stance in labels {
+            for character in stance.label().chars() {
+                assert!(
+                    font::knows(character),
+                    "{:?} label uses an undrawable {character:?}",
+                    stance
+                );
+            }
+        }
     }
 }

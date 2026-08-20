@@ -204,6 +204,28 @@ impl Rig {
         }
     }
 
+    /// The same rig squashed vertically.
+    ///
+    /// Stance poses without an animation system: a crouching body is a standing
+    /// body with its height scaled, which is crude but honest — the parts are
+    /// boxes and there are no joints to bend. It reads correctly in third
+    /// person, which is the only place anyone sees it.
+    pub fn compressed(&self, factor: f32) -> Self {
+        let factor = factor.clamp(0.05, 1.0);
+        Rig {
+            parts: self
+                .parts
+                .iter()
+                .map(|part| {
+                    let mut part = *part;
+                    part.centre.y *= factor;
+                    part.size.y *= factor;
+                    part
+                })
+                .collect(),
+        }
+    }
+
     /// The player's handheld compact boring drill, sized for the viewmodel.
     pub fn hand_drill() -> Self {
         Rig {
