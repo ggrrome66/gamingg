@@ -47,11 +47,14 @@ use crate::mining::Mining;
 use crate::movement::{self, MoveCommand, Movement};
 
 const MAGIC: &[u8; 4] = b"VXLG";
-// Bumped to 2 when a dispatch gained its crew size, and to 3 when the player's
-// own movement joined the log. A journal is an oracle rather than a load path —
-// region files are still written every save — so an old one being rejected
-// costs a determinism check, not a world.
-const VERSION: u32 = 3;
+// Bumped to 2 when a dispatch gained its crew size, to 3 when the player's own
+// movement joined the log, and to 4 when the player's house joined the
+// hometown — not a format change, a *world* change: a v3 log replays against
+// ground that no longer generates, so the oracle honestly restarts rather than
+// reporting divergence that is nobody's fault. A journal is an oracle rather
+// than a load path — region files are still written every save — so an old one
+// being rejected costs a determinism check, not a world.
+const VERSION: u32 = 4;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -222,12 +225,26 @@ impl CommandLog {
             Ok(None) => CommandLog::new(),
             Err(error) => {
                 log::warn!(
-                    "could not read {}: {error}; the world will load from its last keyframe \
-                     and anything ordered since is lost",
+                    "could not read {}: {error}; the world still loads from its region files, \
+                     but the determinism oracle restarts here",
                     path.display()
                 );
-                CommandLog::new()
+                CommandLog::restarted()
             }
+        }
+    }
+
+    /// A log that begins mid-history, after an old or damaged one was refused.
+    ///
+    /// The nonzero keyframe tick is the load-bearing part: it says "this log
+    /// does not reach back to genesis", so `--replay` declines to compare
+    /// hashes instead of reporting a divergence that is really a version bump.
+    /// One specific tick would be a lie — the refused file's clock is exactly
+    /// what could not be read.
+    pub fn restarted() -> CommandLog {
+        CommandLog {
+            keyframe_tick: 1,
+            ..CommandLog::default()
         }
     }
 }
@@ -816,6 +833,39 @@ mod tests {
         assert_eq!(restored.block(by_hand), vx_core::BlockId::AIR);
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn an_old_journal_restarts_the_oracle_instead_of_lying() {
+        // A v3 log was recorded against a hometown without the player's house.
+        // Replaying it over post-house terrain would diverge through no fault
+        // of the log, so the loader refuses it and the fresh log declines
+        // genesis coverage rather than claiming it.
+        let directory = std::env::temp_dir().join(format!(
+            "vx-journal-version-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 24]); // keyframe tick/hash/clock
+        std::fs::write(directory.join("log.dat"), &bytes).unwrap();
+
+        let log = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert!(log.is_empty(), "salvaged entries from a refused version");
+        assert_ne!(
+            log.keyframe_tick, 0,
+            "a restarted log must not claim to reach back to genesis"
+        );
     }
 }
 

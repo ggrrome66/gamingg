@@ -629,6 +629,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run --release -p vx-app          # opens a window
 ```
 
+New players wake up inside their own house in the starting village, with a
+storage chest, a mailbox for mail orders, and a one-time welcome panel whose
+changelog is parsed straight out of `ROADMAP.md` (`--changelog` prints it).
+The spawn area is pregenerated before the first frame and the hometown is held
+resident permanently; `--view-distance <n>` (4–16) picks the streaming radius.
+
 ### A build you can just run
 
 `dist/` holds a stripped release binary for x86-64 Linux, for testing on a Steam
@@ -654,14 +660,15 @@ Controls:
 | Click | Capture the mouse |
 | Hold left button | Run the drill — harder rock takes longer |
 | Right click | Place the selected block |
-| `1`–`5` | Choose stone, dirt, grass, sand or the base container |
+| `1`–`6` | Choose stone, dirt, grass, sand, the base container or your chest |
 | `C` | Toggle first person and over-the-shoulder |
 | `V` | Open the handheld fleet uplink (arrows pick) |
 | `Tab` | (in the handheld) Turn between the fleet roster and the map |
 | `Enter` | (in the uplink) Look through the selected machine |
 | `R` | Take or release the master override of what you are watching |
 | `Escape` | (on a feed) Hang up and return to your body |
-| `E` | Trade at the shop counter: sell at that town's prices, buy drones and fliers (arrows pick, `Enter` trades, `E` leaves) |
+| `E` | Trade at the shop counter: sell at that town's prices, buy drones and fliers, or order goods by mail from another town (arrows pick, `Enter` trades, `E` leaves) |
+| `E` | Open your chest at home (arrows pick, `Enter` moves goods to the base pile), or collect the mailbox outside |
 | `E` | Read the beacon console at the foot of a radio mast — take work, or sign for a delivery (arrows pick, `Enter` acts, `E` leaves) |
 | `M` | Mark a corner of an ore body (two marks make an area) |
 | `Tab` | Cycle the proposed mining method |

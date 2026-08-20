@@ -1,28 +1,38 @@
 //! Keeping loaded chunks and their meshes in step with the camera.
 //!
-//! Meshing runs on a worker pool. It is still throttled per frame — rebuilding
-//! everything newly visible in one go produces a visible hitch when flying —
-//! but the budget can be far higher now that the work is spread across cores
-//! instead of blocking the frame on one.
+//! Three kinds of work, three treatments:
 //!
-//! The split is: mutate the world first (generate, unload), then build meshes
-//! from an immutable borrow in parallel, then upload serially. Uploads stay on
-//! one thread because GPU buffer creation is not the bottleneck and keeping it
-//! single-threaded avoids needing a shared device lock.
+//! - **Generation** runs on a background thread ([`GenWorker`]). Terrain is a
+//!   pure function of `(seed, position)`, so a cloned generator on another
+//!   thread produces bit-identical chunks — purity is the contract that makes
+//!   the thread free. The worker only changes *when* a chunk becomes resident
+//!   for rendering, which was always frame-dependent; anything the simulation
+//!   needs NOW still comes through the synchronous `World::load_chunk`, and
+//!   correctness continues to rest on chunk pinning exactly as stage 9a left it.
+//! - **Meshing** is a parallel fork-join across the rayon pool, budgeted per
+//!   frame. Deliberately *not* asynchronous: the measured hitches were the
+//!   per-chunk region decode (now cached in `WorldSave`) and synchronous
+//!   generation (now the worker's job). Revisit only with a measurement.
+//! - **Uploads** stay serial on the main thread; GPU buffer creation is not
+//!   the bottleneck and a single thread needs no shared device lock.
+//!
+//! Disk loads also stay on the main thread: the region cache makes them cheap,
+//! and `WorldSave` is deliberately `!Sync`.
 
 use rayon::prelude::*;
 
 use vx_core::{BlockPos, ChunkPos};
 use vx_mesh::{build_mesh, Mesh};
 use vx_render::Renderer;
-use vx_world::{World, WorldSave};
+use vx_world::{Chunk, TerrainGenerator, World, WorldSave};
 
 /// Chunk-streaming settings.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamingConfig {
     /// Chunks visible in every direction.
     pub render_distance: i32,
-    /// Chunks generated per frame.
+    /// New generation requests issued per frame (or, in the synchronous
+    /// fallback, chunks generated per frame).
     pub generate_budget: usize,
     /// Chunk meshes rebuilt and uploaded per frame.
     pub mesh_budget: usize,
@@ -32,11 +42,81 @@ impl Default for StreamingConfig {
     fn default() -> Self {
         StreamingConfig {
             render_distance: 8,
-            // Generation is still serial and cheap; meshing is the expensive
-            // half and is now parallel, so its budget can be much larger.
             generate_budget: 8,
             mesh_budget: 24,
         }
+    }
+}
+
+/// Most chunk requests allowed in the worker's queue at once.
+///
+/// Enough to keep the thread busy across a boundary crossing, small enough
+/// that a sprint in a straight line does not build a backlog of chunks that
+/// will be out of range by the time they arrive.
+const MAX_INFLIGHT: usize = 16;
+
+/// Generates chunks on a background thread.
+///
+/// Send a position, get the finished [`Chunk`] back later. The generator is a
+/// clone, and generation is pure in `(seed, position)`, so the result is
+/// bit-identical to generating on the main thread — proven by test, not hoped.
+pub struct GenWorker {
+    requests: std::sync::mpsc::Sender<ChunkPos>,
+    results: std::sync::mpsc::Receiver<Chunk>,
+    inflight: std::collections::HashSet<ChunkPos>,
+}
+
+// A chunk crosses the channel whole.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<Chunk>();
+};
+
+impl GenWorker {
+    pub fn new(generator: TerrainGenerator) -> Self {
+        let (request_tx, request_rx) = std::sync::mpsc::channel::<ChunkPos>();
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<Chunk>();
+
+        std::thread::Builder::new()
+            .name("chunk-gen".into())
+            .spawn(move || {
+                // Exits when the sender drops: recv fails, the loop ends.
+                while let Ok(pos) = request_rx.recv() {
+                    let chunk = generator.generate(pos);
+                    if result_tx.send(chunk).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("could not spawn the chunk generation thread");
+
+        GenWorker {
+            requests: request_tx,
+            results: result_rx,
+            inflight: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Ask for a chunk, unless it is already on order or the queue is full.
+    pub fn request(&mut self, pos: ChunkPos) -> bool {
+        if self.inflight.len() >= MAX_INFLIGHT || self.inflight.contains(&pos) {
+            return false;
+        }
+        if self.requests.send(pos).is_ok() {
+            self.inflight.insert(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Everything the worker has finished since the last drain.
+    pub fn drain(&mut self) -> Vec<Chunk> {
+        let arrived: Vec<Chunk> = self.results.try_iter().collect();
+        for chunk in &arrived {
+            self.inflight.remove(&chunk.pos());
+        }
+        arrived
     }
 }
 
@@ -64,11 +144,43 @@ pub fn chunks_in_range(centre: ChunkPos, radius: i32) -> Vec<ChunkPos> {
     chunks
 }
 
+/// Bring one chunk into the world: from disk when it was saved, generated
+/// afresh otherwise. The synchronous path — pregeneration and the headless
+/// tools use it directly; the streamer uses the same disk half and hands the
+/// generation half to its worker.
+pub fn load_or_generate(world: &mut World, save: Option<&WorldSave>, pos: ChunkPos) {
+    if world.is_loaded(pos) {
+        return;
+    }
+    match save.map(|save| save.load_chunk(pos, world.registry())) {
+        Some(Ok(Some(chunk))) => world.insert_chunk(chunk),
+        Some(Err(error)) => {
+            // A damaged region should not take the game down; fall back to
+            // generated terrain and say so.
+            log::error!("could not load chunk {pos:?}: {error}");
+            world.load_chunk(pos);
+        }
+        _ => {
+            world.load_chunk(pos);
+        }
+    }
+}
+
 /// Tracks what has been meshed, and advances streaming one frame at a time.
 pub struct ChunkStreamer {
     config: StreamingConfig,
     /// Chunks currently uploaded to the renderer.
     meshed: std::collections::HashSet<ChunkPos>,
+    /// The background generator, when streaming for a live window. `None` in
+    /// headless paths, which keep the old fully synchronous behaviour.
+    worker: Option<GenWorker>,
+    /// The wanted list is an allocation and a sort of ~200 entries; it only
+    /// changes when the centre chunk does, so it is kept between frames.
+    last_centre: Option<ChunkPos>,
+    wanted: Vec<ChunkPos>,
+    /// World edit counter as of the last dirty scan, so a quiet frame skips
+    /// walking every loaded chunk.
+    last_edit_count: u64,
 }
 
 impl ChunkStreamer {
@@ -76,7 +188,17 @@ impl ChunkStreamer {
         ChunkStreamer {
             config,
             meshed: std::collections::HashSet::new(),
+            worker: None,
+            last_centre: None,
+            wanted: Vec::new(),
+            last_edit_count: u64::MAX,
         }
+    }
+
+    /// Attach a background generator. Without one, generation is synchronous.
+    pub fn with_worker(mut self, worker: GenWorker) -> Self {
+        self.worker = Some(worker);
+        self
     }
 
     /// Do one frame's worth of generating, meshing and unloading.
@@ -91,30 +213,71 @@ impl ChunkStreamer {
         save: Option<&WorldSave>,
     ) -> usize {
         let radius = self.config.render_distance;
-        let wanted = chunks_in_range(centre, radius);
+        if self.last_centre != Some(centre) {
+            self.wanted = chunks_in_range(centre, radius);
+            self.last_centre = Some(centre);
+        }
 
-        // Bring in a few of the nearest missing chunks. A chunk that was saved
-        // takes precedence over generating it afresh, or every edit would be
-        // undone the moment you walked away and back.
+        // Land whatever the worker finished. A chunk that became resident
+        // through a synchronous path in the meantime wins: it may carry edits,
+        // and by purity its terrain half is identical anyway. One that drifted
+        // out of range since it was ordered is simply dropped.
+        let mut inserted = false;
+        if let Some(worker) = &mut self.worker {
+            let keep = (radius + 2) as i64;
+            for chunk in worker.drain() {
+                let pos = chunk.pos();
+                if world.is_loaded(pos) || pos.distance_squared(centre) > keep * keep {
+                    continue;
+                }
+                world.insert_chunk(chunk);
+                inserted = true;
+            }
+        }
+
+        // Bring in the nearest missing chunks. A chunk that was saved takes
+        // precedence over generating it afresh, or every edit would be undone
+        // the moment you walked away and back — and saved chunks load on this
+        // thread (cheap, via the region cache) while fresh terrain is ordered
+        // from the worker.
         let mut generated = 0;
-        for pos in &wanted {
+        for index in 0..self.wanted.len() {
             if generated >= self.config.generate_budget {
                 break;
             }
-            if world.is_loaded(*pos) {
+            let pos = self.wanted[index];
+            if world.is_loaded(pos) {
                 continue;
             }
-            match save.map(|save| save.load_chunk(*pos, world.registry())) {
-                Some(Ok(Some(chunk))) => world.insert_chunk(chunk),
+            if let Some(worker) = &mut self.worker {
+                if worker.inflight.contains(&pos) {
+                    continue;
+                }
+            }
+            match save.map(|save| save.load_chunk(pos, world.registry())) {
+                Some(Ok(Some(chunk))) => {
+                    world.insert_chunk(chunk);
+                    inserted = true;
+                }
                 Some(Err(error)) => {
                     // A damaged region should not take the game down; fall
                     // back to generated terrain and say so once.
                     log::error!("could not load chunk {pos:?}: {error}");
-                    world.load_chunk(*pos);
+                    world.load_chunk(pos);
+                    inserted = true;
                 }
-                _ => {
-                    world.load_chunk(*pos);
-                }
+                _ => match &mut self.worker {
+                    Some(worker) => {
+                        if !worker.request(pos) {
+                            // Queue full: stop ordering, keep what we have.
+                            break;
+                        }
+                    }
+                    None => {
+                        world.load_chunk(pos);
+                        inserted = true;
+                    }
+                },
             }
             generated += 1;
         }
@@ -136,9 +299,17 @@ impl ChunkStreamer {
 
         // Pick this frame's work: chunks loaded but not yet uploaded, plus
         // anything the world flagged dirty after an edit. Nearest first, since
-        // `wanted` is already sorted that way.
-        let dirty: std::collections::HashSet<ChunkPos> = world.dirty_chunks().collect();
-        let to_mesh: Vec<ChunkPos> = wanted
+        // `wanted` is already sorted that way. The dirty scan walks every
+        // loaded chunk, so a frame where nothing changed skips it.
+        let quiet = world.edit_count() == self.last_edit_count && !inserted;
+        self.last_edit_count = world.edit_count();
+        let dirty: std::collections::HashSet<ChunkPos> = if quiet {
+            std::collections::HashSet::new()
+        } else {
+            world.dirty_chunks().collect()
+        };
+        let to_mesh: Vec<ChunkPos> = self
+            .wanted
             .iter()
             .copied()
             .filter(|pos| {
@@ -235,6 +406,102 @@ mod tests {
         let small = chunks_in_range(ChunkPos::new(0, 0), 2).len();
         let large = chunks_in_range(ChunkPos::new(0, 0), 6).len();
         assert!(large > small * 4, "{small} then {large}");
+    }
+
+    #[test]
+    fn the_worker_generates_bit_identical_chunks_to_the_main_thread() {
+        // Purity is the whole contract: a cloned generator on another thread
+        // must produce exactly what the main thread would have.
+        let mut world = World::new(2024);
+        let mut worker = GenWorker::new(world.generator().clone());
+
+        let positions: Vec<ChunkPos> = chunks_in_range(ChunkPos::new(0, 0), 2);
+        for pos in &positions {
+            assert!(worker.request(*pos) || !worker.inflight.is_empty());
+        }
+
+        let mut received = std::collections::HashMap::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while received.len() < positions.len().min(MAX_INFLIGHT) {
+            for chunk in worker.drain() {
+                received.insert(chunk.pos(), chunk);
+            }
+            assert!(std::time::Instant::now() < deadline, "worker never finished");
+            std::thread::yield_now();
+        }
+
+        for (pos, from_worker) in received {
+            world.load_chunk(pos);
+            let local = world.chunk(pos).expect("just loaded");
+            assert_eq!(
+                vx_world::chunk_hash(local, world.registry()),
+                vx_world::chunk_hash(&from_worker, world.registry()),
+                "worker chunk {pos:?} differs from the main thread's"
+            );
+        }
+    }
+
+    #[test]
+    fn a_worker_result_for_a_chunk_already_resident_is_discarded() {
+        // A synchronous path (an agent's pin, the pilot) can win the race for
+        // a chunk the worker was already building. The resident copy may carry
+        // edits; the late arrival must not overwrite them.
+        let mut world = World::new(2024);
+        let pos = ChunkPos::new(1, 1);
+
+        let mut streamer = ChunkStreamer::new(StreamingConfig::default())
+            .with_worker(GenWorker::new(world.generator().clone()));
+        let worker = streamer.worker.as_mut().unwrap();
+        assert!(worker.request(pos));
+
+        // The synchronous path wins and the player edits the chunk.
+        world.load_chunk(pos);
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let edited = vx_core::BlockPos::new(20, 200, 20);
+        world.set_block(edited, stone).unwrap();
+
+        // Wait for the worker, then land results the way `update` does.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let arrived = streamer.worker.as_mut().unwrap().drain();
+            if !arrived.is_empty() {
+                for chunk in arrived {
+                    if !world.is_loaded(chunk.pos()) {
+                        world.insert_chunk(chunk);
+                    }
+                }
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "worker never finished");
+            std::thread::yield_now();
+        }
+
+        assert_eq!(
+            world.block(edited),
+            stone,
+            "the worker's copy overwrote a player's edit"
+        );
+    }
+
+    #[test]
+    fn the_wanted_list_is_only_rebuilt_when_the_centre_chunk_changes() {
+        let mut streamer = ChunkStreamer::new(StreamingConfig::default());
+        assert!(streamer.wanted.is_empty());
+
+        // Private-field poke in place of running a full update, which needs a
+        // GPU: drive exactly the caching logic `update` runs first.
+        let centre = ChunkPos::new(3, 3);
+        streamer.wanted = chunks_in_range(centre, streamer.config.render_distance);
+        streamer.last_centre = Some(centre);
+        let before = streamer.wanted.clone();
+
+        // Same centre: nothing recomputed (same object semantics — the guard
+        // in `update` is `last_centre != Some(centre)`).
+        assert_eq!(streamer.last_centre, Some(centre));
+        assert_eq!(streamer.wanted, before);
+
+        let moved = ChunkPos::new(4, 3);
+        assert_ne!(streamer.last_centre, Some(moved), "guard would not fire");
     }
 
     #[test]

@@ -16,7 +16,9 @@ mod controller;
 mod device;
 mod economy;
 mod garage;
+mod homestead;
 mod hud;
+mod intro;
 mod journal;
 mod map;
 mod mining;
@@ -49,6 +51,8 @@ const SHOP_SLOT: usize = 2;
 const DEVICE_SLOT: usize = 3;
 const FEED_SLOT: usize = 4;
 const BOARD_SLOT: usize = 5;
+const HOME_SLOT: usize = 6;
+const INTRO_SLOT: usize = 7;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -125,6 +129,12 @@ struct Options {
     handheld_map: bool,
     /// Hour of the in-game day to light the capture by, 0..1.
     time: f32,
+    /// Chunks visible in every direction, when playing windowed.
+    view_distance: i32,
+    /// Print the derived changelog and exit.
+    changelog: bool,
+    /// Draw the welcome panel over the capture.
+    welcome: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -142,6 +152,9 @@ fn parse_args() -> Result<Options, String> {
         width: 1280,
         height: 720,
         world: "world".to_string(),
+        view_distance: 8,
+        changelog: false,
+        welcome: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -199,6 +212,8 @@ fn parse_args() -> Result<Options, String> {
             "--shop" => options.shop = true,
             "--board" => options.board = true,
             "--replay" => options.replay = true,
+            "--changelog" => options.changelog = true,
+            "--welcome" => options.welcome = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -223,6 +238,14 @@ fn parse_args() -> Result<Options, String> {
                 options.ticks = value()?
                     .parse()
                     .map_err(|_| "--ticks must be a number".to_string())?
+            }
+            "--view-distance" => {
+                let distance: i32 = value()?
+                    .parse()
+                    .map_err(|_| "--view-distance must be a number".to_string())?;
+                // Below four the world ends at your nose; past sixteen the
+                // budget maths stops being honest about frame cost.
+                options.view_distance = distance.clamp(4, 16);
             }
             "--width" => {
                 options.width = value()?
@@ -254,6 +277,9 @@ fn parse_args() -> Result<Options, String> {
                      --third-person      frame over the player's shoulder, body in shot\n  \
                      --device            draw the handheld fleet roster over the capture\n  \
                      --handheld-map      draw the handheld's map page instead\n  \
+                     --view-distance <n> chunks visible in every direction (4-16, default 8)\n  \
+                     --changelog         print the welcome panel's changelog and exit\n  \
+                     --welcome           draw the welcome panel over the capture\n  \
                      --time <0..1>       hour of the day to light the capture by\n  \
                      --night             shorthand for --time 0\n  \
                      --dawn --noon --dusk\n  \
@@ -280,6 +306,13 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    if options.changelog {
+        for line in intro::changelog() {
+            println!("{line}");
+        }
+        return;
+    }
 
     let result = if options.replay {
         run_replay(&options)
@@ -779,6 +812,26 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         }
     }
 
+    if options.welcome {
+        let panel = intro::Intro::new();
+        let pixels = intro::render_intro(&panel);
+        let panel_width = intro::INTRO_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = intro::INTRO_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            INTRO_SLOT,
+            &context.device,
+            &context.queue,
+            (intro::INTRO_WIDTH, intro::INTRO_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     if options.shop {
         // The shop panel over the frame, stocked the way a good session
         // leaves it — this is the capture that eyeballs the trade UI.
@@ -796,7 +849,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             .clone();
         let shed = garage::Garage::new();
         let pixels =
-            shop::render_shop(&panel, Some(&pile), &walletbook, &here, &market, &shed);
+            shop::render_shop(&panel, Some(&pile), &walletbook, &here, &market, &shed, &[]);
         let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
         let panel_height = shop::SHOP_HEIGHT as f32 * shop::SHOP_SCALE;
         renderer.set_overlay(
@@ -947,6 +1000,7 @@ fn run_windowed(options: &Options) -> Result<(), String> {
         options.height,
         options.world.clone(),
         options.drones,
+        options.view_distance,
     );
     event_loop
         .run_app(&mut app)
@@ -1028,6 +1082,14 @@ struct Active {
     economy: economy::Economy,
     /// The machines the player actually owns.
     garage: garage::Garage,
+    /// The house: the chest, the mailbox, and what they hold.
+    homestead: homestead::Homestead,
+    /// Mail offers priced when the counter opened. Re-checked at confirm.
+    offers: Vec<shop::Offer>,
+    /// The welcome panel, open on the first boot of this machine.
+    intro: intro::Intro,
+    /// The chest panel's cursor and feedback.
+    home_panel: homestead::HomePanel,
     /// The town whose counter is open. `TownSite` is `Copy`, so this can be
     /// taken out and handed to the shop beside a mutable borrow of the books.
     counter: Option<vx_world::town::TownSite>,
@@ -1047,6 +1109,8 @@ struct App {
     world_name: String,
     /// Drones a dispatch puts on the job.
     crew: u32,
+    /// Chunks visible in every direction.
+    view_distance: i32,
     active: Option<Active>,
     fly: FlyController,
     walk: WalkController,
@@ -1060,13 +1124,21 @@ struct App {
 }
 
 impl App {
-    fn new(seed: u64, width: u32, height: u32, world_name: String, crew: u32) -> Self {
+    fn new(
+        seed: u64,
+        width: u32,
+        height: u32,
+        world_name: String,
+        crew: u32,
+        view_distance: i32,
+    ) -> Self {
         App {
             seed,
             width,
             height,
             world_name,
             crew,
+            view_distance,
             active: None,
             fly: FlyController::default(),
             drill_held: false,
@@ -1123,7 +1195,12 @@ impl App {
         // haggling at a counter, or staring at a handheld. For the feed that
         // is also the fiction — you are standing there looking at a screen.
         let feed = active.device.feed();
-        let busy = active.shop.open || active.board.open || active.device.open || feed.is_some();
+        let busy = active.shop.open
+            || active.board.open
+            || active.device.open
+            || active.home_panel.open
+            || active.intro.open
+            || feed.is_some();
         if busy || active.resuming {
             active.player.velocity = glam::Vec3::ZERO;
         }
@@ -1389,6 +1466,20 @@ impl App {
             );
             let reachable = active.world.generator().towns_near(column, RADIO_RANGE);
             for landed in active.economy.run(&reachable, now) {
+                // Mail lands whether or not the player is anywhere near home:
+                // nothing about it needs the destination market, so it must
+                // run before the radio-range guard below.
+                if landed.owner == economy::Owner::Mail {
+                    active
+                        .homestead
+                        .mailbox
+                        .add(economy::GOODS[landed.good], landed.amount.round() as u64);
+                    active.greeting = Some((
+                        "MAIL FOR YOU. CHECK THE MAILBOX AT HOME".into(),
+                        Instant::now(),
+                    ));
+                    continue;
+                }
                 // A load of the player's that has arrived: paid at the far
                 // town's price, which is the whole reason to have sent it.
                 let Some(site) = reachable.iter().find(|site| site.centre == landed.to) else {
@@ -1491,6 +1582,8 @@ impl App {
             .set_objects(&active.context.device, &active.context.queue, &objects);
         self.refresh_hud();
         self.refresh_shop();
+        self.refresh_home();
+        self.refresh_intro();
         self.refresh_board();
         self.refresh_device();
         self.refresh_feed();
@@ -1634,6 +1727,17 @@ impl App {
                         );
                     }
                 }
+
+                // Breaking the chest packs it up: the block is forgotten, the
+                // contents stay in the homestead — they were never in the
+                // world to begin with.
+                if active.homestead.chest_at == Some(hit.block) {
+                    active.homestead.chest_at = None;
+                    active.greeting = Some((
+                        "CHEST PACKED UP. PLACE IT AGAIN, HERE OR AFIELD".into(),
+                        Instant::now(),
+                    ));
+                }
             }
         }
     }
@@ -1654,6 +1758,17 @@ impl App {
             return;
         };
 
+        // One chest is the rule, enforced at the door: the homestead is a
+        // single side table, and a second block would be a chest-shaped lie.
+        let chest = active.world.registry().id_of("engine:chest");
+        if chest == Some(block) && active.homestead.chest_at.is_some() {
+            active.greeting = Some((
+                "YOU HAVE A CHEST ALREADY. BREAK IT TO MOVE IT".into(),
+                Instant::now(),
+            ));
+            return;
+        }
+
         // The player's own box must not be built into, or you seal yourself in.
         let body = active.player.aabb();
         let result = place_block(
@@ -1670,6 +1785,9 @@ impl App {
                 at: position,
                 block: name,
             });
+            if chest == Some(block) {
+                active.homestead.chest_at = Some(position);
+            }
             let container = active.world.registry().id_of("engine:container");
             if container == Some(block) {
                 active.mining.fleet.set_base(position);
@@ -1805,6 +1923,50 @@ impl App {
             return;
         }
 
+        // The welcome panel is the first thing a new player sees, so while it
+        // is up it owns the keyboard outright.
+        if self.active.as_ref().is_some_and(|active| active.intro.open) {
+            let Some(active) = &mut self.active else { return };
+            match code {
+                KeyCode::ArrowUp => active.intro.scroll_by(-1),
+                KeyCode::ArrowDown => active.intro.scroll_by(1),
+                KeyCode::KeyE | KeyCode::Escape | KeyCode::Enter => {
+                    active.intro.open = false;
+                    active.renderer.clear_overlay(INTRO_SLOT);
+                    intro::mark_seen();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // The chest panel, while open, owns the keyboard.
+        if self.active.as_ref().is_some_and(|active| active.home_panel.open) {
+            let Some(active) = &mut self.active else { return };
+            match code {
+                KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                    let rows = active.homestead.chest.entries().count();
+                    let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
+                    active.home_panel.move_cursor(delta, rows);
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => {
+                    let base = active
+                        .mining
+                        .fleet
+                        .base
+                        .as_mut()
+                        .map(|base| &mut base.stockpile);
+                    active.home_panel.confirm(&mut active.homestead, base);
+                }
+                KeyCode::KeyE | KeyCode::Escape => {
+                    active.home_panel.close();
+                    active.renderer.clear_overlay(HOME_SLOT);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // The shop, while open, owns the keyboard: Enter must trade, never
         // fall through to `start_mining`.
         if self.active.as_ref().is_some_and(|active| active.shop.open) {
@@ -1821,7 +1983,8 @@ impl App {
                         .counter
                         .map(|site| active.economy.market(&site, active.journal.tick()).clone());
                     let Some(market) = market else { return };
-                    let rows = shop::Shop::rows(pile, &active.wallet, &market).len();
+                    let rows =
+                        shop::Shop::rows(pile, &active.wallet, &market, &active.offers).len();
                     let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
                     active.shop.move_cursor(delta, rows);
                 }
@@ -1834,10 +1997,25 @@ impl App {
                         .map(|base| &mut base.stockpile);
                     let Some(site) = active.counter else { return };
                     let now = active.journal.tick();
-                    let market = active.economy.market_mut(&site, now);
-                    active
-                        .shop
-                        .confirm(pile, &mut active.wallet, market, &mut active.garage);
+                    // The market is cloned out so the mail context can borrow
+                    // the whole economy mutably beside it; sales write through
+                    // `market_mut` below, so nothing here loses a write.
+                    let mut market = active.economy.market_mut(&site, now).clone();
+                    let offers = active.offers.clone();
+                    let mut post = shop::MailContext {
+                        economy: &mut active.economy,
+                        mailbox_held: active.homestead.mailbox.total(),
+                        now,
+                    };
+                    active.shop.confirm(
+                        pile,
+                        &mut active.wallet,
+                        &mut market,
+                        &mut active.garage,
+                        &offers,
+                        Some(&mut post),
+                    );
+                    *active.economy.market_mut(&site, now) = market;
                 }
                 KeyCode::KeyE | KeyCode::Escape => {
                     active.shop.close();
@@ -2025,6 +2203,46 @@ impl App {
                     .next()
                 {
                     Some(site) => {
+                        // Price the mail shelf while we are here: for each
+                        // good, the cheapest other town in radio range with a
+                        // parcel to spare. Nearest wins a tie — `towns_near`
+                        // is already sorted by distance, and strict `<` keeps
+                        // the first seen.
+                        let now = active.journal.tick();
+                        let neighbours =
+                            active.world.generator().towns_near(site.centre, RADIO_RANGE);
+                        let home = vx_world::town::home_site().centre;
+                        let mut offers = Vec::new();
+                        for good in 0..economy::GOODS.len() {
+                            let mut best: Option<shop::Offer> = None;
+                            for other in neighbours
+                                .iter()
+                                .filter(|other| other.centre != site.centre)
+                            {
+                                let market = active.economy.market(other, now);
+                                if market.stock(good) < economy::PARCEL as f32 {
+                                    continue;
+                                }
+                                let unit_price = market.price(good);
+                                if best
+                                    .as_ref()
+                                    .is_some_and(|held| unit_price >= held.unit_price)
+                                {
+                                    continue;
+                                }
+                                best = Some(shop::Offer {
+                                    good,
+                                    source: *other,
+                                    unit_price,
+                                    freight: economy::Shipment::travel_ticks(
+                                        other.centre,
+                                        home,
+                                    ) / 10,
+                                });
+                            }
+                            offers.extend(best);
+                        }
+                        active.offers = offers;
                         active.counter = Some(site);
                         active.shop.open_at_counter();
                     }
@@ -2066,6 +2284,21 @@ impl App {
                 active.ledger.visit(site.centre);
                 active.console = Some((site, postings, runs));
                 active.board.open_at_beacon();
+            }
+            "engine:chest" => {
+                active.home_panel.open_at_chest();
+            }
+            "engine:mailbox" => {
+                // Collect in place, no panel: everything moves into the chest,
+                // which works whether the chest block stands or is packed — a
+                // stockpile is a stockpile wherever it lives.
+                let moved = active.homestead.collect();
+                let line = if moved > 0 {
+                    format!("COLLECTED {moved} GOODS INTO YOUR CHEST")
+                } else {
+                    "MAILBOX EMPTY".to_string()
+                };
+                active.greeting = Some((line, Instant::now()));
             }
             _ => {}
         }
@@ -2312,6 +2545,7 @@ impl App {
             &site,
             &market,
             &active.garage,
+            &active.offers,
         );
         let (width, height) = active.renderer.size();
         let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
@@ -2321,6 +2555,56 @@ impl App {
             &active.context.device,
             &active.context.queue,
             (shop::SHOP_WIDTH, shop::SHOP_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
+    /// Rebuild and upload the welcome panel while it is open.
+    fn refresh_intro(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.intro.open {
+            return;
+        }
+        let pixels = intro::render_intro(&active.intro);
+        let (width, height) = active.renderer.size();
+        let panel_width = intro::INTRO_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = intro::INTRO_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            INTRO_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (intro::INTRO_WIDTH, intro::INTRO_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
+    /// Rebuild and upload the chest panel while it is open.
+    fn refresh_home(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.home_panel.open {
+            return;
+        }
+        let pixels = homestead::render_homestead(&active.home_panel, &active.homestead);
+        let (width, height) = active.renderer.size();
+        let panel_width = homestead::HOME_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = homestead::HOME_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            HOME_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (homestead::HOME_WIDTH, homestead::HOME_HEIGHT),
             &pixels,
             vx_render::OverlayRect {
                 x: (width as f32 - panel_width) / 2.0,
@@ -2583,6 +2867,9 @@ impl App {
         if let Err(error) = active.ledger.save(save.root()) {
             log::error!("could not save the posting ledger: {error}");
         }
+        if let Err(error) = active.homestead.save(save.root()) {
+            log::error!("could not save the homestead: {error}");
+        }
         // The region files above are the keyframe; the journal is everything
         // ordered since. Both are written every save for now — the journal
         // earns its keep as a determinism oracle first, and only once it has
@@ -2697,7 +2984,11 @@ impl ApplicationHandler for App {
             .unwrap_or(self.seed);
 
         let mut world = World::new(seed);
-        let streamer = ChunkStreamer::new(StreamingConfig::default());
+        let streamer = ChunkStreamer::new(StreamingConfig {
+            render_distance: self.view_distance,
+            ..StreamingConfig::default()
+        })
+        .with_worker(streaming::GenWorker::new(world.generator().clone()));
 
         // Blocks the player can build with, resolved by name so this survives
         // any future id changes.
@@ -2707,22 +2998,56 @@ impl ApplicationHandler for App {
             "engine:grass",
             "engine:sand",
             "engine:container",
+            "engine:chest",
         ]
         .iter()
         .filter_map(|name| world.registry().id_of(name))
         .collect();
 
-        // Stand the player on the terrain rather than at a fixed height that
-        // might be inside a hill.
-        world.load_chunk(vx_core::ChunkPos::new(0, 0));
-        let ground = world.surface_y(0, 0).unwrap_or(90);
+        // Pregenerate the whole spawn area before the first playable frame, so
+        // the world never visibly assembles itself around the player. This is
+        // deliberately synchronous: a legible pause up front beats terrain
+        // popping in around your first steps. Progress goes to the title bar —
+        // the one place we can paint before the render loop exists.
+        let home = vx_world::town::home_site();
+        let spawn_block = vx_world::town::spawn_position(&home);
+        let spawn_chunk = vx_core::ChunkPos::new(
+            spawn_block.x.div_euclid(vx_core::CHUNK_SIZE),
+            spawn_block.z.div_euclid(vx_core::CHUNK_SIZE),
+        );
+        let to_prepare = streaming::chunks_in_range(spawn_chunk, self.view_distance);
+        let total = to_prepare.len();
+        for (done, pos) in to_prepare.into_iter().enumerate() {
+            streaming::load_or_generate(&mut world, save.as_ref(), pos);
+            if done % 16 == 0 {
+                window.set_title(&format!("gamingg — preparing the world {done}/{total}"));
+            }
+        }
+        window.set_title("gamingg");
+
+        // The hometown is held resident forever — the "spawn chunks" idea.
+        // Coming home never hitches on regeneration, and the villagers' ground
+        // is always real. `unload_beyond` honours the pin.
+        let reach = home.core_half + vx_world::town::SKIRT;
+        world.pin_span(
+            vx_core::BlockPos::new(-reach, 0, -reach),
+            vx_core::BlockPos::new(reach, 0, reach),
+        );
+
+        // You wake up in your own house, facing the door.
         let player = PlayerBody {
-            position: glam::Vec3::new(0.5, ground as f32, 0.5),
+            position: glam::Vec3::new(
+                spawn_block.x as f32 + 0.5,
+                spawn_block.y as f32,
+                spawn_block.z as f32 + 0.5,
+            ),
             ..PlayerBody::default()
         };
 
         let camera = Camera {
             position: player.eye_position(),
+            // The door is east of the bed. +x is yaw ninety degrees.
+            yaw: std::f32::consts::FRAC_PI_2,
             aspect: size.width as f32 / size.height.max(1) as f32,
             ..Camera::default()
         };
@@ -2736,6 +3061,7 @@ impl ApplicationHandler for App {
         let mut journal = CommandLog::new();
         let mut economy = economy::Economy::new();
         let mut garage = garage::Garage::new();
+        let mut homestead = homestead::Homestead::new();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -2745,6 +3071,7 @@ impl ApplicationHandler for App {
             journal = CommandLog::load(save.root());
             economy.load(save.root());
             garage.load(save.root());
+            homestead.load(save.root());
         }
         // The dev override starts you with a crew, so the swarm tests and the
         // capture flags still mean what they meant before machines cost money.
@@ -2783,7 +3110,10 @@ impl ApplicationHandler for App {
             device: device::Device::new(),
             body_yaw: 0.0,
             body_pitch: 0.0,
-            resuming: false,
+            // True at boot as well as after a feed: the ground is guaranteed
+            // by pregeneration, but the physics gate costs nothing and closes
+            // the door on any future reordering of this function.
+            resuming: true,
             player_rig: Rig::player(),
             hand_rig: Rig::hand_drill(),
             trade_rig: Rig::flier(),
@@ -2798,6 +3128,14 @@ impl ApplicationHandler for App {
             journal,
             economy,
             garage,
+            homestead,
+            home_panel: homestead::HomePanel::default(),
+            offers: Vec::new(),
+            intro: {
+                let mut panel = intro::Intro::new();
+                panel.open = !intro::seen();
+                panel
+            },
             counter: None,
             console: None,
             // Deliberately absurd, so the first frame always scans.

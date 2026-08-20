@@ -84,7 +84,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 9a | `b77aedc` | Residency pinning, content hashes, the command journal, seed tree, body ids, a real crew, 8-byte packed quads |
 | 9b | `dbfe091` | Town books, moving prices, inter-town freight, player trade runs, copper bars |
 | 10a | `63da370` | Machines cost credits, trade map on the console, handheld map page |
-| 10b | _this_ | Player movement on a fixed clock: stance, sprint, slide, vault, mantle, stamina, carried mass |
+| 10b | `b12b1e2` | Player movement on a fixed clock: stance, sprint, slide, vault, mantle, stamina, carried mass |
+| 10c | _this_ | Pregenerated spawn, streaming off the frame thread, the player's house, mail-order, the welcome panel |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -274,7 +275,73 @@ on the handheld is a mine-planner change and waits.
 
 ---
 
-## In flight — Stage 10c: the arsenal, and what robbing costs
+## Shipped — Stage 10c: home
+
+The player woke up on a road while the world assembled itself around them, and
+every walk across it hitched. Both had the same shape of cause: work done at
+the wrong time, on the wrong thread, or over and over.
+
+**The lag had three causes, and the biggest was the dumbest.** Every chunk
+loaded from disk re-read and re-decoded its *entire* 32×32-chunk region file —
+up to eight whole-file decodes per frame while walking through saved ground.
+`WorldSave` now holds decoded regions in a small cache, invalidated by its own
+writes; sixteen chunks from one region cost one read, by test. Second:
+generation ran synchronously on the main thread. It now runs on a background
+worker holding a *clone* of the generator — terrain is a pure function of
+`(seed, position)`, so the clone is bit-identical by contract and by test, and
+anything the simulation needs immediately still comes through the synchronous
+path, so the stage-9a pinning story is untouched. A result arriving for a chunk
+already resident is discarded: the resident copy may carry edits. Third: the
+wanted-list sort and the dirty scan ran every frame; both are now gated.
+Meshing stays a budgeted fork-join on purpose — it was never the hitch.
+
+**The spawn area pregenerates before the first playable frame** — the whole
+render distance, nearest-first, with progress in the title bar — and then the
+hometown footprint is **pinned resident forever** with `pin_span`, the
+"spawn chunks" idea Minecraft ships and stage 9a happened to have already
+built. Coming home never hitches on regeneration. `--view-distance` picks the
+radius (4–16, default 8).
+
+**You wake up in your own house.** STONEHAVEN gained one building on its
+south-west quarter — hometown only, by plan split on `is_home()`, so your house
+is singular as a property of the data. Inside: a **chest**, your home
+warehouse. Breaking it packs its contents into thin air and carrying the block
+somewhere else unpacks them — the contents were never in the world, the block
+is a marker and the side table is the truth, the pattern the fleet's base
+container established. One chest may stand at a time; the place hook enforces
+it. Outside, beside the door: a **mailbox**, unbreakable town furniture like
+the counter, which deletes every "what if the mailbox is gone when the mail
+lands" edge case in one line of registry data.
+
+**Mail-order.** The shop counter now lists, for each good, a parcel offer from
+the cheapest other town in radio range with stock to spare. Pay the source
+price plus freight — freight priced by the same `travel_ticks` the caravan
+flies by — and a real `Shipment` crosses the map with `Owner::Mail`, visible on
+the trade map like any caravan, landing in your mailbox whichever counter took
+the order. Mail never touches the destination's books: it was bought at the
+source, and it lands in a mailbox, not a market. The order *does* move the
+source town's books, honestly. Machines stay instant at the counter — the
+opening loop's first-drone moment is not getting a shipping delay.
+
+**The welcome panel.** First boot opens an in-world panel: where your stuff
+is, and the whole story — parsed out of *this file* at compile time via
+`include_str!`, so the changelog cannot drift from the truth. A test insists
+the stage that built the panel appears in it. Dismissing it writes a zero-byte
+marker in the config directory (player metadata, not world state) and it never
+shows again. `--changelog` prints the same lines headless; `--welcome` draws
+the panel over a capture.
+
+**The honest cost: old journals restart.** Adding the house changes generated
+ground, so a v3 journal would replay against terrain that no longer generates
+and report divergence that is nobody's fault. The journal is now VERSION 4; an
+old one is refused with a warning and the fresh log declines genesis coverage
+(`keyframe_tick` nonzero), so `--replay` says "nothing to compare against"
+instead of lying either way. Old worlds stay fully playable — region snapshots
+load as ever, and player edits win over regeneration, which is correct.
+
+---
+
+## Planned — Stage 10d: the arsenal, and what robbing costs
 
 Caravans can be intercepted. Doing it makes you wanted.
 
@@ -314,7 +381,7 @@ constraints above.
 | EMP burst | Drops a drone *without* wrecking its cargo — the thief's weapon | machine state rather than damage |
 | Guided missile | Slow, tracking, expensive | steering, and a reason for countermeasures |
 
-10c ships the slug launcher and the EMP burst. The rest are rows.
+10d ships the slug launcher and the EMP burst. The rest are rows.
 
 ### Interception and bounty
 
@@ -328,11 +395,76 @@ prices up. Then its mast starts **posting a contract on your head** through the
 board that already exists — groundwork that bites properly once there is
 somebody to take it.
 
-### What is deliberately not in 10c
+### What is deliberately not in 10d
 
 Player health, hostile escorts, and death. Nothing shoots back yet. That keeps
-10c to a weapon system and a consequence rather than a whole combat model, and
+10d to a weapon system and a consequence rather than a whole combat model, and
 the data-driven shape means hostiles slot in later without a rewrite.
+
+---
+
+## Planned — the civic layer: permits, offices, elections
+
+The town-law arc, in three rounds. The user's design, recorded whole so none of
+it gets lost between rounds.
+
+### B1 — Build permissions and the bounty ledger
+
+Each building carries an **authorization container** — tool-cupboard-shaped,
+with **no upkeep and no decay**: houses persist indefinitely. Editing a
+building's blocks requires being authorized on its container. Outside town
+limits, free building everywhere.
+
+Authorization is **ranked, not binary**. The town priority order, top down:
+**Sheriff > Mayor > building owner > authorized guests > everyone**. The
+sheriff's rank is the point: a sheriff can enter — and later, when doors and
+locks exist, unlock — buildings they were never authorized on, because
+enforcement has to reach where bounties hide. Shops and the **security office**
+(where the sheriff and deputies live) sit at a much higher authorization
+difficulty than houses.
+
+**Bounty points**: playing the loop legally — mine, haul, trade — accrues zero.
+Every attempted edit of a building you are not authorized on adds bounty points
+to your ledger; attempts count, the wall does not have to fall. This is the
+ledger the 10d arsenal's bounty ("economic plus a contract on your head")
+reads.
+
+The mechanism is already waiting: `BlockBreakEvent`/`BlockPlaceEvent` are
+`Cancellable`, the bus has priority subscriptions and `emit_cancellable`, and
+there are **zero subscribers today** — B1 is the first, with no call-site
+changes. Prerequisites: `Blueprint` gains names/roles and exposed per-building
+bounds; the 10c chest is the prototype authorization container.
+
+### B2 — Towns that work: offices and the warrant chain
+
+Named town offices: **Mayor, Sheriff (plus deputies), Shop clerk, Residents**.
+Every individual in town runs the same loop the player does — mine or gather,
+trade at the market, accumulate credits — because credits are the end goal of
+every individual, NPC and player alike. Villagers become deterministic economic
+agents trading against the town books on the same tick clock; the economy's
+quantised catch-up already makes that replay-safe.
+
+**Trust through trade** is the per-resident stat that unlocks guest
+authorization on their building.
+
+**The warrant chain**: when an individual's bounty crosses a threshold, the
+sheriff cannot act alone — they must obtain a **warrant from the mayor**, and
+only then may dispatch the offender. Enforcement-by-force lands with stage 17
+(hostiles and health); until then the chain carries consequences short of force
+— fines, revoked market access.
+
+### B3 — Elections and goodwill
+
+The town's main computer — the beacon console — gains a **voting page**:
+residents elect the mayor and sheriff. Votes are cast on **goodwill points**,
+earned through trade interactions — the resident who profits from trading with
+you votes your way, which reuses the trade ledger rather than inventing a
+reputation system from nothing.
+
+**The player can hold office**: win the sheriff's badge at the ballot box,
+found a new town and hold its offices by default, or take a town over — the
+hostile path, priced by the bounty system itself. Offices held across towns tie
+into stage 19 (factions).
 
 ---
 
@@ -422,11 +554,11 @@ rolled twice. This also gives the economy a **source** to match the sink stage
   world, and `Perception` with `sight::obstruction` (stage 7) is already the
   "can it see you, with rock in between counting" primitive. The movement half
   is close to free.
-- *Military.* The same movement, carrying the stage 10c weapons, and aligned to
+- *Military.* The same movement, carrying the stage 10d weapons, and aligned to
   something — which is what makes them a faction problem rather than a monster
   problem.
 
-**The honest sequencing problem:** both flavours attack you, and stage 10c
+**The honest sequencing problem:** both flavours attack you, and stage 10d
 deliberately leaves out player health, hostiles and death. So bunkers split in
 two. The **built** half — sited, shelled, entered, laid out, looted — can ship
 as soon as caves have paid for the 3D carve. The **occupied** half waits for
@@ -469,9 +601,9 @@ if the traffic it produces reads as dull.
 | 14 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
 | 15 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
 | 16 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
-| 17 | Hostiles and health | The half of combat 10c leaves out. `Perception` (stage 7) is already the shape a hostile needs, and 10c's bounty contracts are already something for one to take |
+| 17 | Hostiles and health | The half of combat 10d leaves out. `Perception` (stage 7) is already the shape a hostile needs, and 10d's bounty contracts are already something for one to take |
 | 18 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 17 brings |
-| 19 | Factions and reputation | Bounty (10c) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to |
+| 19 | Factions and reputation | Bounty (10d) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to |
 | 20 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
 | 21 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 

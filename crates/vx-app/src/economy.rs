@@ -43,7 +43,11 @@ use std::path::Path;
 use vx_world::town::{Speciality, TownSite};
 
 const MAGIC: &[u8; 4] = b"VXEC";
-const VERSION: u32 = 1;
+// Version 2 added `Owner::Mail`. The record layout is unchanged — a v1 file
+// simply never contains the new owner byte — so both versions are accepted on
+// read and nothing is discarded on upgrade. An older build refuses a v2 file
+// cleanly, which is the tolerant-loader contract doing its job.
+const VERSION: u32 = 2;
 
 /// What the network moves.
 ///
@@ -237,6 +241,9 @@ pub enum Owner {
     Town,
     /// The player's drone, paid out on arrival.
     Player,
+    /// A mail order: bought and paid for at a counter, bound for the player's
+    /// mailbox rather than any town's books.
+    Mail,
 }
 
 /// A load in the air.
@@ -297,6 +304,15 @@ const LOAD: f32 = 90.0;
 /// How much the player's drone carries in one run. Whole units, because it
 /// comes out of a block pile rather than a town's books.
 pub const PLAYER_LOAD: u64 = 60;
+
+/// How much one mail order brings. Smaller than a trade run on purpose:
+/// ordering is convenience, hauling is the business.
+pub const PARCEL: u64 = 20;
+
+/// Most goods a mailbox holds, counting loads still in the air. A cap rather
+/// than a queue: the refusal happens at the counter, where you can do
+/// something about it.
+pub const MAILBOX_CAP: u64 = 120;
 
 /// How often the network looks for a run worth making. Four in-game minutes.
 pub const DISPATCH_EVERY: u64 = STEP * 8;
@@ -401,6 +417,12 @@ impl Economy {
         // the air rather than scanning everything in flight.
         while self.shipments.first().is_some_and(|first| first.arrive <= at) {
             let landed = self.shipments.remove(0);
+            // Mail never touches the destination's books: it was bought and
+            // paid for at the source, and it lands in a mailbox, not a market.
+            if landed.owner == Owner::Mail {
+                delivered.push(landed);
+                continue;
+            }
             match reachable.iter().find(|site| site.centre == landed.to) {
                 Some(site) => {
                     // Brought up to the moment the load *arrived*, not to now:
@@ -537,6 +559,7 @@ impl Economy {
             file.write_all(&[match load.owner {
                 Owner::Town => 0,
                 Owner::Player => 1,
+                Owner::Mail => 2,
             }])?;
         }
         file.flush()
@@ -596,7 +619,10 @@ fn read_economy(path: &Path) -> std::io::Result<Option<Economy>> {
     if &magic != MAGIC {
         return Err(std::io::Error::other("bad magic"));
     }
-    if read_u32(&mut file)? != VERSION {
+    let version = read_u32(&mut file)?;
+    // Version 1 is readable as-is: the layout never changed, only which owner
+    // bytes can appear. Anything newer than this build writes is refused.
+    if version == 0 || version > VERSION {
         return Err(std::io::Error::other("unknown version"));
     }
 
@@ -636,6 +662,7 @@ fn read_economy(path: &Path) -> std::io::Result<Option<Economy>> {
             owner: match owner[0] {
                 0 => Owner::Town,
                 1 => Owner::Player,
+                2 => Owner::Mail,
                 other => return Err(std::io::Error::other(format!("unknown owner {other}"))),
             },
         });
@@ -1089,5 +1116,102 @@ mod tests {
             "running the network went back to the terrain"
         );
         assert!(economy.tracked() > 0, "the network touched nothing at all");
+    }
+}
+
+#[cfg(test)]
+mod mail_tests {
+    use super::*;
+    use vx_world::town::home_site;
+
+    fn far_town() -> TownSite {
+        TownSite {
+            centre: (1024, 512),
+            ..home_site()
+        }
+    }
+
+    #[test]
+    fn a_mail_load_lands_in_the_delivered_list_not_the_towns_books() {
+        let mut economy = Economy::new();
+        let home = home_site();
+        let source = far_town();
+
+        let before = economy.market(&home, 0).stock(ORE);
+        economy.ship(Shipment {
+            from: source.centre,
+            to: home.centre,
+            good: ORE,
+            amount: PARCEL as f32,
+            depart: 0,
+            arrive: 10,
+            owner: Owner::Mail,
+        });
+
+        let landed = economy.run(&[home, source], 20);
+
+        assert_eq!(landed.len(), 1, "the mail never landed");
+        assert_eq!(landed[0].owner, Owner::Mail);
+        let after = economy.market(&home, 20).stock(ORE);
+        assert!(
+            (after - before).abs() < f32::EPSILON,
+            "mail leaked into the town's books: {before} became {after}"
+        );
+    }
+
+    #[test]
+    fn an_economy_file_from_before_mail_still_loads() {
+        // The layout never changed; v1 files simply predate the Mail owner
+        // byte. Write a real file, stamp it v1, and it must load whole.
+        let directory = std::env::temp_dir().join(format!(
+            "vx-economy-v1-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let mut economy = Economy::new();
+        economy.ship(Shipment {
+            from: far_town().centre,
+            to: home_site().centre,
+            good: LOG,
+            amount: 30.0,
+            depart: 5,
+            arrive: 500,
+            owner: Owner::Player,
+        });
+        economy.save(&directory).unwrap();
+
+        let path = directory.join("economy.dat");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut read_back = Economy::new();
+        read_back.load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert_eq!(read_back.shipments().len(), 1, "the v1 file was refused");
+        assert_eq!(read_back.shipments()[0].owner, Owner::Player);
+    }
+
+    #[test]
+    fn a_future_economy_version_is_still_refused() {
+        let directory = std::env::temp_dir().join(format!(
+            "vx-economy-v9-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let economy = Economy::new();
+        economy.save(&directory).unwrap();
+        let path = directory.join("economy.dat");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[4..8].copy_from_slice(&9u32.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut fresh = Economy::new();
+        fresh.load(&directory); // must warn and start fresh, not panic
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(fresh.shipments().is_empty());
     }
 }

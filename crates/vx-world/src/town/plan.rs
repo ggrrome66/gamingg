@@ -33,6 +33,10 @@ pub enum Cell {
     Counter,
     /// Paving.
     Path,
+    /// The player's storage chest, inside their house.
+    Chest,
+    /// The mailbox outside the player's door, where ordered goods land.
+    Mailbox,
 }
 
 /// One authored building, positioned relative to the town centre.
@@ -145,6 +149,51 @@ const CONTAINER_STACK: &[&[&str]] = &[
 
 /// Paving: an east-west high street past every door and a north-south lane
 /// from the tower down to the shed, crossing at the plaza where you wake up.
+/// The player's own house, hometown only: the east-door container's proven
+/// shape with the door facing the plaza lane, a chest against the west wall
+/// and a mailbox planted outside beside the door. `S` chest, `O` mailbox.
+///
+/// The eighth column sits outside the walls — no floor, no roof — so the
+/// mailbox stands on the town's ground like the street furniture it is.
+const PLAYER_HOUSE: Blueprint = Blueprint {
+    min: (-17, 6),
+    layers: &[
+        &[
+            "GGGGGGG.",
+            "GGGGGGG.",
+            "GGGGGGG.",
+            "GGGGGGG.",
+            "GGGGGGG.",
+            "GGGGGGG.",
+        ],
+        &[
+            "MMMXMMM.",
+            "M.....XO",
+            "MS......",
+            "X.......",
+            "M.....M.",
+            "MXMMMXM.",
+        ],
+        // The doorway runs two blocks high, or nothing could walk through it.
+        &[
+            "MMMMMMM.",
+            "X.....M.",
+            "M.......",
+            "M.......",
+            "X.....M.",
+            "MMMXMMM.",
+        ],
+        &[
+            "GGGGGGG.",
+            "GGGGGGG.",
+            "GGGGGGG.",
+            "GGGGGGG.",
+            "GGGGGGG.",
+            "GGGGGGG.",
+        ],
+    ],
+};
+
 const PATHS: Blueprint = Blueprint {
     min: (-16, -9),
     layers: &[&[
@@ -219,11 +268,38 @@ const REFINERY_TOWN: &[Blueprint] = &[
     PATHS,
 ];
 
+/// The hometown: a depot, plus the one building no other town has — yours.
+///
+/// Kept as its own plan rather than a conditional inside the depot's, so
+/// "the player's house is singular" is a property of the data instead of a
+/// rule someone has to remember.
+const HOME_TOWN: &[Blueprint] = &[
+    RADIO_TOWER,
+    SUPPLY_SHED,
+    Blueprint {
+        min: (-17, -3),
+        layers: CONTAINER_EAST_DOOR,
+    },
+    Blueprint {
+        min: (10, -3),
+        layers: CONTAINER_WEST_DOOR,
+    },
+    Blueprint {
+        min: (-4, -24),
+        layers: CONTAINER_STACK,
+    },
+    PLAYER_HOUSE,
+    PATHS,
+];
+
 /// The buildings a site puts up.
 ///
 /// A plan is picked, never generated: `&'static` throughout, so stamping
 /// allocates nothing and the plan stays a pure function of the site.
 fn plan_for(site: &TownSite) -> &'static [Blueprint] {
+    if site.is_home() {
+        return HOME_TOWN;
+    }
     match site.speciality {
         Speciality::Depot => DEPOT_TOWN,
         Speciality::Mine => MINE_TOWN,
@@ -240,6 +316,22 @@ pub fn counter_offset(_site: &TownSite) -> (i32, i32) {
 /// the south face of the radio tower's deck.
 pub fn beacon_offset(_site: &TownSite) -> (i32, i32) {
     (0, -12)
+}
+
+/// Where the player's chest stands in the hometown, against the house's west
+/// wall. Meaningless for any other site — only the hometown has the house.
+pub fn chest_offset() -> (i32, i32) {
+    (-16, 8)
+}
+
+/// The mailbox outside the player's door.
+pub fn mailbox_offset() -> (i32, i32) {
+    (-10, 7)
+}
+
+/// Where a new player wakes up: inside their house, facing the door.
+pub fn spawn_offset() -> (i32, i32) {
+    (-14, 9)
 }
 
 /// The authored cell at a world position for one site, if any.
@@ -269,6 +361,8 @@ pub fn cell_at(site: &TownSite, x: i32, y: i32, z: i32) -> Option<Cell> {
             Some(b'B') => return Some(Cell::Beacon),
             Some(b'C') => return Some(Cell::Counter),
             Some(b'P') => return Some(Cell::Path),
+            Some(b'S') => return Some(Cell::Chest),
+            Some(b'O') => return Some(Cell::Mailbox),
             _ => continue,
         }
     }
@@ -332,6 +426,8 @@ pub fn stamp(chunk: &mut Chunk, position: ChunkPos, sites: &[TownSite], blocks: 
                         Cell::Beacon => blocks.beacon,
                         Cell::Counter => blocks.counter,
                         Cell::Path => blocks.stone,
+                        Cell::Chest => blocks.chest,
+                        Cell::Mailbox => blocks.mailbox,
                     };
                     if let Some(local) = LocalPos::new(local_x, world_y, local_z) {
                         chunk.set(local, block);
@@ -394,6 +490,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_players_house_stands_hollow_with_a_working_door() {
+        let site = town::home_site();
+        // Interior air across both wall layers.
+        for x in -16..=-12 {
+            for z in 7..=10 {
+                if (x, z) == chest_offset() {
+                    continue;
+                }
+                for y in [HOME_GROUND_Y + 1, HOME_GROUND_Y + 2] {
+                    assert_eq!(cell_at(&site, x, y, z), None, "furniture at ({x},{y},{z})");
+                }
+            }
+        }
+        // The doorway: two wide, two high, in the east wall.
+        for z in [8, 9] {
+            for y in [HOME_GROUND_Y + 1, HOME_GROUND_Y + 2] {
+                assert_eq!(cell_at(&site, -11, y, z), None, "doorway blocked at z={z} y={y}");
+            }
+        }
+        // A floor underfoot and a roof overhead.
+        assert_eq!(cell_at(&site, -14, HOME_GROUND_Y, 9), Some(Cell::Grate));
+        assert_eq!(cell_at(&site, -14, HOME_GROUND_Y + 3, 9), Some(Cell::Grate));
+    }
+
+    #[test]
+    fn the_chest_and_mailbox_stand_where_the_plan_promises() {
+        let site = town::home_site();
+        let chest = town::chest_position(&site);
+        assert_eq!(cell_at(&site, chest.x, chest.y, chest.z), Some(Cell::Chest));
+        let mailbox = town::mailbox_position(&site);
+        assert_eq!(
+            cell_at(&site, mailbox.x, mailbox.y, mailbox.z),
+            Some(Cell::Mailbox)
+        );
+        // The mailbox stands outside the walls and blocks neither door column.
+        for z in [8, 9] {
+            assert_eq!(cell_at(&site, -10, HOME_GROUND_Y + 1, z), None, "door blocked");
+        }
+    }
+
+    #[test]
+    fn the_spawn_column_inside_the_house_is_clear_and_floored() {
+        let site = town::home_site();
+        let spawn = town::spawn_position(&site);
+        assert_eq!(cell_at(&site, spawn.x, spawn.y - 1, spawn.z), Some(Cell::Grate));
+        for y in [spawn.y, spawn.y + 1] {
+            assert_eq!(cell_at(&site, spawn.x, y, spawn.z), None, "spawn blocked at y={y}");
+        }
+    }
+
+    #[test]
+    fn the_house_exists_only_in_the_hometown() {
+        // Another depot on the lattice gets the plain plan: your house is
+        // singular, as a property of the data.
+        let elsewhere = TownSite {
+            centre: (2048, 2048),
+            ..town::home_site()
+        };
+        assert!(!elsewhere.is_home());
+        let (cx, cz) = chest_offset();
+        assert_eq!(
+            cell_at(&elsewhere, elsewhere.centre.0 + cx, HOME_GROUND_Y + 1, elsewhere.centre.1 + cz),
+            None,
+            "a stranger's depot grew the player's chest"
+        );
     }
 
     #[test]

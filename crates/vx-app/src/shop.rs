@@ -55,6 +55,32 @@ pub enum Row {
     Buy(&'static str),
     /// Buy a machine. The reason to mine at all.
     BuyMachine(&'static str),
+    /// Order a parcel of this good from another town. It travels by caravan
+    /// and lands in the mailbox at your house — index into the offers list.
+    Order(usize),
+}
+
+/// One good another town is willing to part with by mail.
+///
+/// Built when the counter opens, from the same books the caravans fly by.
+/// Priced then, honoured at confirm — with a re-check, because the books may
+/// have moved while the panel was open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Offer {
+    pub good: usize,
+    /// The town the parcel ships from. The whole site, because confirming the
+    /// order needs its market, not just its column.
+    pub source: TownSite,
+    pub unit_price: u64,
+    /// Carriage, priced by the same arithmetic the caravan flies by.
+    pub freight: u64,
+}
+
+impl Offer {
+    /// What the whole parcel costs at the counter.
+    pub fn total(&self) -> u64 {
+        economy::PARCEL * self.unit_price + self.freight
+    }
 }
 
 /// The shop's interaction state.
@@ -84,7 +110,12 @@ impl Shop {
 
     /// The selectable rows, in stable order: priced pile kinds (the
     /// stockpile iterates sorted), then the upgrade lines still below cap.
-    pub fn rows(pile: Option<&Stockpile>, walletbook: &Wallet, market: &Market) -> Vec<Row> {
+    pub fn rows(
+        pile: Option<&Stockpile>,
+        walletbook: &Wallet,
+        market: &Market,
+        offers: &[Offer],
+    ) -> Vec<Row> {
         let mut rows = Vec::new();
         if let Some(pile) = pile {
             for (name, count) in pile.entries() {
@@ -102,6 +133,9 @@ impl Shop {
             if walletbook.upgrade(line) < wallet::MAX_UPGRADE {
                 rows.push(Row::Buy(line));
             }
+        }
+        for index in 0..offers.len() {
+            rows.push(Row::Order(index));
         }
         rows
     }
@@ -121,14 +155,17 @@ impl Shop {
     /// Selling *moves the town's books*, so dumping forty loads on a small
     /// market visibly craters what the next forty fetch. That is the whole
     /// reason a counter had to learn which town it stands in.
+    #[allow(clippy::too_many_arguments)]
     pub fn confirm(
         &mut self,
         pile: Option<&mut Stockpile>,
         walletbook: &mut Wallet,
         market: &mut Market,
         shed: &mut Garage,
+        offers: &[Offer],
+        post: Option<&mut MailContext>,
     ) {
-        let rows = Shop::rows(pile.as_deref(), walletbook, market);
+        let rows = Shop::rows(pile.as_deref(), walletbook, market, offers);
         let Some(row) = rows.get(self.cursor) else {
             self.feedback = Some("NOTHING TO TRADE".into());
             return;
@@ -164,11 +201,78 @@ impl Shop {
                     self.feedback = Some("NOT ENOUGH CR".into());
                 }
             }
+            Row::Order(index) => {
+                let Some(offer) = offers.get(*index).cloned() else {
+                    self.feedback = Some("THAT OFFER IS GONE".into());
+                    return;
+                };
+                let Some(post) = post else {
+                    self.feedback = Some("THE POST IS NOT RUNNING".into());
+                    return;
+                };
+                self.feedback = Some(order(&offer, walletbook, post));
+            }
         }
         // A sold-out row disappears; keep the cursor on the shelf.
-        let rows = Shop::rows(None, walletbook, market).len().max(1);
+        let rows = Shop::rows(None, walletbook, market, offers).len().max(1);
         self.cursor = self.cursor.min(rows - 1);
     }
+}
+
+/// What placing a mail order needs a mutable line to.
+pub struct MailContext<'a> {
+    pub economy: &'a mut economy::Economy,
+    pub mailbox_held: u64,
+    pub now: u64,
+}
+
+/// Goods already bought and bound for the mailbox but not yet landed.
+pub fn mail_in_flight(economy: &economy::Economy) -> u64 {
+    economy
+        .shipments()
+        .iter()
+        .filter(|load| load.owner == economy::Owner::Mail)
+        .map(|load| load.amount.round() as u64)
+        .sum()
+}
+
+/// Place one order: pay, take the goods off the source's shelf, put the load
+/// in the air. Returns the feedback line.
+fn order(offer: &Offer, walletbook: &mut Wallet, post: &mut MailContext) -> String {
+    use economy::{Owner, Shipment, MAILBOX_CAP, PARCEL};
+
+    // The cap counts loads still in the air, or you could order a mailbox
+    // full three times over and lose two of them.
+    let bound = post.mailbox_held + mail_in_flight(post.economy);
+    if bound + PARCEL > MAILBOX_CAP {
+        return "MAILBOX FULL. COLLECT IT FIRST".into();
+    }
+
+    // Re-check the shelf at the moment of sale, not the moment the panel
+    // opened: the books move on their own.
+    let market = post.economy.market_mut(&offer.source, post.now);
+    if market.stock(offer.good) < PARCEL as f32 {
+        return format!("SOLD OUT AT {}", offer.source.name);
+    }
+
+    if !walletbook.spend(offer.total()) {
+        return "NOT ENOUGH CR".into();
+    }
+    market.withdraw(offer.good, PARCEL as f32);
+
+    let home = vx_world::town::home_site().centre;
+    let depart = post.now;
+    let arrive = depart + Shipment::travel_ticks(offer.source.centre, home);
+    post.economy.ship(Shipment {
+        from: offer.source.centre,
+        to: home,
+        good: offer.good,
+        amount: PARCEL as f32,
+        depart,
+        arrive,
+        owner: Owner::Mail,
+    });
+    "ORDERED. WATCH THE SKY.".into()
 }
 
 /// Sell the whole stack of `name`: returns (blocks sold, credits earned).
@@ -225,6 +329,7 @@ pub fn render_shop(
     town: &TownSite,
     market: &Market,
     shed: &Garage,
+    offers: &[Offer],
 ) -> Vec<u8> {
     let mut pixels = vec![0u8; (SHOP_WIDTH * SHOP_HEIGHT * 4) as usize];
     for texel in pixels.chunks_exact_mut(4) {
@@ -247,7 +352,7 @@ pub fn render_shop(
     );
     y += LINE_HEIGHT as i32 + 3;
 
-    let rows = Shop::rows(pile, walletbook, market);
+    let rows = Shop::rows(pile, walletbook, market, offers);
     if rows.is_empty() {
         font::draw_text(&mut pixels, SHOP_WIDTH, margin, y, 1, DIM, "NOTHING TO SELL");
         y += LINE_HEIGHT as i32;
@@ -280,6 +385,16 @@ pub fn render_shop(
                     upgrade_cost(next)
                 )
             }
+            Row::Order(index) => match offers.get(*index) {
+                Some(offer) => format!(
+                    "ORDER {} {} FROM {} - {} CR",
+                    economy::PARCEL,
+                    display_name(economy::GOODS[offer.good]),
+                    offer.source.name,
+                    offer.total()
+                ),
+                None => "ORDER (GONE)".to_string(),
+            },
         };
         font::draw_text(&mut pixels, SHOP_WIDTH, margin + 10, y, 1, colour, &label);
         y += LINE_HEIGHT as i32;
@@ -330,7 +445,7 @@ mod tests {
         let pile = stocked_pile();
         let wallet = Wallet::new();
         let market = market();
-        let rows = Shop::rows(Some(&pile), &wallet, &market);
+        let rows = Shop::rows(Some(&pile), &wallet, &market, &[]);
         assert_eq!(
             rows,
             vec![
@@ -352,7 +467,7 @@ mod tests {
         for _ in 0..wallet::MAX_UPGRADE {
             maxed.raise(wallet::DRILL);
         }
-        let rows = Shop::rows(Some(&pile), &maxed, &market);
+        let rows = Shop::rows(Some(&pile), &maxed, &market, &[]);
         assert!(!rows.contains(&Row::Buy(wallet::DRILL)));
         assert!(rows.contains(&Row::Buy(wallet::CARGO)));
     }
@@ -437,7 +552,7 @@ mod tests {
         shop.open_at_counter();
         let mut wallet = Wallet::new();
         // Cursor 0 lands on the first Buy row (no pile rows exist).
-        shop.confirm(None, &mut wallet, &mut market(), &mut Garage::new());
+        shop.confirm(None, &mut wallet, &mut market(), &mut Garage::new(), &[], None);
         assert_eq!(shop.feedback.as_deref(), Some("NOT ENOUGH CR"));
     }
 
@@ -464,12 +579,12 @@ mod tests {
         let pile = stocked_pile();
 
         let market = market();
-        let a = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new());
-        let b = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new());
+        let a = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &[]);
+        let b = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &[]);
         assert_eq!(a.len(), (SHOP_WIDTH * SHOP_HEIGHT * 4) as usize);
         assert_eq!(a, b);
 
-        let empty = render_shop(&shop, None, &wallet, &town(), &market, &Garage::new());
+        let empty = render_shop(&shop, None, &wallet, &town(), &market, &Garage::new(), &[]);
         assert_ne!(a, empty, "an empty shop drew a full shelf");
     }
 
@@ -484,20 +599,190 @@ mod tests {
 
         let mut shop = Shop::new();
         shop.open_at_counter();
-        let rows = Shop::rows(None, &wallet, &market);
+        let rows = Shop::rows(None, &wallet, &market, &[]);
         let at = rows
             .iter()
             .position(|row| *row == Row::BuyMachine(garage::DRONE))
             .expect("no drone on the shelf");
         shop.move_cursor(at as i32, rows.len());
 
-        shop.confirm(None, &mut wallet, &mut market, &mut shed);
+        shop.confirm(None, &mut wallet, &mut market, &mut shed, &[], None);
         assert_eq!(shed.owned(garage::DRONE), 1, "the drone never arrived");
         assert_eq!(wallet.credits(), 0, "the wrong amount was spent");
 
         // And a second one is refused, because it costs more than the first.
-        shop.confirm(None, &mut wallet, &mut market, &mut shed);
+        shop.confirm(None, &mut wallet, &mut market, &mut shed, &[], None);
         assert_eq!(shed.owned(garage::DRONE), 1, "a drone was bought on credit");
         assert_eq!(shop.feedback.as_deref(), Some("NOT ENOUGH CR"));
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+    use crate::economy::{Economy, Owner, MAILBOX_CAP, ORE, PARCEL};
+    use vx_world::town::home_site;
+
+    fn source_town() -> TownSite {
+        TownSite {
+            centre: (1024, 512),
+            ..home_site()
+        }
+    }
+
+    /// An offer priced off the live books, as the counter does it.
+    fn offer_from(economy: &mut Economy, now: u64) -> Offer {
+        let source = source_town();
+        let unit_price = economy.market(&source, now).price(ORE);
+        Offer {
+            good: ORE,
+            source,
+            unit_price,
+            freight: economy::Shipment::travel_ticks(source.centre, home_site().centre) / 10,
+        }
+    }
+
+    #[test]
+    fn ordering_pays_source_price_plus_freight_and_moves_the_source_books() {
+        let mut economy = Economy::new();
+        let offer = offer_from(&mut economy, 0);
+        let total = offer.total();
+        let shelf_before = economy.market(&offer.source, 0).stock(ORE);
+
+        let mut wallet = Wallet::new();
+        wallet.earn(total + 5);
+        let mut post = MailContext {
+            economy: &mut economy,
+            mailbox_held: 0,
+            now: 0,
+        };
+
+        let line = super::order(&offer, &mut wallet, &mut post);
+
+        assert_eq!(line, "ORDERED. WATCH THE SKY.");
+        assert_eq!(wallet.credits(), 5, "paid something other than the quote");
+        let shelf_after = economy.market(&offer.source, 0).stock(ORE);
+        assert!(
+            (shelf_before - shelf_after - PARCEL as f32).abs() < 0.01,
+            "the order did not move the source books: {shelf_before} -> {shelf_after}"
+        );
+        assert_eq!(economy.shipments().len(), 1);
+        assert_eq!(economy.shipments()[0].owner, Owner::Mail);
+        assert_eq!(
+            economy.shipments()[0].to,
+            home_site().centre,
+            "mail must always deliver to the hometown mailbox"
+        );
+    }
+
+    #[test]
+    fn a_broke_customer_keeps_the_shelf_and_the_sky_unchanged() {
+        let mut economy = Economy::new();
+        let offer = offer_from(&mut economy, 0);
+        let shelf_before = economy.market(&offer.source, 0).stock(ORE);
+
+        let mut wallet = Wallet::new(); // empty
+        let mut post = MailContext {
+            economy: &mut economy,
+            mailbox_held: 0,
+            now: 0,
+        };
+        let line = super::order(&offer, &mut wallet, &mut post);
+
+        assert_eq!(line, "NOT ENOUGH CR");
+        assert!(economy.shipments().is_empty(), "an unpaid load took off");
+        let shelf_after = economy.market(&offer.source, 0).stock(ORE);
+        assert!((shelf_before - shelf_after).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_full_mailbox_refuses_the_order_counting_loads_still_in_the_air() {
+        let mut economy = Economy::new();
+        let offer = offer_from(&mut economy, 0);
+        let mut wallet = Wallet::new();
+        wallet.earn(1_000_000);
+
+        // Fill the sky to one parcel under the cap...
+        let airborne = MAILBOX_CAP - PARCEL;
+        economy.ship(economy::Shipment {
+            from: offer.source.centre,
+            to: home_site().centre,
+            good: ORE,
+            amount: airborne as f32,
+            depart: 0,
+            arrive: 10_000,
+            owner: Owner::Mail,
+        });
+
+        // ...one more parcel exactly reaches the cap and is allowed...
+        let mut post = MailContext {
+            economy: &mut economy,
+            mailbox_held: 0,
+            now: 0,
+        };
+        assert_eq!(super::order(&offer, &mut wallet, &mut post), "ORDERED. WATCH THE SKY.");
+
+        // ...and the next is refused, because the air already owes a full box.
+        let mut post = MailContext {
+            economy: &mut economy,
+            mailbox_held: 0,
+            now: 0,
+        };
+        assert_eq!(
+            super::order(&offer, &mut wallet, &mut post),
+            "MAILBOX FULL. COLLECT IT FIRST"
+        );
+    }
+
+    #[test]
+    fn two_orders_can_fly_at_once_under_the_cap() {
+        let mut economy = Economy::new();
+        let offer = offer_from(&mut economy, 0);
+        let mut wallet = Wallet::new();
+        wallet.earn(1_000_000);
+
+        for _ in 0..2 {
+            let mut post = MailContext {
+                economy: &mut economy,
+                mailbox_held: 0,
+                now: 0,
+            };
+            assert_eq!(super::order(&offer, &mut wallet, &mut post), "ORDERED. WATCH THE SKY.");
+        }
+        assert_eq!(mail_in_flight(&economy), 2 * PARCEL);
+    }
+
+    #[test]
+    fn the_shelf_lists_an_order_row_only_when_an_offer_exists() {
+        let wallet = Wallet::new();
+        let mut books = Economy::new();
+        let market = books.market(&home_site(), 0).clone();
+
+        let bare = Shop::rows(None, &wallet, &market, &[]);
+        assert!(
+            !bare.iter().any(|row| matches!(row, Row::Order(_))),
+            "an order row appeared from nowhere"
+        );
+
+        let mut economy = Economy::new();
+        let offer = offer_from(&mut economy, 0);
+        let stocked = Shop::rows(None, &wallet, &market, &[offer]);
+        assert!(stocked.iter().any(|row| matches!(row, Row::Order(0))));
+    }
+
+    #[test]
+    fn every_order_label_is_drawable() {
+        let mut economy = Economy::new();
+        let offer = offer_from(&mut economy, 0);
+        let label = format!(
+            "ORDER {} {} FROM {} - {} CR",
+            PARCEL,
+            display_name(economy::GOODS[offer.good]),
+            offer.source.name,
+            offer.total()
+        );
+        for character in label.chars() {
+            assert!(font::knows(character), "undrawable {character:?} in {label}");
+        }
     }
 }

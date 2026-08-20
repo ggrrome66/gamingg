@@ -44,8 +44,10 @@ pub mod slot {
     pub const MAST: u32 = 25;
     pub const BEACON: u32 = 26;
     pub const COPPER_BAR: u32 = 27;
+    pub const CHEST: u32 = 28;
+    pub const MAILBOX: u32 = 29;
     /// Total generated tiles.
-    pub const COUNT: u32 = 28;
+    pub const COUNT: u32 = 30;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -303,6 +305,31 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                             [0.85 + lift, 0.48 + lift * 0.6, 0.22 + lift * 0.3],
                             noise * 0.07,
                         )
+                    }
+                }
+                slot::CHEST => {
+                    // A strongbox: plank body, a darker iron strap across the
+                    // middle with a clasp — the strap is what says "chest"
+                    // rather than "crate" at a glance.
+                    let strap = (7..10).contains(&y);
+                    let clasp = strap && (6..10).contains(&x);
+                    if clasp {
+                        shade([0.72, 0.70, 0.62], noise * 0.05)
+                    } else if strap || !(1..TILE_SIZE - 1).contains(&x) {
+                        shade([0.24, 0.20, 0.16], noise * 0.06)
+                    } else {
+                        shade([0.55, 0.40, 0.24], noise * 0.10)
+                    }
+                }
+                slot::MAILBOX => {
+                    // A postal panel: pale housing with one dark letter slot
+                    // near the top. One strong horizontal is all it takes.
+                    if (3..6).contains(&y) && (3..13).contains(&x) {
+                        shade([0.10, 0.11, 0.13], noise * 0.03)
+                    } else if y >= TILE_SIZE - 2 {
+                        shade([0.35, 0.37, 0.40], noise * 0.05)
+                    } else {
+                        shade([0.70, 0.72, 0.75], noise * 0.06)
                     }
                 }
                 // Unknown slots get magenta, the universal "missing texture".

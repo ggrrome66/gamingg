@@ -51,6 +51,13 @@ pub struct TerrainBlocks {
     /// which is what turns the trade network into a chain rather than a
     /// gradient.
     pub copper_bar: BlockId,
+    /// The player's storage chest: breakable, because moving house is the
+    /// feature.
+    pub chest: BlockId,
+    /// The mailbox outside the player's house. Town furniture like the counter
+    /// and the beacon: unbreakable, which is what deletes every "what if the
+    /// mailbox is gone when the mail lands" edge case.
+    pub mailbox: BlockId,
 }
 
 impl TerrainBlocks {
@@ -112,6 +119,8 @@ impl TerrainBlocks {
             copper_bar: register(
                 BlockDef::uniform("engine:copper_bar", 27).with_hardness(Some(2.5)),
             ),
+            chest: register(BlockDef::uniform("engine:chest", 28).with_hardness(Some(1.5))),
+            mailbox: register(BlockDef::uniform("engine:mailbox", 29).with_hardness(None)),
         }
     }
 
@@ -139,6 +148,8 @@ impl TerrainBlocks {
             mast: registry.id_of("engine:mast")?,
             beacon: registry.id_of("engine:beacon")?,
             copper_bar: registry.id_of("engine:copper_bar")?,
+            chest: registry.id_of("engine:chest")?,
+            mailbox: registry.id_of("engine:mailbox")?,
         })
     }
 }

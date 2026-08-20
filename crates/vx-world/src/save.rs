@@ -122,13 +122,32 @@ impl StoredChunk {
 }
 
 /// A world directory on disk.
+///
+/// Holds a cache of decoded region files, because streaming loads chunks one
+/// at a time and a region holds a thousand of them — without the cache every
+/// chunk load re-read and re-decoded the whole file, which was the single
+/// largest per-frame stall in an established save. The cache makes this type
+/// deliberately `!Sync` (interior mutability via `RefCell`); disk I/O stays on
+/// the main thread by design.
 pub struct WorldSave {
     root: PathBuf,
+    cache: std::cell::RefCell<HashMap<(BodyId, i32, i32), std::rc::Rc<Region>>>,
+    /// Region files actually read from disk, for tests that pin the cache.
+    reads: std::cell::Cell<u64>,
 }
 
 impl WorldSave {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        WorldSave { root: root.into() }
+        WorldSave {
+            root: root.into(),
+            cache: std::cell::RefCell::new(HashMap::new()),
+            reads: std::cell::Cell::new(0),
+        }
+    }
+
+    /// How many region files have been read from disk over this save's life.
+    pub fn region_reads(&self) -> u64 {
+        self.reads.get()
     }
 
     /// Create the directory if it does not exist.
@@ -205,13 +224,15 @@ impl WorldSave {
         let mut written = 0;
         for (region, positions) in by_region {
             // Merge into whatever the region already holds, so chunks saved in
-            // an earlier session are not dropped.
-            let mut stored = self.read_region(region)?;
+            // an earlier session are not dropped. Cloned out of the cache's
+            // shared copy: mutating in place would change history behind every
+            // other holder's back.
+            let mut stored = Region::clone(self.read_region(region)?.as_ref());
             for pos in &positions {
                 let chunk = world.chunk(*pos).expect("position came from the loaded set");
                 stored.insert(*pos, StoredChunk::from_chunk(chunk, world.registry()));
             }
-            self.write_region(region, &stored)?;
+            self.write_region(region, stored)?;
 
             for pos in positions {
                 if let Some(chunk) = world.chunk_mut(pos) {
@@ -231,29 +252,57 @@ impl WorldSave {
     ) -> Result<Option<Chunk>, SaveError> {
         let stored = self.read_region(region_of(pos))?;
         stored
-            .remove_owned(pos)
+            .get(pos)
+            .cloned()
             .map(|chunk| chunk.into_chunk(pos, registry))
             .transpose()
     }
 
-    fn read_region(&self, region: (BodyId, i32, i32)) -> Result<Region, SaveError> {
-        let path = self.region_path(region);
-        if !path.is_file() {
-            return Ok(Region::default());
+    fn read_region(&self, region: (BodyId, i32, i32)) -> Result<std::rc::Rc<Region>, SaveError> {
+        if let Some(hit) = self.cache.borrow().get(&region) {
+            return Ok(hit.clone());
         }
-        let bytes = std::fs::read(&path)?;
-        // The body is not stored in the file — the filename carries it — so
-        // decoding has to be told which world these chunks belong to.
-        Region::decode(&bytes, region.0)
+
+        let path = self.region_path(region);
+        let decoded = if path.is_file() {
+            let bytes = std::fs::read(&path)?;
+            self.reads.set(self.reads.get() + 1);
+            // The body is not stored in the file — the filename carries it —
+            // so decoding has to be told which world these chunks belong to.
+            Region::decode(&bytes, region.0)?
+        } else {
+            Region::default()
+        };
+
+        let shared = std::rc::Rc::new(decoded);
+        self.remember(region, shared.clone());
+        Ok(shared)
     }
 
-    fn write_region(&self, region: (BodyId, i32, i32), contents: &Region) -> Result<(), SaveError> {
-        write_atomically(&self.region_path(region), &contents.encode())
+    fn write_region(&self, region: (BodyId, i32, i32), contents: Region) -> Result<(), SaveError> {
+        write_atomically(&self.region_path(region), &contents.encode())?;
+        // The cache must never outlive the file it mirrors: replace the entry
+        // with exactly what was written, so a reload sees this save.
+        self.remember(region, std::rc::Rc::new(contents));
+        Ok(())
+    }
+
+    /// Insert into the cache, keeping it small.
+    ///
+    /// A region spans 512 blocks a side; the player borders at most four at
+    /// once. Eight is comfortable slack, and wholesale clearing beats an LRU
+    /// nobody will ever notice the difference of.
+    fn remember(&self, region: (BodyId, i32, i32), contents: std::rc::Rc<Region>) {
+        let mut cache = self.cache.borrow_mut();
+        if cache.len() > 8 {
+            cache.clear();
+        }
+        cache.insert(region, contents);
     }
 }
 
 /// The chunks held by one region file.
-#[derive(Debug, Default)]
+#[derive(Default, Clone)]
 struct Region {
     chunks: HashMap<ChunkPos, StoredChunk>,
 }
@@ -263,8 +312,8 @@ impl Region {
         self.chunks.insert(pos, chunk);
     }
 
-    fn remove_owned(mut self, pos: ChunkPos) -> Option<StoredChunk> {
-        self.chunks.remove(&pos)
+    fn get(&self, pos: ChunkPos) -> Option<&StoredChunk> {
+        self.chunks.get(&pos)
     }
 
     fn encode(&self) -> Vec<u8> {
@@ -458,6 +507,70 @@ mod tests {
         let position = BlockPos::new(4, 200, 4);
         world.set_block(position, stone).unwrap();
         (world, position, stone)
+    }
+
+    #[test]
+    fn a_region_is_read_from_disk_once_however_many_chunks_it_serves() {
+        // Without the cache, streaming decoded the whole region file per
+        // chunk — the single largest per-frame stall in an established save.
+        let dir = TempDir::new("cache");
+        let save = WorldSave::create(dir.path()).unwrap();
+
+        let mut world = World::new(77);
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        // Touch many chunks in the same region.
+        for x in 0..4 {
+            for z in 0..4 {
+                world.load_chunk(ChunkPos::new(x, z));
+                world
+                    .set_block(BlockPos::new(x * 16 + 4, 200, z * 16 + 4), stone)
+                    .unwrap();
+            }
+        }
+        save.save_world(&mut world).unwrap();
+
+        let reloading = WorldSave::new(dir.path());
+        let registry = world.registry();
+        for x in 0..4 {
+            for z in 0..4 {
+                let loaded = reloading.load_chunk(ChunkPos::new(x, z), registry).unwrap();
+                assert!(loaded.is_some(), "chunk ({x},{z}) missing from disk");
+            }
+        }
+        assert_eq!(
+            reloading.region_reads(),
+            1,
+            "sixteen chunks from one region cost more than one read"
+        );
+    }
+
+    #[test]
+    fn saving_invalidates_the_region_cache_so_a_reload_sees_the_write() {
+        let dir = TempDir::new("cache-invalidate");
+        let save = WorldSave::create(dir.path()).unwrap();
+        let (mut world, position, stone) = edited_world();
+        save.save_world(&mut world).unwrap();
+
+        // Warm the cache, then write again through the same handle.
+        let chunk_pos = ChunkPos::new(position.x.div_euclid(16), position.z.div_euclid(16));
+        assert!(save.load_chunk(chunk_pos, world.registry()).unwrap().is_some());
+
+        let second = BlockPos::new(position.x + 1, position.y, position.z);
+        world.set_block(second, stone).unwrap();
+        save.save_world(&mut world).unwrap();
+
+        // The same handle must see the new block without another disk read.
+        let reloaded = save
+            .load_chunk(chunk_pos, world.registry())
+            .unwrap()
+            .expect("chunk vanished");
+        let local = vx_core::LocalPos::new(
+            second.x.rem_euclid(16),
+            second.y,
+            second.z.rem_euclid(16),
+        )
+        .unwrap();
+        assert_eq!(reloaded.get(local), stone, "the cache served a stale region");
     }
 
     #[test]
@@ -661,7 +774,10 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
 
-        let result = save.load_chunk(position.chunk(), world.registry());
+        // A fresh handle, as a new session would hold: the writing handle's
+        // cache would rightly hide damage done behind its back.
+        let fresh = WorldSave::new(dir.path());
+        let result = fresh.load_chunk(position.chunk(), world.registry());
         assert!(matches!(
             result,
             Err(SaveError::Truncated) | Err(SaveError::Corrupt(_)) | Err(SaveError::Storage(_))

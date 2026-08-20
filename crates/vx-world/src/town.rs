@@ -387,6 +387,24 @@ pub fn counter_position(site: &TownSite) -> BlockPos {
     BlockPos::new(site.centre.0 + x, site.ground + 1, site.centre.1 + z)
 }
 
+/// Where the player's chest stands. Only the hometown has the house.
+pub fn chest_position(site: &TownSite) -> BlockPos {
+    let (x, z) = plan::chest_offset();
+    BlockPos::new(site.centre.0 + x, site.ground + 1, site.centre.1 + z)
+}
+
+/// The mailbox outside the player's door.
+pub fn mailbox_position(site: &TownSite) -> BlockPos {
+    let (x, z) = plan::mailbox_offset();
+    BlockPos::new(site.centre.0 + x, site.ground + 1, site.centre.1 + z)
+}
+
+/// Where a new player wakes up: on their house's floor, inside.
+pub fn spawn_position(site: &TownSite) -> BlockPos {
+    let (x, z) = plan::spawn_offset();
+    BlockPos::new(site.centre.0 + x, site.ground + 1, site.centre.1 + z)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
