@@ -86,7 +86,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 10a | `63da370` | Machines cost credits, trade map on the console, handheld map page |
 | 10b | `b12b1e2` | Player movement on a fixed clock: stance, sprint, slide, vault, mantle, stamina, carried mass |
 | 10c | `67aa3a6` | Pregenerated spawn, streaming off the frame thread, the player's house, mail-order, the welcome panel |
-| 11 | _this_ | Permits: ranked claims, three grades of lockbox, witnesses and sneaking, bounty, breaching and lock-picking |
+| 11 | `289a143` | Permits: ranked claims, three grades of lockbox, witnesses and sneaking, bounty, breaching and lock-picking |
+| 12 | _this_ | The gold panel: journaled admin orders, live tuning, the operator's console compiled out of shipped builds |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -421,7 +422,54 @@ ground, so an older log would replay against terrain that no longer generates.
 
 ---
 
-## Planned — Stage 10d: the arsenal, and what robbing costs
+## Shipped — Stage 12: the gold panel
+
+The operator's console: spawn, tweak, inspect — a Garry's-Mod-shaped surface
+built without breaking the one thing this codebase cannot afford to break.
+
+**A cheat is an order like any other.** The panel owns no mutation path. Every
+button resolves to a `Command::Admin(..)` in the same journal as movement and
+dispatches — Give, SpawnMachine, Teleport, SetStat, SetStock, SetTuning — so a
+session full of cheats still replays to a hash. Set up a situation through the
+panel and the journal *is* that scenario: committed, a regression fixture;
+handed over, a perfect reproduction case. Replay applies what `Rebuilt`
+carries (the player, the tuning, the base pile); machines and town books are
+no-ops on replay, the same honest line `run_replay` has always drawn for the
+economy.
+
+**Tuning constants are orders too — that was the subtle one.** Dragging
+`friction_slide` feels like editing a file, but it changes how every later
+command is *interpreted*; replayed under different constants, the same log
+diverges. So the movement tranche moved into a name-keyed `Tuning` struct
+riding on `Movement` (the shipped constants are its defaults), every slider
+commit records `SetTuning { key, value }` — the f32 crossing the wire as raw
+bits, exact — and a journal now carries its physics with it. Proven by test:
+a mid-log tuning change lands the same sprint somewhere else, reproducibly.
+Physics constants (`GRAVITY`, `STEP_HEIGHT`…) stay `const`: they cross the
+crate boundary, and threading them is a bigger cut than tuning has yet earned.
+
+**Fiction never sees gold — with one honest retrofit.** The gold *hue* was
+already the house accent in all seven diegetic panels, so what marks the
+console is chrome none of them have: the double gold border. If a capture
+shows the border, the session was touched. The panel is the repository's
+first cargo feature (`gold`, default-on for dev; the shipped Deck build
+compiles it out with `--no-default-features`, verified by the marker string
+being absent from the binary), and opens only behind `--gold` + F10.
+
+**Deck-shaped, keyboard-driven.** The focus model is a controller's — tab
+cycling, directional focus, one activate button, slider fields, X-to-reset —
+but no gamepad backend exists anywhere yet, so the keys stand in (arrows,
+Tab, Enter, X). When a gamepad crate lands, with hardware to test it on, it
+maps onto this model without the panel changing. Journal VERSION 6.
+
+Deliberately not built: spawning villagers (the roster is hardcoded at three
+and rigs index by variant — a real refactor, waiting for a round that needs
+it), search in the spawn grid, undo (every order is journalled, so replay-to-
+tick-N is sitting right there when someone builds the button).
+
+---
+
+## Planned — Stage 13: the arsenal, and what robbing costs
 
 Caravans can be intercepted. Doing it makes you wanted.
 
@@ -461,7 +509,7 @@ constraints above.
 | EMP burst | Drops a drone *without* wrecking its cargo — the thief's weapon | machine state rather than damage |
 | Guided missile | Slow, tracking, expensive | steering, and a reason for countermeasures |
 
-10d ships the slug launcher and the EMP burst. The rest are rows.
+13 ships the slug launcher and the EMP burst. The rest are rows.
 
 ### Interception and bounty
 
@@ -475,10 +523,10 @@ prices up. Then its mast starts **posting a contract on your head** through the
 board that already exists — groundwork that bites properly once there is
 somebody to take it.
 
-### What is deliberately not in 10d
+### What is deliberately not in 13
 
 Player health, hostile escorts, and death. Nothing shoots back yet. That keeps
-10d to a weapon system and a consequence rather than a whole combat model, and
+13 to a weapon system and a consequence rather than a whole combat model, and
 the data-driven shape means hostiles slot in later without a rewrite.
 
 ---
@@ -611,11 +659,11 @@ rolled twice. This also gives the economy a **source** to match the sink stage
   world, and `Perception` with `sight::obstruction` (stage 7) is already the
   "can it see you, with rock in between counting" primitive. The movement half
   is close to free.
-- *Military.* The same movement, carrying the stage 10d weapons, and aligned to
+- *Military.* The same movement, carrying the arsenal's weapons, and aligned to
   something — which is what makes them a faction problem rather than a monster
   problem.
 
-**The honest sequencing problem:** both flavours attack you, and stage 10d
+**The honest sequencing problem:** both flavours attack you, and stage 13
 deliberately leaves out player health, hostiles and death. So bunkers split in
 two. The **built** half — sited, shelled, entered, laid out, looted — can ship
 as soon as caves have paid for the 3D carve. The **occupied** half waits for
@@ -658,9 +706,9 @@ if the traffic it produces reads as dull.
 | 14 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
 | 15 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
 | 16 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
-| 17 | Hostiles and health | The half of combat 10d leaves out. `Perception` (stage 7) is already the shape a hostile needs, and 10d's bounty contracts are already something for one to take |
+| 17 | Hostiles and health | The half of combat stage 13 leaves out. `Perception` (stage 7) is already the shape a hostile needs, and stage 13's bounty contracts are already something for one to take |
 | 18 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 17 brings |
-| 19 | Factions and reputation | Bounty (10d) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to |
+| 19 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to |
 | 20 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
 | 21 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 

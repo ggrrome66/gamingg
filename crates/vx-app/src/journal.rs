@@ -57,7 +57,12 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // journal is an oracle rather than a load path — region files are still written
 // every save — so an old one being rejected costs a determinism check, not a
 // world.
-const VERSION: u32 = 5;
+//
+// Six added the gold panel's admin orders. A cheat is an order like any other:
+// the moment an admin action mutated state outside this log, the oracle would
+// be blind to it and every replay of that session would report a divergence
+// that is nobody's fault.
+const VERSION: u32 = 6;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -108,6 +113,38 @@ pub enum Command {
     },
     /// Simulation ticks run. The unit of time the log speaks in.
     Advance { ticks: u32 },
+    /// An operator's order from the gold panel. In the same log as everything
+    /// else on purpose: a journal with cheats in it still replays to a hash,
+    /// which is what makes the panel a scenario editor rather than a taint.
+    Admin(Admin),
+}
+
+/// What the gold panel may order.
+///
+/// Replay applies what [`Rebuilt`] carries — the player, the movement tuning,
+/// the fleet's base pile. Machines, credits, skills and town books are not in
+/// `Rebuilt`, so those arms are no-ops on replay, the same honest line
+/// `run_replay` already draws for the economy: recorded, visible in the log,
+/// not part of the hash the oracle checks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Admin {
+    /// Goods into the fleet's base pile. No base means nothing happens, live
+    /// and replayed alike — the rule must match or the oracle lies.
+    Give { good: String, amount: u64 },
+    /// Machines into the garage. Replay no-op: dispatches record their crew.
+    SpawnMachine { kind: String, count: u32 },
+    /// The player, moved. Block-quantised so the landing spot survives the
+    /// wire exactly.
+    Teleport { x: i32, y: i32, z: i32 },
+    /// A named stat. "stamina" is movement state and replays; "credits" and
+    /// "xp:<skill>" are live-only.
+    SetStat { key: String, value: u64 },
+    /// A town's shelf. Live-only: the books are outside the oracle.
+    SetStock { x: i32, z: i32, good: String, amount: u64 },
+    /// A tunable, by name. This one is the subtle one: it changes how every
+    /// later command is *interpreted*, so a journal now carries its physics.
+    /// The f32 crosses the wire as raw bits — exact, not printed-and-parsed.
+    SetTuning { key: String, value: f32 },
 }
 
 impl Command {
@@ -352,6 +389,36 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 load: *load,
             };
         }
+        Command::Admin(order) => match order {
+            Admin::Give { good, amount } => {
+                // Same rule as live: no base, nothing happens. The rule must
+                // match on both sides or the oracle lies.
+                if let Some(base) = state.mining.fleet.base.as_mut() {
+                    base.stockpile.add(good.clone(), *amount);
+                }
+            }
+            Admin::Teleport { x, y, z } => {
+                state.player.position = glam::Vec3::new(*x as f32 + 0.5, *y as f32, *z as f32 + 0.5);
+                state.player.velocity = glam::Vec3::ZERO;
+                state.player.on_ground = false;
+            }
+            Admin::SetStat { key, value } => {
+                // Only what `Rebuilt` carries. Everything else is live-only,
+                // the same line `run_replay` draws for the economy.
+                if key == "stamina" {
+                    state.movement.stamina =
+                        (*value as f32).min(state.movement.tuning.stam_max);
+                }
+            }
+            Admin::SetTuning { key, value } => {
+                if !state.movement.tuning.set(key, *value) {
+                    log::warn!("replay met an unknown tunable '{key}'");
+                }
+            }
+            // Machines and town books are outside the oracle: crews are
+            // recorded on each dispatch, and the books were never replayed.
+            Admin::SpawnMachine { .. } | Admin::SetStock { .. } => {}
+        },
         Command::Advance { ticks } => {
             mining.advance(world, events, *ticks);
             // The held command is re-issued for every tick it covers, at
@@ -411,8 +478,60 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             file.write_all(&pitch_q.to_le_bytes())?;
             file.write_all(&[*load])?;
         }
+        Command::Admin(order) => match order {
+            Admin::Give { good, amount } => {
+                file.write_all(&[6u8])?;
+                write_name(file, good)?;
+                file.write_all(&amount.to_le_bytes())?;
+            }
+            Admin::SpawnMachine { kind, count } => {
+                file.write_all(&[7u8])?;
+                write_name(file, kind)?;
+                file.write_all(&count.to_le_bytes())?;
+            }
+            Admin::Teleport { x, y, z } => {
+                file.write_all(&[8u8])?;
+                file.write_all(&x.to_le_bytes())?;
+                file.write_all(&y.to_le_bytes())?;
+                file.write_all(&z.to_le_bytes())?;
+            }
+            Admin::SetStat { key, value } => {
+                file.write_all(&[9u8])?;
+                write_name(file, key)?;
+                file.write_all(&value.to_le_bytes())?;
+            }
+            Admin::SetStock { x, z, good, amount } => {
+                file.write_all(&[10u8])?;
+                file.write_all(&x.to_le_bytes())?;
+                file.write_all(&z.to_le_bytes())?;
+                write_name(file, good)?;
+                file.write_all(&amount.to_le_bytes())?;
+            }
+            Admin::SetTuning { key, value } => {
+                file.write_all(&[11u8])?;
+                write_name(file, key)?;
+                // Raw bits: exact, not printed-and-parsed.
+                file.write_all(&value.to_bits().to_le_bytes())?;
+            }
+        },
     }
     Ok(())
+}
+
+/// A length-prefixed name on the wire, capped like every other name here.
+fn write_name(file: &mut impl Write, name: &str) -> std::io::Result<()> {
+    file.write_all(&(name.len() as u32).to_le_bytes())?;
+    file.write_all(name.as_bytes())
+}
+
+fn read_name(file: &mut impl Read) -> std::io::Result<String> {
+    let length = read_u32(file)? as usize;
+    if length > 256 {
+        return Err(std::io::Error::other("implausible name length"));
+    }
+    let mut bytes = vec![0u8; length];
+    file.read_exact(&mut bytes)?;
+    String::from_utf8(bytes).map_err(|_| std::io::Error::other("name is not text"))
 }
 
 fn write_pos(file: &mut impl Write, at: BlockPos) -> std::io::Result<()> {
@@ -497,6 +616,33 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
                 load: load[0],
             }
         }
+        6 => Command::Admin(Admin::Give {
+            good: read_name(file)?,
+            amount: read_u64(file)?,
+        }),
+        7 => Command::Admin(Admin::SpawnMachine {
+            kind: read_name(file)?,
+            count: read_u32(file)?,
+        }),
+        8 => Command::Admin(Admin::Teleport {
+            x: read_u32(file)? as i32,
+            y: read_u32(file)? as i32,
+            z: read_u32(file)? as i32,
+        }),
+        9 => Command::Admin(Admin::SetStat {
+            key: read_name(file)?,
+            value: read_u64(file)?,
+        }),
+        10 => Command::Admin(Admin::SetStock {
+            x: read_u32(file)? as i32,
+            z: read_u32(file)? as i32,
+            good: read_name(file)?,
+            amount: read_u64(file)?,
+        }),
+        11 => Command::Admin(Admin::SetTuning {
+            key: read_name(file)?,
+            value: f32::from_bits(read_u32(file)?),
+        }),
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
     Ok(Entry { tick, command })
@@ -984,6 +1130,156 @@ mod movement_replay_tests {
             matches!(moves[0], Command::Move { load: 40, .. }),
             "the load did not survive: {:?}",
             moves[0]
+        );
+    }
+}
+
+#[cfg(test)]
+mod admin_tests {
+    use super::*;
+    use vx_core::ChunkPos;
+
+    /// Radius four: the teleport fixtures land near the town's west edge, and
+    /// an unloaded chunk reads as air — a body teleported into one falls
+    /// forever instead of sprinting.
+    fn world() -> World {
+        let mut world = World::new(2024);
+        world.load_around(ChunkPos::new(0, 0), 4);
+        world
+    }
+
+    /// A session with cheats in it: teleport, a tuning drag, movement after.
+    fn cheated() -> CommandLog {
+        let mut journal = CommandLog::default();
+        let east = std::f32::consts::FRAC_PI_2;
+        journal.record(Command::Admin(Admin::Teleport { x: 8, y: 74, z: 8 }));
+        journal.record(Command::Admin(Admin::SetTuning {
+            key: "sprint_speed".into(),
+            value: 9.0,
+        }));
+        journal.record(Command::moving(MoveCommand::looking(
+            movement::FWD | movement::SPRINT,
+            east,
+            0.0,
+        )));
+        journal.record(Command::Advance { ticks: 40 });
+        journal.record(Command::Admin(Admin::SetStat {
+            key: "stamina".into(),
+            value: 100,
+        }));
+        journal.record(Command::Advance { ticks: 8 });
+        journal
+    }
+
+    #[test]
+    fn a_journal_with_admin_commands_replays_to_the_same_place() {
+        // The entire premise: the oracle covers cheated sessions.
+        let journal = cheated();
+        let events = EventBus::new();
+        let once = replay(&journal, &mut world(), &events);
+        let twice = replay(&journal, &mut world(), &events);
+        assert_eq!(once.player.position, twice.player.position);
+        assert_eq!(once.movement.stamina, twice.movement.stamina);
+        assert_eq!(once.movement.tuning, twice.movement.tuning);
+    }
+
+    #[test]
+    fn a_tuning_change_mid_log_changes_the_outcome_and_still_replays() {
+        // The physics travels with the journal: the same held sprint under a
+        // different sprint_speed lands somewhere else, reproducibly.
+        let east = std::f32::consts::FRAC_PI_2;
+        let with_tuning = |speed: Option<f32>| {
+            let mut journal = CommandLog::default();
+            // The lane at z = 20 crosses the whole flat town platform with no
+            // building in it — a wall would clamp both runs to the same spot
+            // and hide the difference this test exists to see.
+            journal.record(Command::Admin(Admin::Teleport { x: -20, y: 74, z: 20 }));
+            if let Some(value) = speed {
+                journal.record(Command::Admin(Admin::SetTuning {
+                    key: "sprint_speed".into(),
+                    value,
+                }));
+            }
+            journal.record(Command::moving(MoveCommand::looking(
+                movement::FWD | movement::SPRINT,
+                east,
+                0.0,
+            )));
+            journal.record(Command::Advance { ticks: 20 });
+            let events = EventBus::new();
+            replay(&journal, &mut world(), &events).player.position
+        };
+
+        let stock = with_tuning(None);
+        let tuned = with_tuning(Some(9.5));
+        assert_ne!(stock, tuned, "the tuning order changed nothing");
+        assert_eq!(
+            with_tuning(Some(9.5)),
+            tuned,
+            "the tuned run is not reproducible"
+        );
+    }
+
+    #[test]
+    fn a_give_lands_in_the_base_pile_only_when_a_base_exists() {
+        // The no-base rule must match live behaviour exactly, or the oracle
+        // and the session disagree about how much ore you own.
+        let events = EventBus::new();
+        let mut journal = CommandLog::default();
+        journal.record(Command::Admin(Admin::Give {
+            good: "engine:copper_ore".into(),
+            amount: 500,
+        }));
+        let rebuilt = replay(&journal, &mut world(), &events);
+        assert!(
+            rebuilt.mining.fleet.base.is_none(),
+            "a base appeared from nowhere"
+        );
+    }
+
+    #[test]
+    fn admin_orders_survive_the_wire() {
+        let directory = std::env::temp_dir().join(format!(
+            "vx-journal-admin-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let mut journal = CommandLog::default();
+        let orders = [
+            Admin::Give { good: "engine:log".into(), amount: 42 },
+            Admin::SpawnMachine { kind: "drone".into(), count: 3 },
+            Admin::Teleport { x: -14, y: 73, z: 9 },
+            Admin::SetStat { key: "credits".into(), value: 9_999 },
+            Admin::SetStock { x: 512, z: 0, good: "engine:stone".into(), amount: 700 },
+            Admin::SetTuning { key: "friction_slide".into(), value: 1.234_567 },
+        ];
+        for order in &orders {
+            journal.record(Command::Admin(order.clone()));
+        }
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let recovered: Vec<&Command> =
+            read_back.entries().iter().map(|entry| &entry.command).collect();
+        assert_eq!(recovered.len(), orders.len(), "orders were lost on the wire");
+        for (found, sent) in recovered.iter().zip(&orders) {
+            assert_eq!(**found, Command::Admin((*sent).clone()), "an order mutated in transit");
+        }
+    }
+
+    #[test]
+    fn a_teleport_is_block_exact_after_the_wire() {
+        // f32 positions would drift through a file; blocks cannot.
+        let events = EventBus::new();
+        let mut journal = CommandLog::default();
+        journal.record(Command::Admin(Admin::Teleport { x: 100, y: 80, z: -40 }));
+        let rebuilt = replay(&journal, &mut world(), &events);
+        assert_eq!(
+            rebuilt.player.position,
+            glam::Vec3::new(100.5, 80.0, -39.5),
+            "the landing spot moved"
         );
     }
 }

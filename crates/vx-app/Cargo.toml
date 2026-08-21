@@ -10,6 +10,14 @@ description = "The game binary: wires the world, mesher, renderer and window tog
 name = "gamingg"
 path = "src/main.rs"
 
+# The gold panel is the repository's first feature gate. Default-on so every
+# dev build and test run carries it; the shipped Deck build compiles it out
+# with `--no-default-features`, which is the only way to genuinely remove the
+# source rather than trusting dead-code elimination.
+[features]
+default = ["gold"]
+gold = []
+
 [dependencies]
 vx-core.workspace = true
 vx-world.workspace = true

@@ -292,14 +292,17 @@ impl Stance {
     }
 
     /// Top speed on the flat, before mass and stamina take their cut.
-    pub fn speed(&self) -> f32 {
+    ///
+    /// Reads the live tuning, not the constants: the constants are only the
+    /// defaults, and a journal that set `sprint_speed` must move by it.
+    pub fn speed(&self, tuning: &crate::tuning::Tuning) -> f32 {
         match self {
-            Stance::Sprinting => SPRINT_SPEED,
-            Stance::Crouched => CROUCH_SPEED,
-            Stance::Prone => PRONE_SPEED,
+            Stance::Sprinting => tuning.sprint_speed,
+            Stance::Crouched => tuning.crouch_speed,
+            Stance::Prone => tuning.prone_speed,
             Stance::Sliding { .. } => 0.0,
-            Stance::Swimming => CROUCH_SPEED,
-            _ => WALK,
+            Stance::Swimming => tuning.crouch_speed,
+            _ => tuning.walk,
         }
     }
 
@@ -439,6 +442,10 @@ pub fn submerged(world: &World, body: &PlayerBody) -> bool {
 /// Everything about how the player is moving that is not the body itself.
 #[derive(Debug, Clone, Copy)]
 pub struct Movement {
+    /// The numbers this body moves by. Defaults to the shipped constants;
+    /// the gold panel's `SetTuning` orders are what change it, and because it
+    /// rides here it is part of what a journal replay reconstructs.
+    pub tuning: crate::tuning::Tuning,
     pub stance: Stance,
     pub stamina: f32,
     /// Seconds since stamina was last spent.
@@ -464,6 +471,7 @@ impl Default for Movement {
             buffered_jump: 0,
             was_airborne: true,
             entry_impulse: None,
+            tuning: crate::tuning::Tuning::default(),
         }
     }
 }
@@ -471,11 +479,11 @@ impl Default for Movement {
 impl Movement {
     /// Fraction of the stamina bar remaining, for the HUD.
     pub fn stamina_fraction(&self) -> f32 {
-        (self.stamina / STAM_MAX).clamp(0.0, 1.0)
+        (self.stamina / self.tuning.stam_max).clamp(0.0, 1.0)
     }
 
     pub fn winded(&self) -> bool {
-        self.stamina < STAM_SLIDE
+        self.stamina < self.tuning.stam_slide
     }
 
     fn spend(&mut self, amount: f32) {
@@ -612,13 +620,13 @@ impl Movement {
         // of real speed — jogging into it would make the verb free.
         if grounded
             && command.held(CROUCH)
-            && speed >= SLIDE_ENTRY
-            && self.stamina >= STAM_SLIDE
+            && speed >= self.tuning.slide_entry
+            && self.stamina >= self.tuning.stam_slide
             && !matches!(self.stance, Stance::Sliding { .. })
         {
-            self.spend(STAM_SLIDE);
+            self.spend(self.tuning.stam_slide);
             self.stance = Stance::Sliding { ticks: 0 };
-            self.entry_impulse = Some((speed * SLIDE_BOOST).min(SLIDE_CAP));
+            self.entry_impulse = Some((speed * self.tuning.slide_boost).min(self.tuning.slide_cap));
             return;
         }
 
@@ -628,7 +636,7 @@ impl Movement {
             // staircase, so a slide down one spends most of its life in the air
             // between steps. Ending it on the first drop would make the one
             // case the verb exists for the one case it cannot do.
-            let done = grounded && (speed < SLIDE_EXIT || !command.held(CROUCH));
+            let done = grounded && (speed < self.tuning.slide_exit || !command.held(CROUCH));
             self.stance = if done {
                 if command.held(CROUCH) {
                     Stance::Crouched
@@ -652,7 +660,7 @@ impl Movement {
     fn grounded_stance(&self, command: MoveCommand, body: &PlayerBody) -> Stance {
         if let Stance::Sliding { ticks } = self.stance {
             let speed = Vec3::new(body.velocity.x, 0.0, body.velocity.z).length();
-            if speed >= SLIDE_EXIT {
+            if speed >= self.tuning.slide_exit {
                 return Stance::Sliding { ticks };
             }
         }
@@ -687,7 +695,7 @@ impl Movement {
         }
         // Only when actually stopped by something — otherwise every wall you
         // walk past would grab you.
-        let pressing = Vec3::new(body.velocity.x, 0.0, body.velocity.z).length() < WALK * 0.5;
+        let pressing = Vec3::new(body.velocity.x, 0.0, body.velocity.z).length() < self.tuning.walk * 0.5;
         if !pressing {
             return;
         }
@@ -698,10 +706,10 @@ impl Movement {
             }
             Ledge::Mantle { across, .. } => {
                 if command.held(JUMP) || self.buffered_jump > 0 {
-                    if self.stamina < STAM_MANTLE {
+                    if self.stamina < self.tuning.stam_mantle {
                         return;
                     }
-                    self.spend(STAM_MANTLE);
+                    self.spend(self.tuning.stam_mantle);
                     self.begin_climb(body, across, MANTLE_TICKS);
                 }
             }
@@ -759,8 +767,8 @@ impl Movement {
         } else {
             return;
         };
-        let gained = along.length() + drop * SLIDE_LANDING_TRANSFER;
-        let capped = direction * gained.min(SLIDE_CAP);
+        let gained = along.length() + drop * self.tuning.slide_landing_transfer;
+        let capped = direction * gained.min(self.tuning.slide_cap);
         body.velocity.x = capped.x;
         body.velocity.z = capped.z;
     }
@@ -792,21 +800,21 @@ impl Movement {
                 // Heavier means winded sooner. This is where the weight system
                 // gets its teeth: the cargo upgrade you bought is also the
                 // reason you are out of breath.
-                self.spend(STAM_SPRINT * dt / mass.max(0.01));
+                self.spend(self.tuning.stam_sprint * dt / mass.max(0.01));
             }
             _ => {
                 self.rested += dt;
-                if self.rested >= STAM_REGEN_DELAY {
-                    self.stamina = (self.stamina + STAM_REGEN * dt).min(STAM_MAX);
+                if self.rested >= self.tuning.stam_regen_delay {
+                    self.stamina = (self.stamina + self.tuning.stam_regen * dt).min(self.tuning.stam_max);
                 }
             }
         }
     }
 
     fn top_speed(&self, mass: f32) -> f32 {
-        let base = self.stance.speed() * mass;
+        let base = self.stance.speed(&self.tuning) * mass;
         if self.winded() {
-            base * WINDED
+            base * self.tuning.winded
         } else {
             base
         }
@@ -819,20 +827,20 @@ impl Movement {
         };
         match self.stance {
             Stance::Sliding { .. } => MoveParams {
-                accel: ACCEL_SLIDE,
-                friction: if grounded { FRICTION_SLIDE } else { FRICTION_AIR },
+                accel: self.tuning.accel_slide,
+                friction: if grounded { self.tuning.friction_slide } else { self.tuning.friction_air },
                 step_height,
                 gravity: true,
             },
             _ if !grounded => MoveParams {
-                accel: ACCEL_AIR,
-                friction: FRICTION_AIR,
+                accel: self.tuning.accel_air,
+                friction: self.tuning.friction_air,
                 step_height,
                 gravity: true,
             },
             _ => MoveParams {
-                accel: ACCEL_GROUND,
-                friction: FRICTION,
+                accel: self.tuning.accel_ground,
+                friction: self.tuning.friction,
                 step_height,
                 gravity: true,
             },

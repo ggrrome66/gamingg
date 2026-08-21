@@ -696,11 +696,25 @@ Controls:
 | `[` / `]` | Zoom the minimap out / in |
 | `F` | Toggle walking and flying |
 | `F5` | Save |
+| `F10` | The gold panel — the operator's console (dev builds only, see below) |
 | `Escape` | Release the mouse |
 
 Worlds are saved on quit to `$XDG_DATA_HOME/gamingg/saves/world`, selectable
 with `--world <name>`. Reloading an existing world uses its stored seed, so
 `--seed` only applies when creating a new one.
+
+### The gold panel
+
+Development builds carry an operator's console behind the repo's first cargo
+feature, `gold` (on by default; the `dist/` build is compiled with
+`--no-default-features` and does not contain it). `F10` opens it, or launch
+with `--gold` to start with it open. Five tabs — Player, Spawn, Town, World,
+Tuning — driven Deck-shaped: `Tab` cycles tabs, arrows move the cursor and
+adjust a held slider, `Enter` acts and commits, `X` resets a tunable to its
+shipped default. Every mutation it makes is an ordinary journaled order
+(`Command::Admin`), so a cheated session still replays to the same world hash
+— a cheat is an order like any other. It is a keyboard console today; the
+gamepad backend waits for real hardware.
 
 Running windowed needs a Vulkan loader and drivers plus X11 and/or Wayland
 client libraries.

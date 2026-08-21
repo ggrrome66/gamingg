@@ -16,6 +16,8 @@ mod controller;
 mod device;
 mod economy;
 mod garage;
+#[cfg(feature = "gold")]
+mod gold;
 mod homestead;
 mod hud;
 mod intro;
@@ -28,6 +30,7 @@ mod rig;
 mod shop;
 mod skills;
 mod streaming;
+mod tuning;
 mod view;
 mod villagers;
 mod wallet;
@@ -55,6 +58,8 @@ const BOARD_SLOT: usize = 5;
 const HOME_SLOT: usize = 6;
 const INTRO_SLOT: usize = 7;
 const PERMIT_SLOT: usize = 8;
+#[cfg(feature = "gold")]
+const GOLD_SLOT: usize = 9;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -133,6 +138,9 @@ struct Options {
     time: f32,
     /// Chunks visible in every direction, when playing windowed.
     view_distance: i32,
+    /// Open the operator's console. Only present in builds carrying the
+    /// `gold` feature; the shipped build compiles the panel out entirely.
+    gold: bool,
     /// Pin the sheriff's badge on the player. A development override, like
     /// `--drones`: the badge is won at the ballot box in stage 13, and this is
     /// how the override is exercised before then.
@@ -143,6 +151,8 @@ struct Options {
     welcome: bool,
     /// Draw a neighbour's lockbox panel over the capture.
     permit: bool,
+    /// Draw the operator's console over the capture (gold builds only).
+    gold_capture: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -161,10 +171,12 @@ fn parse_args() -> Result<Options, String> {
         height: 720,
         world: "world".to_string(),
         view_distance: 8,
+        gold: false,
         sheriff: false,
         changelog: false,
         welcome: false,
         permit: false,
+        gold_capture: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -222,10 +234,12 @@ fn parse_args() -> Result<Options, String> {
             "--shop" => options.shop = true,
             "--board" => options.board = true,
             "--replay" => options.replay = true,
+            "--gold" => options.gold = true,
             "--sheriff" => options.sheriff = true,
             "--changelog" => options.changelog = true,
             "--welcome" => options.welcome = true,
             "--permit" => options.permit = true,
+            "--gold-capture" => options.gold_capture = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -290,10 +304,12 @@ fn parse_args() -> Result<Options, String> {
                      --device            draw the handheld fleet roster over the capture\n  \
                      --handheld-map      draw the handheld's map page instead\n  \
                      --view-distance <n> chunks visible in every direction (4-16, default 8)\n  \
+                     --gold              enable the operator console (F10; dev builds only)\n  \
                      --sheriff           wear the badge (dev override; won at the ballot box later)\n  \
                      --changelog         print the welcome panel's changelog and exit\n  \
                      --welcome           draw the welcome panel over the capture\n  \
                      --permit            draw a lockbox panel over the capture\n  \
+                     --gold-capture      draw the operator console over the capture\n  \
                      --time <0..1>       hour of the day to light the capture by\n  \
                      --night             shorthand for --time 0\n  \
                      --dawn --noon --dusk\n  \
@@ -320,6 +336,13 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    // Asking for the console in a build that compiled it out deserves a plain
+    // answer, not silence.
+    #[cfg(not(feature = "gold"))]
+    if options.gold {
+        eprintln!("this build carries no gold panel; rebuild with --features gold");
+    }
 
     if options.changelog {
         for line in intro::changelog() {
@@ -828,6 +851,54 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         }
     }
 
+    #[cfg(feature = "gold")]
+    if options.gold_capture {
+        // Fixture telemetry: the capture shows the console's shape, and the
+        // gold border marks the frame as an operator's session.
+        let tuning = tuning::Tuning::default();
+        let telemetry = gold::Telemetry {
+            tick: 4_200,
+            position: glam::Vec3::new(-13.5, 73.0, 9.5),
+            stance: "STAND",
+            stamina: 87.0,
+            credits: 250,
+            bounty: 0,
+            drones: 1,
+            fliers: 1,
+            base_total: 340,
+            town_name: Some("STONEHAVEN".into()),
+            town_centre: Some((0, 0)),
+            stocks: [400.0, 200.0, 100.0, 40.0],
+            tuning: &tuning,
+            world_hash: None,
+        };
+        let panel = gold::Gold {
+            open: true,
+            tab_index: 4,
+            ..gold::Gold::default()
+        };
+        let pixels = gold::render_gold(&panel, &telemetry);
+        let panel_width = gold::GOLD_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = gold::GOLD_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            GOLD_SLOT,
+            &context.device,
+            &context.queue,
+            (gold::GOLD_WIDTH, gold::GOLD_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+    #[cfg(not(feature = "gold"))]
+    if options.gold_capture {
+        eprintln!("this build carries no gold panel; --gold-capture ignored");
+    }
+
     if options.permit {
         // A neighbour's lock, seen by somebody with no business there — the
         // panel's whole job this round is telling you that plainly.
@@ -1047,13 +1118,36 @@ fn run_windowed(options: &Options) -> Result<(), String> {
         options.width,
         options.height,
         options.world.clone(),
-        options.drones,
-        options.view_distance,
-        options.sheriff,
+        DevOverrides {
+            crew: options.drones,
+            view_distance: options.view_distance,
+            sheriff: options.sheriff,
+            gold_enabled: options.gold,
+        },
     );
     event_loop
         .run_app(&mut app)
         .map_err(|error| format!("event loop failed: {error}"))
+}
+
+/// The command-line switches that exist for development rather than play,
+/// bundled so `App::new` does not grow a parameter per round.
+struct DevOverrides {
+    crew: u32,
+    view_distance: i32,
+    sheriff: bool,
+    gold_enabled: bool,
+}
+
+/// Is the operator's console open? False by construction when the panel is
+/// compiled out, which is what keeps the frame loop free of feature soup.
+#[cfg(feature = "gold")]
+fn gold_open(active: &Active) -> bool {
+    active.gold.open
+}
+#[cfg(not(feature = "gold"))]
+fn gold_open(_active: &Active) -> bool {
+    false
 }
 
 /// Everything that only exists once there is a window.
@@ -1146,6 +1240,12 @@ struct Active {
     watched: bool,
     /// Enter is held at a lockbox: keep working at it.
     picking: bool,
+    /// The operator's console.
+    #[cfg(feature = "gold")]
+    gold: gold::Gold,
+    /// The hash the operator asked for, cleared when the panel closes.
+    #[cfg(feature = "gold")]
+    gold_hash: Option<u64>,
     /// The chest panel's cursor and feedback.
     home_panel: homestead::HomePanel,
     /// The town whose counter is open. `TownSite` is `Copy`, so this can be
@@ -1171,6 +1271,10 @@ struct App {
     view_distance: i32,
     /// Start wearing the sheriff's badge.
     sheriff: bool,
+    /// The operator's console is armed (still needs F10 to open). Unread in
+    /// a build that compiled the console out.
+    #[allow(dead_code)]
+    gold_enabled: bool,
     active: Option<Active>,
     fly: FlyController,
     walk: WalkController,
@@ -1184,15 +1288,13 @@ struct App {
 }
 
 impl App {
-    fn new(
-        seed: u64,
-        width: u32,
-        height: u32,
-        world_name: String,
-        crew: u32,
-        view_distance: i32,
-        sheriff: bool,
-    ) -> Self {
+    fn new(seed: u64, width: u32, height: u32, world_name: String, dev: DevOverrides) -> Self {
+        let DevOverrides {
+            crew,
+            view_distance,
+            sheriff,
+            gold_enabled,
+        } = dev;
         App {
             seed,
             width,
@@ -1201,6 +1303,7 @@ impl App {
             crew,
             view_distance,
             sheriff,
+            gold_enabled,
             active: None,
             fly: FlyController::default(),
             drill_held: false,
@@ -1262,6 +1365,7 @@ impl App {
             || active.device.open
             || active.home_panel.open
             || active.permit_panel.open
+            || gold_open(active)
             || active.intro.open
             || feed.is_some();
         if busy || active.resuming {
@@ -1722,6 +1826,8 @@ impl App {
         self.refresh_shop();
         self.refresh_home();
         self.refresh_permit();
+        #[cfg(feature = "gold")]
+        self.refresh_gold();
         self.refresh_intro();
         self.refresh_board();
         self.refresh_device();
@@ -2137,6 +2243,26 @@ impl App {
                 _ => {}
             }
             return;
+        }
+
+        // The operator's console outranks everything: it is the tool you
+        // reach for when the game underneath is misbehaving.
+        #[cfg(feature = "gold")]
+        {
+            if code == KeyCode::F10 && self.gold_enabled {
+                if let Some(active) = &mut self.active {
+                    active.gold.toggle();
+                    if !active.gold.open {
+                        active.gold_hash = None;
+                        active.renderer.clear_overlay(GOLD_SLOT);
+                    }
+                }
+                return;
+            }
+            if self.active.as_ref().is_some_and(|active| active.gold.open) {
+                self.gold_key(code);
+                return;
+            }
         }
 
         // The lockbox panel, while open, owns the keyboard.
@@ -2827,6 +2953,303 @@ impl App {
         );
     }
 
+    /// One key into the operator's console.
+    #[cfg(feature = "gold")]
+    fn gold_key(&mut self, code: KeyCode) {
+        let Some(active) = &mut self.active else { return };
+        let telemetry = Self::gold_telemetry(active);
+        let rows = active.gold.rows(&telemetry);
+        drop(telemetry);
+        match code {
+            KeyCode::Escape | KeyCode::F10 => {
+                active.gold.toggle();
+                active.gold_hash = None;
+                active.renderer.clear_overlay(GOLD_SLOT);
+            }
+            KeyCode::Tab => active.gold.cycle_tab(),
+            KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
+                // A slider being held turns the vertical axis into the value.
+                if let Some((key, pending)) = active.gold.sliding {
+                    let step = rows
+                        .get(active.gold.cursor)
+                        .and_then(|row| match row.action {
+                            gold::RowAction::Slider { step, .. } => Some(step),
+                            _ => None,
+                        })
+                        .unwrap_or(0.05);
+                    active.gold.sliding =
+                        Some((key, (pending - delta as f32 * step).max(0.0)));
+                } else {
+                    active.gold.move_cursor(delta, rows.len());
+                }
+            }
+            KeyCode::KeyX => {
+                // Reset the focused tunable to its default — as an order, so
+                // the journal knows the physics changed back.
+                if let Some(gold::RowAction::Slider { key, .. }) =
+                    rows.get(active.gold.cursor).map(|row| row.action.clone())
+                {
+                    let default = tuning::Tuning::default().get(key).unwrap_or(0.0);
+                    Self::gold_order(
+                        active,
+                        journal::Admin::SetTuning { key: key.into(), value: default },
+                    );
+                    active.gold.sliding = None;
+                }
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                match rows.get(active.gold.cursor).map(|row| row.action.clone()) {
+                    Some(gold::RowAction::Slider { key, .. }) => {
+                        match active.gold.sliding.take() {
+                            // Second press commits the pending value as an
+                            // order. (The note wants hold-to-slide; with a
+                            // keyboard standing in for the pad, press-adjust-
+                            // press is the same gesture without key-held
+                            // tracking. The pad backend maps hold onto this.)
+                            Some((held, pending)) if held == key => {
+                                Self::gold_order(
+                                    active,
+                                    journal::Admin::SetTuning {
+                                        key: held.into(),
+                                        value: pending,
+                                    },
+                                );
+                            }
+                            _ => {
+                                let current = active
+                                    .movement
+                                    .tuning
+                                    .get(key)
+                                    .unwrap_or(0.0);
+                                active.gold.sliding = Some((key, current));
+                            }
+                        }
+                    }
+                    Some(gold::RowAction::Order(order)) => {
+                        // The teleport-ahead row is a placeholder until now:
+                        // the real target is fifty blocks down the camera's
+                        // level heading, decided at the moment of the order.
+                        let order = if let journal::Admin::Teleport { x: 0, y: 0, z: 0 } = order
+                        {
+                            let ahead = active.camera.forward_level();
+                            let target = active.player.position + ahead * 50.0;
+                            journal::Admin::Teleport {
+                                x: target.x.floor() as i32,
+                                y: (target.y.floor() as i32).max(1) + 4,
+                                z: target.z.floor() as i32,
+                            }
+                        } else {
+                            order
+                        };
+                        Self::gold_order(active, order);
+                    }
+                    Some(gold::RowAction::Note) => {
+                        // Two informational rows carry a verb: the hash, and
+                        // the time advance.
+                        if active.gold.tab() == gold::Tab::World {
+                            match active.gold.cursor {
+                                1 => {
+                                    active.gold_hash =
+                                        Some(vx_world::world_hash(&active.world));
+                                    active.gold.feedback = Some("HASHED".into());
+                                }
+                                3 => Self::gold_advance(active, 80),
+                                _ => {}
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Journal an operator's order and apply it live.
+    ///
+    /// The live application must match the replay arm exactly for everything
+    /// `Rebuilt` carries, or the oracle and the session disagree — that
+    /// discipline is the whole panel.
+    #[cfg(feature = "gold")]
+    fn gold_order(active: &mut Active, order: journal::Admin) {
+        use journal::Admin;
+        active.journal.record(Command::Admin(order.clone()));
+        let line = match &order {
+            Admin::Give { good, amount } => {
+                match active.mining.fleet.base.as_mut() {
+                    Some(base) => {
+                        base.stockpile.add(good.clone(), *amount);
+                        format!("GAVE {amount} {}", shop::display_name(good))
+                    }
+                    // Recorded anyway: replay applies the same no-base rule.
+                    None => "NO BASE SET - NOTHING GIVEN".into(),
+                }
+            }
+            Admin::SpawnMachine { kind, count } => {
+                active.garage.grant(kind, *count);
+                format!("{} +{count}", kind.to_uppercase())
+            }
+            Admin::Teleport { x, y, z } => {
+                active.player.position =
+                    glam::Vec3::new(*x as f32 + 0.5, *y as f32, *z as f32 + 0.5);
+                active.player.velocity = glam::Vec3::ZERO;
+                active.player.on_ground = false;
+                // The ground there may not be streamed in yet; the gate that
+                // already protects feed hang-ups protects this too.
+                active.resuming = true;
+                format!("MOVED TO {x} {y} {z}")
+            }
+            Admin::SetStat { key, value } => {
+                if key == "stamina" {
+                    active.movement.stamina =
+                        (*value as f32).min(active.movement.tuning.stam_max);
+                    "STAMINA FILLED".into()
+                } else if key == "credits" {
+                    active.wallet.earn(*value);
+                    format!("+{value} CR")
+                } else if let Some(skill) = key.strip_prefix("xp:") {
+                    active.skills.add_xp(skill, *value);
+                    format!("+{value} XP {}", skill.to_uppercase())
+                } else {
+                    format!("UNKNOWN STAT {key}")
+                }
+            }
+            Admin::SetStock { x, z, good, amount } => {
+                let now = active.journal.tick();
+                let site = active
+                    .world
+                    .generator()
+                    .towns_near((*x, *z), vx_world::town::REACH)
+                    .into_iter()
+                    .next();
+                match (site, economy::good_index(good)) {
+                    (Some(site), Some(index)) => {
+                        let market = active.economy.market_mut(&site, now);
+                        let held = market.stock(index);
+                        if held < *amount as f32 {
+                            market.deposit(index, *amount as f32 - held);
+                        } else {
+                            market.withdraw(index, held - *amount as f32);
+                        }
+                        format!("{} STOCK -> {amount}", shop::display_name(good))
+                    }
+                    _ => "NO SUCH TOWN OR GOOD".into(),
+                }
+            }
+            Admin::SetTuning { key, value } => {
+                if active.movement.tuning.set(key, *value) {
+                    format!("{} = {value:.2}", tuning::label(key))
+                } else {
+                    format!("UNKNOWN TUNABLE {key}")
+                }
+            }
+        };
+        active.gold.feedback = Some(line);
+    }
+
+    /// Advance the simulation by whole journal ticks, on demand.
+    ///
+    /// Bounded per press: this is the economy fast-forward exposed as a
+    /// button, and an unbounded burst would freeze the frame for as long as
+    /// the operator's ambition.
+    #[cfg(feature = "gold")]
+    fn gold_advance(active: &mut Active, ticks: u32) {
+        active.journal.record(Command::Advance { ticks });
+        active.mining.advance(&mut active.world, &active.events, ticks);
+        let command = active.last_move.unwrap_or_default();
+        for _ in 0..ticks {
+            movement::advance_journal_tick(
+                &mut active.movement,
+                &mut active.player,
+                &active.world,
+                command,
+            );
+        }
+        active.gold.feedback = Some(format!("ADVANCED {ticks} TICKS"));
+    }
+
+    /// What the panel reads. References only; computed fresh per use.
+    #[cfg(feature = "gold")]
+    fn gold_telemetry<'a>(active: &'a Active) -> gold::Telemetry<'a> {
+        let column = (
+            active.player.position.x as i32,
+            active.player.position.z as i32,
+        );
+        let town = active
+            .world
+            .generator()
+            .towns_near(column, vx_world::town::REACH)
+            .into_iter()
+            .next();
+        let stocks = match &town {
+            Some(site) => {
+                // A read, so the catch-up write is fine: the books were going
+                // to be caught up by the next reader anyway.
+                let mut books = active.economy.clone();
+                let market = books.market(site, active.journal.tick()).clone();
+                [
+                    market.stock(0),
+                    market.stock(1),
+                    market.stock(2),
+                    market.stock(3),
+                ]
+            }
+            None => [0.0; 4],
+        };
+        gold::Telemetry {
+            tick: active.journal.tick(),
+            position: active.player.position,
+            stance: active.movement.stance.label(),
+            stamina: active.movement.stamina,
+            credits: active.wallet.credits(),
+            bounty: active.permits.borrow().bounty,
+            drones: active.garage.owned(garage::DRONE),
+            fliers: active.garage.owned(garage::FLIER),
+            base_total: active
+                .mining
+                .fleet
+                .base
+                .as_ref()
+                .map(|base| base.stockpile.total())
+                .unwrap_or(0),
+            town_name: town.as_ref().map(|site| site.name.to_string()),
+            town_centre: town.as_ref().map(|site| site.centre),
+            stocks,
+            tuning: &active.movement.tuning,
+            world_hash: active.gold_hash,
+        }
+    }
+
+    /// Rebuild and upload the console while it is open.
+    #[cfg(feature = "gold")]
+    fn refresh_gold(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.gold.open {
+            return;
+        }
+        let pixels = {
+            let telemetry = Self::gold_telemetry(active);
+            gold::render_gold(&active.gold, &telemetry)
+        };
+        let (width, height) = active.renderer.size();
+        let panel_width = gold::GOLD_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = gold::GOLD_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            GOLD_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (gold::GOLD_WIDTH, gold::GOLD_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     /// Turn a refused edit into a line for the player, and a mark against them
     /// if anybody was looking.
     ///
@@ -3436,6 +3859,10 @@ impl ApplicationHandler for App {
             permit_panel: permits::PermitPanel::default(),
             watched: false,
             picking: false,
+            #[cfg(feature = "gold")]
+            gold: gold::Gold::default(),
+            #[cfg(feature = "gold")]
+            gold_hash: None,
             offers: Vec::new(),
             intro: {
                 let mut panel = intro::Intro::new();
