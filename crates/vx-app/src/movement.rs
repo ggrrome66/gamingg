@@ -121,6 +121,7 @@ impl MoveCommand {
         self.yaw_q as f32 / YAW_STEPS as f32 * std::f32::consts::TAU
     }
 
+
     /// Level movement direction in world space, unit length or zero.
     pub fn wish_dir(&self) -> Vec3 {
         let forward = f32::from(self.held(FWD)) - f32::from(self.held(BACK));
@@ -164,6 +165,19 @@ fn yaw_vector(yaw_q: i16) -> Vec2 {
             .collect()
     });
     table[(yaw_q as i32).rem_euclid(YAW_STEPS) as usize]
+}
+
+/// The full look direction a quantised aim describes, matching
+/// `Camera::forward`: yaw 0 looks down -Z, positive pitch looks up.
+///
+/// Lives here rather than in the arsenal because it is the inverse of
+/// [`MoveCommand::looking`]'s quantisation, and live fire and journal replay
+/// must dequantise identically or a replayed shot flies a different line.
+pub fn aim_vector(yaw_q: i16, pitch_q: i16) -> Vec3 {
+    let yaw = yaw_q as f32 / YAW_STEPS as f32 * std::f32::consts::TAU;
+    let pitch = pitch_q as f32 / (PITCH_STEPS / 2) as f32 * std::f32::consts::FRAC_PI_2;
+    let (level, rise) = (pitch.cos(), pitch.sin());
+    Vec3::new(level * yaw.sin(), rise, -(level * yaw.cos()))
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +474,10 @@ pub struct Movement {
     /// chosen before the tick's integration, and an impulse applied before
     /// friction runs is an impulse partly thrown away.
     entry_impulse: Option<f32>,
+    /// A shove from outside — the launcher's recoil. Same one-shot shape as
+    /// `entry_impulse` and consumed at the same slot in the tick, for the same
+    /// reason: applied before friction runs, it is partly thrown away.
+    recoil: Option<Vec3>,
 }
 
 impl Default for Movement {
@@ -471,6 +489,7 @@ impl Default for Movement {
             buffered_jump: 0,
             was_airborne: true,
             entry_impulse: None,
+            recoil: None,
             tuning: crate::tuning::Tuning::default(),
         }
     }
@@ -489,6 +508,12 @@ impl Movement {
     fn spend(&mut self, amount: f32) {
         self.stamina = (self.stamina - amount).max(0.0);
         self.rested = 0.0;
+    }
+
+    /// Queue a shove for the next tick's integration. Firing calls this on
+    /// both sides of the oracle — live and replay — so the stagger replays.
+    pub fn kick(&mut self, shove: Vec3) {
+        self.recoil = Some(self.recoil.map_or(shove, |held| held + shove));
     }
 
     /// Advance one movement tick.
@@ -534,6 +559,9 @@ impl Movement {
 
         self.jump(body, grounded);
         self.launch_slide(body, wish);
+        if let Some(shove) = self.recoil.take() {
+            body.velocity += shove;
+        }
         self.drain(mass, dt);
 
         // After the jump, not before: a tick that leaves the ground must be

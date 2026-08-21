@@ -87,7 +87,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 10b | `b12b1e2` | Player movement on a fixed clock: stance, sprint, slide, vault, mantle, stamina, carried mass |
 | 10c | `67aa3a6` | Pregenerated spawn, streaming off the frame thread, the player's house, mail-order, the welcome panel |
 | 11 | `289a143` | Permits: ranked claims, three grades of lockbox, witnesses and sneaking, bounty, breaching and lock-picking |
-| 12 | _this_ | The gold panel: journaled admin orders, live tuning, the operator's console compiled out of shipped builds |
+| 12 | `bbe6756` | The gold panel: journaled admin orders, live tuning, the operator's console compiled out of shipped builds |
+| 13 | _this_ | The arsenal: the slug launcher, synthesized sound, recoil and shake, town warnings, witnessed property bounty, panic, caravan interception |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -469,65 +470,108 @@ tick-N is sitting right there when someone builds the button).
 
 ---
 
-## Planned — Stage 13: the arsenal, and what robbing costs
+## Shipped — Stage 13: the arsenal, and what robbing costs
 
-Caravans can be intercepted. Doing it makes you wanted.
+The brief was three words — heavy, loud, scary — and a fourth that goes
+without saying in this repository: *replayable*.
 
-### The weapon system
+**Heavy.** The launcher rides the same carried-mass system as ore: owning it
+folds a fixed heft into the movement load byte *before* the command is
+journalled, so the weight slows the same sprint on both sides of the oracle
+without the journal ever learning what a weapon is. Firing queues a recoil
+impulse through the exact one-shot slot the slide-entry kick uses — applied
+before friction runs, or the stagger would be partly thrown away — and the
+aim physically climbs, because the pitch is real input state and rides the
+next `Move` command for free.
 
-Three decisions hold the whole arsenal up, and each one is a pattern this engine
-already uses somewhere else.
+**Loud.** The repository grew its first audio: `rodio`, playback features
+only, because every sound is *synthesized* — a sub-bass sweep under a hard
+noise burst, soft-clipped so it reads overdriven rather than polite. There
+are no audio assets and there will be none for the base game: nothing to
+license, nothing to load, nothing for a mod to be missing. A machine with no
+output device gets a silent player and the game does not care. The camera
+shakes on a decaying trauma curve, applied to the *pivot* only — in third
+person the orbit's wall raycast runs from the shaken anchor, so the kick can
+never punch the camera into rock — and the whole felt layer is tunable from
+the gold panel (`shake_power`, `slug_kick`, and friends joined the tuning
+table, which is exactly why the panel shipped first).
 
-**Weapons are name-keyed data, not code.** `engine:slug_launcher` with fire
-rate, muzzle speed, damage, spread, ammunition kind and recoil as fields — the
-same shape blocks, skills, upgrade lines and machines all have. Adding a weapon
-is a row and a tile, which is the only way an arsenal stays affordable.
+**Scary.** Villagers understand the muzzle. Pointing it at somebody who can
+see you — same fresh line-of-sight cast as witnessing — panics them, and each
+of them settles it with their own deterministic coin (the same salted hash
+streams the wander runs on): *de-escalate*, running home to hide, or
+*escalate*, running for the security office. An alarm that reaches the office
+is a signed report and costs bounty with no further witnesses needed. Blasts
+and impacts panic close bystanders outright — hearing needs no line of sight
+— and turn every head in earshot.
 
-**A projectile is a sum, not a simulation.** Fired from a point at a tick with a
-velocity, so where it is at any later tick is arithmetic — exactly the trick
-trade caravans use. Nothing is stepped, a hundred rounds in the air cost
-nothing, and it replays exactly. Hit detection is the existing `raycast_solid`
-over the segment a round swept since the last frame, so the physics needs
-nothing new.
+**The projectile steps on the journal clock.** The design note said "a sum,
+not a simulation"; what shipped is stepped — one integration per journal
+tick, fixed step, gravity sag and all — because slugs break blocks, blocks
+are in the world hash, and per-tick segment sweeps through `raycast_solid`
+were needed for hit detection anyway. Eight visible steps a second is also
+what makes *leading* a caravan a skill. The `Fire` order (VERSION 6 → 7)
+records the quantised aim **and the muzzle position** — the one deliberate
+exception to "intent, not outcome": live movement runs on a real-time 64 Hz
+clock and journal ticks on the drones' 8 Hz clock, so a replay-derived muzzle
+would stand a few subticks from where the trigger was actually pulled, and a
+hash must not depend on which clock you asked. `the firefight replays
+crater-for-crater` is a test, not a hope.
 
-**Ammunition is a trade good**, which means the economy already knows how to
-make it scarce. A firefight becomes a supply problem, and that is the game this
-wants to be.
+**A slug does not ask permission.** Ballistic damage bypasses the cancellable
+break event (the gate exists to refuse an edit; a fired slug is past
+refusing) and the bill arrives by consequence instead: the first harmless
+shot inside a town's line gets one warning, once, per town, and property
+broken on somebody's claim costs `damage × (1 + 0.5 × (witnesses − 1))` —
+seen is the rule for gunfire exactly as for lockpicks. What a slug can break
+is capped between sheet metal and mast steel: buildings are vulnerable, ore
+bodies, masts and every grade of lockbox are not, and at shop prices per
+round it is the worst drill money can buy.
 
-### The arsenal to grow into
-
-Named for what they do rather than for anybody's trademark, per the licensing
-constraints above.
-
-| Weapon | Role | Rests on |
-|---|---|---|
-| Slug launcher | The baseline: one kinetic round, slow, punchy | projectiles, damage |
-| Scattergun | Close work, wide spread, falls off hard | the spread field |
-| Mining charge | Thrown, timed, breaks blocks | `break_block`, an area query |
-| Beam cutter | Continuous, no travel time, drains power | a hitscan path, power draw |
-| Rail lance | Long charge, pierces several targets | charge-up state |
-| EMP burst | Drops a drone *without* wrecking its cargo — the thief's weapon | machine state rather than damage |
-| Guided missile | Slow, tracking, expensive | steering, and a reason for countermeasures |
-
-13 ships the slug launcher and the EMP burst. The rest are rows.
-
-### Interception and bounty
-
-A caravan is already drawn as a real machine when one passes within sight, and
-its position is already a pure function of the clock — so shooting one needs no
-new state. Knocked down, its load falls to you.
-
-The town that sent it remembers. Bounty is **economic first**: its market pays
-you less, then refuses to trade, and the shortage you caused drives its own
-prices up. Then its mast starts **posting a contract on your head** through the
-board that already exists — groundwork that bites properly once there is
-somebody to take it.
+**Interception.** A slug sweep is tested against every caravan's hull —
+`position_at` is pure in the tick, so the test is arithmetic. A downed load
+falls where it was hit, waits as a crash site, and is salvaged onto the base
+pile by walking up to it. The network bills half the cargo against your name
+whether or not anyone watched: the manifest is its own witness, the one
+crime in the game that needs no eyes. The destination town simply never
+receives the goods, and the shortage working through its price curve is the
+town noticing. Shooting down your own delivery is legal, free, and
+its own punishment.
 
 ### What is deliberately not in 13
 
-Player health, hostile escorts, and death. Nothing shoots back yet. That keeps
-13 to a weapon system and a consequence rather than a whole combat model, and
-the data-driven shape means hostiles slot in later without a rewrite.
+Player health, hostile escorts, death, and the rest of the weapon table
+(scattergun, mining charge, beam cutter, rail lance, EMP burst, guided
+missile — named for what they do, never for anybody's trademark). Ammunition
+as a *trade good* with its own market line also waits; the counter sells
+slugs for credits meanwhile. Nothing shoots back yet — that is stage 17's
+health model — and the bounty contracts the mast should post wait for
+somebody to take them.
+
+---
+
+## Planned — star forts: walls with the receipts to justify them
+
+A worldgen round, recorded from the design note whole. Towns grow bastioned
+traces — the star-fort geometry that exists because cannon exist: low, thick,
+angled walls with no dead ground, every face covered by another face's guns.
+
+- **The trace is a polygon, the wall is a signed distance.** A town's tier
+  picks a trace (none / palisade / four-point star / six-point with ravelins),
+  authored as a loop of points around the footprint; the wall, walk, parapet
+  and ditch are bands of signed distance from that loop, so generation stays
+  pure in (seed, position) like every terrain feature.
+- **Tiered like everything else.** Hamlets stay open; the county seat earns
+  the full six-point trace with ravelins covering its gates. Gates sit where
+  the roads already run, and a gate is a claim with a lockbox like any other
+  door — the permits system needs nothing new.
+- **Some forts are ruins.** A deterministic ruin pass drops wall segments so
+  breaches exist to find, because a perfect wall is a worse story than a
+  broken one.
+
+Sits after the fuel loop and before hostiles: the walls should exist — and
+have gaps — before anything arrives that makes them matter, and the arsenal
+(stage 13) is what makes a town honestly want them.
 
 ---
 
@@ -698,19 +742,59 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
+Renumbered after permits, the gold panel and the arsenal took 11–13: the
+plans kept their order, the stages moved down to make room.
+
 | Stage | What | Why here |
 |---|---|---|
-| 11 | Caves | The first true 3D carve in a height-field world, and the thing that makes hand-mining pleasant — so it serves the opening loop 10a just built, not only the late game |
-| 12 | Bunkers, built and lootable | Rests on caves paying for the 3D carve. Sited on the same lattice as towns, shelled with a very high `hardness`, laid out by the jigsaw generator deferred since stage 8, and looted — a *source* to match 10a's sink |
-| 13 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
-| 14 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
-| 15 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
-| 16 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
-| 17 | Hostiles and health | The half of combat stage 13 leaves out. `Perception` (stage 7) is already the shape a hostile needs, and stage 13's bounty contracts are already something for one to take |
-| 18 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 17 brings |
-| 19 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to |
-| 20 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
-| 21 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 14 | Caves | The first true 3D carve in a height-field world, and the thing that makes hand-mining pleasant — so it serves the opening loop 10a just built, not only the late game |
+| 15 | Bunkers, built and lootable | Rests on caves paying for the 3D carve. Sited on the same lattice as towns, shelled with a very high `hardness`, laid out by the jigsaw generator deferred since stage 8, and looted — a *source* to match 10a's sink |
+| 16 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
+| 17 | Star forts | Bastioned traces per town tier, gates on the roads, deterministic ruins. After the fuel loop and before hostiles: walls should exist — and have gaps — before anything arrives that makes them matter, and the arsenal is what makes a town want them |
+| 18 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
+| 19 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
+| 20 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
+| 21 | Hostiles and health | The half of combat stage 13 leaves out. `Perception` (stage 7) is already the shape a hostile needs, and stage 13's bounty contracts are already something for one to take |
+| 22 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 21 brings |
+| 23 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to |
+| 24 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
+| 25 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+
+## The feature map
+
+The whole game at a glance, as of stage 13.
+
+**Shipped:** core scaffold; wgpu renderer + headless capture; block editing
+through cancellable events; AABB physics; region saves (name-keyed, cached);
+spline terrain; parallel meshing; frustum culling; ore geology with honest
+outcrops; drone swarm and three mining methods (adit / decline / pit); flying
+drone, sector scanning and the ferry loop; fog-of-war minimap; composite
+rigs; handheld drill; RS-curve skills (mining / prospecting / logistics /
+security); bitmap font + HUD; starting village, villagers and perception;
+day/night; container towns on a lattice; beacon network and contracts; third
+person and drone piloting; world hashes and the command journal (the replay
+oracle); seed tree; body ids; packed quads; town economies with moving
+prices, inter-town freight and player trade runs; machines cost credits;
+trade and handheld maps with bearings; tick-based player movement (stance /
+sprint / slide / vault / mantle / stamina / carried mass); pregenerated
+pinned spawn, background chunk generation, region cache; the player's house,
+chest, mailbox and mail-order; the welcome panel with its self-updating
+changelog; permits (ranked claims, three lock grades, witnesses and sneaking
+by stance eye height, bounty, breaching, lock-picking); the gold panel
+(journaled admin orders, live tuning, compiled out of shipped builds); the
+arsenal (slug launcher, synthesized audio, recoil and screenshake, town
+warnings, witnessed property bounty, panic with flee-or-alarm, caravan
+interception and salvage); a Steam Deck dist build every round.
+
+**Planned, in arc order:** caves; bunkers built-then-occupied; fuel loop;
+star forts; terminal; crafting; wear and breakdowns; hostiles and health;
+the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
+B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket
+arcade.
+
+**Outstanding engineering:** floating-origin rebase; journal-shrunk saves;
+real min-cost flow for freight; ammunition as a trade good; the rest of the
+weapon table; gamepad input for the gold panel and the game.
 
 ## Known rough edges
 

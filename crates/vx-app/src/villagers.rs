@@ -29,6 +29,42 @@ pub const REARM_RANGE: f32 = 5.0;
 /// Stroll speed, metres per second.
 const WALK_SPEED: f32 = 1.2;
 
+/// Panic speed, metres per second. Nobody strolls away from a muzzle.
+const RUN_SPEED: f32 = 3.4;
+
+/// Metres within which having a launcher pointed your way registers.
+pub const MENACE_RANGE: f32 = 18.0;
+
+/// How tightly the muzzle must line up on someone to read as "at them":
+/// cosine of the aim cone's half angle (about ten degrees).
+const MENACE_COS: f32 = 0.985;
+
+/// Metres within which a muzzle blast or an impact panics bystanders
+/// outright, seen or heard.
+const STARTLE_RANGE: f32 = 12.0;
+
+/// Metres within which a blast at least snaps heads around.
+const ALARM_RANGE: f32 = 25.0;
+
+/// Seconds a panic lasts before somebody comes back out.
+const PANIC_SECONDS: f32 = 20.0;
+
+/// How close to the office door a runner must get to have reported you.
+const REPORT_REACH: f32 = 2.5;
+
+/// What a frightened villager does about it.
+///
+/// Chosen deterministically per villager and stroll leg — the same salted
+/// hash streams the wander runs on — so the same person under the same gun
+/// makes the same choice every time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Panic {
+    /// De-escalate: run home and hide.
+    Fleeing,
+    /// Escalate: run for the security office and report it.
+    Alarming,
+}
+
 /// A wander rectangle on the plaza: x0, z0, x1, z1 (inclusive-ish bounds in
 /// block coordinates, authored clear of every building footprint).
 type Patch = (f32, f32, f32, f32);
@@ -150,6 +186,10 @@ struct Villager {
     perception: Perception,
     /// Seconds left standing and watching rather than strolling.
     attention: f32,
+    /// Whether they are running, and where to.
+    panic: Option<Panic>,
+    /// Seconds of panic left.
+    panic_timer: f32,
 }
 
 impl Villager {
@@ -177,6 +217,8 @@ impl Villager {
             greeted: false,
             perception: Perception::default(),
             attention: 0.0,
+            panic: None,
+            panic_timer: 0.0,
         }
     }
     /// A world position from a route node, which is authored town-relative.
@@ -254,6 +296,60 @@ impl Villager {
             Phase::Home => {}
         }
     }
+
+    /// One frame of running scared. Returns 1 on the frame this villager
+    /// reaches the office and reports the player, else 0.
+    fn run_for_it(&mut self, dt: f32, site: &TownSite, office: Option<Vec3>) -> u32 {
+        self.panic_timer = (self.panic_timer - dt).max(0.0);
+        if self.panic_timer <= 0.0 {
+            // Composure returns; the ordinary state machine picks them back
+            // up wherever the run left them.
+            self.panic = None;
+            return 0;
+        }
+        let home = self.route_node(self.route.len() - 1, site);
+        let (target, reach) = match (self.panic, office) {
+            // Escalate — unless the town has no office to escalate to.
+            (Some(Panic::Alarming), Some(door)) => (door, REPORT_REACH),
+            _ => (home, 0.0),
+        };
+        let to = target - self.position;
+        let distance = to.length();
+        let step = RUN_SPEED * dt;
+        if let Some(yaw) = rig::yaw_towards(to.x, to.z) {
+            self.yaw = yaw;
+        }
+        if distance <= reach.max(step) {
+            if matches!(self.panic, Some(Panic::Alarming)) && office.is_some() {
+                // Reported. Now get out of the way like everybody else.
+                self.panic = Some(Panic::Fleeing);
+                return 1;
+            }
+            // Indoors, and staying there until the panic burns off.
+            self.position = target;
+            self.phase = Phase::Home;
+        } else {
+            self.position += to / distance * step;
+        }
+        0
+    }
+
+    /// Start panicking, choosing fight-adjacent or flight by the villager's
+    /// own deterministic coin.
+    fn take_fright(&mut self, index: usize) {
+        if self.panic.is_some() {
+            self.panic_timer = PANIC_SECONDS;
+            return;
+        }
+        let escalates = hash01(index, self.leg, 0xa4) < 0.5;
+        self.panic = Some(if escalates {
+            Panic::Alarming
+        } else {
+            Panic::Fleeing
+        });
+        self.panic_timer = PANIC_SECONDS;
+        self.attention = 0.0;
+    }
 }
 
 /// The `leg`-th waypoint inside a patch, in world coordinates.
@@ -277,6 +373,11 @@ pub struct Villagers {
     /// Counts `update` calls, not wall time — which is what keeps the
     /// round-robin line-of-sight schedule deterministic.
     tick: u64,
+    /// Where an alarmed runner heads: the security office, if the town has
+    /// one.
+    office: Option<Vec3>,
+    /// Alarms that reached the office since the last collection.
+    reports: u32,
 }
 
 impl Default for Villagers {
@@ -293,9 +394,21 @@ impl Villagers {
 
     /// The people of one town on the lattice.
     pub fn for_site(site: &TownSite) -> Self {
+        let office = town::plan::buildings(site)
+            .into_iter()
+            .find(|building| building.role == town::plan::Role::Security)
+            .map(|building| {
+                Vec3::new(
+                    (building.min.x + building.max.x) as f32 * 0.5,
+                    walk_height(site),
+                    (building.min.z + building.max.z) as f32 * 0.5,
+                )
+            });
         Villagers {
             site: *site,
             tick: 0,
+            office,
+            reports: 0,
             folk: ROSTER
                 .iter()
                 .enumerate()
@@ -321,13 +434,27 @@ impl Villagers {
     ///
     /// The stroll runs first and is untouched by what anyone sees, so the
     /// deterministic wander stays deterministic; awareness only decides
-    /// whether a villager *stops* and which way they face.
+    /// whether a villager *stops* and which way they face. Panic is the one
+    /// deliberate exception — a muzzle changes where people go — and it is
+    /// still deterministic per villager: the flee-or-alarm coin comes off the
+    /// same salted hash streams the wander itself runs on, and nothing about
+    /// it feeds the replay oracle.
     pub fn update(&mut self, dt: f32, time: TimeOfDay, around: &Surroundings) {
         let site = self.site;
         let daylight = time.is_daylight();
 
+        let office = self.office;
+        let mut fresh_reports = 0;
         for (index, villager) in self.folk.iter_mut().enumerate() {
             villager.previous = villager.position;
+
+            // Fear overrides the clock. A running villager neither strolls
+            // nor keeps town hours until the panic burns off.
+            if villager.panic.is_some() {
+                fresh_reports += Villager::run_for_it(villager, dt, &site, office);
+                villager.perception.forget(dt);
+                continue;
+            }
 
             // The hour decides where they are heading; the walking below is
             // the same walking as ever.
@@ -363,6 +490,7 @@ impl Villagers {
             villager.perception.forget(dt);
         }
 
+        self.reports += fresh_reports;
         self.observe(around);
         self.react();
         self.tick = self.tick.wrapping_add(1);
@@ -450,6 +578,85 @@ impl Villagers {
             .count()
     }
 
+    /// A launcher is being pointed. Everyone under the muzzle who can see
+    /// the player panics; returns how many just did — each one is a menacing
+    /// charge for the caller to bill.
+    ///
+    /// Live-only, like [`Villagers::witnesses`]: fear is a reaction to the
+    /// player, and the replay oracle only ever re-checks the ground.
+    pub fn menaced(&mut self, muzzle: Vec3, aim: Vec3, around: &Surroundings) -> usize {
+        let Some(player) = around.player else {
+            return 0;
+        };
+        let registry = around.world.map(|world| world.registry());
+        let eye_of_player = player + Vec3::Y * around.eye();
+        let mut frightened = 0;
+        for (index, villager) in self.folk.iter_mut().enumerate() {
+            if villager.panic.is_some() {
+                continue;
+            }
+            let chest = villager.position + Vec3::Y;
+            let to = chest - muzzle;
+            let distance = to.length();
+            if !(1.0e-3..=MENACE_RANGE).contains(&distance) {
+                continue;
+            }
+            if aim.dot(to / distance) < MENACE_COS {
+                continue;
+            }
+            // You cannot be menaced by a gun you cannot see: same occlusion
+            // rule as witnessing, cast fresh at the moment it matters.
+            let eye = villager.position + Vec3::Y * TargetKind::Villager.eye_height();
+            let seen = match (around.world, registry) {
+                (Some(world), Some(registry)) => vx_world::sight::sees(
+                    world,
+                    registry,
+                    eye,
+                    eye_of_player,
+                    awareness::SIGHT_RANGE,
+                ),
+                _ => true,
+            };
+            if !seen {
+                continue;
+            }
+            villager.take_fright(index);
+            frightened += 1;
+        }
+        frightened
+    }
+
+    /// A blast or an impact happened at `at`. Close bystanders panic whether
+    /// or not they saw it — hearing needs no line of sight — and everybody
+    /// else in earshot at least turns to look.
+    pub fn startled(&mut self, at: Vec3) {
+        for (index, villager) in self.folk.iter_mut().enumerate() {
+            let distance = (at - villager.position).length();
+            if distance <= STARTLE_RANGE {
+                villager.take_fright(index);
+            } else if distance <= ALARM_RANGE {
+                if let Some(yaw) = rig::yaw_towards(at.x - villager.position.x, at.z - villager.position.z) {
+                    villager.yaw = yaw;
+                }
+                villager.attention = villager.attention.max(1.5);
+            }
+        }
+    }
+
+    /// Alarms that reached the security office since last asked. Each one is
+    /// the office's own witness statement.
+    pub fn take_reports(&mut self) -> u32 {
+        std::mem::take(&mut self.reports)
+    }
+
+    /// How many townsfolk are running right now, for the HUD and the tests.
+    pub fn panicking(&self) -> usize {
+        self.folk
+            .iter()
+            .filter(|villager| villager.panic.is_some())
+            .count()
+    }
+
     /// Turn what each villager can see into what they do about it.
     fn react(&mut self) {
         for villager in &mut self.folk {
@@ -482,6 +689,10 @@ impl Villagers {
     pub fn greeting_for(&mut self) -> Option<&'static str> {
         let mut spoken = None;
         for villager in &mut self.folk {
+            // Nobody running for their life stops to say good morning.
+            if villager.panic.is_some() {
+                continue;
+            }
             let seen = villager.perception.sees_player();
             let distance = seen.map(|player| player.distance);
             match distance {
@@ -971,5 +1182,106 @@ mod witness_tests {
         let mut town = Villagers::new();
         town.folk.clear();
         assert_eq!(seen_by(&town, &world, Vec3::new(0.0, 41.0, 0.0), 1.62), 0);
+    }
+
+    #[test]
+    fn a_muzzle_in_the_face_causes_panic_and_it_burns_off() {
+        let mut town = Villagers::new();
+        // Aim square at villager 0's chest from a few metres out, with the
+        // others parked far away.
+        town.folk[1].position.x += 1000.0;
+        town.folk[2].position.x -= 1000.0;
+        let victim = town.folk[0].position;
+        let muzzle = victim + Vec3::new(-5.0, 1.62, 0.0);
+        let aim = (victim + Vec3::Y - muzzle).normalize();
+        let around = Surroundings {
+            world: None,
+            player: Some(muzzle - Vec3::Y * awareness::PLAYER_EYE),
+            player_eye: awareness::PLAYER_EYE,
+            machines: &[],
+        };
+        assert_eq!(town.menaced(muzzle, aim, &around), 1, "nobody panicked");
+        assert_eq!(town.menaced(muzzle, aim, &around), 0, "panicked twice");
+        assert_eq!(town.panicking(), 1);
+
+        // Fear has a half-life: after the timer, composure returns.
+        for _ in 0..((PANIC_SECONDS / 0.25) as usize + 4) {
+            town.update(0.25, TimeOfDay::NOON, &Surroundings::empty());
+        }
+        assert_eq!(town.panicking(), 0, "panic never burned off");
+    }
+
+    #[test]
+    fn aiming_wide_or_from_behind_a_wall_scares_nobody() {
+        let world = walled_world();
+        let mut town = Villagers::new();
+        town.folk[1].position.x += 1000.0;
+        town.folk[2].position.x -= 1000.0;
+        let victim = town.folk[0].position;
+        let muzzle = victim + Vec3::new(-5.0, 1.62, 0.0);
+        let wide = Vec3::new(0.0, 0.0, 1.0);
+        let around = Surroundings {
+            world: None,
+            player: Some(muzzle - Vec3::Y * awareness::PLAYER_EYE),
+            player_eye: awareness::PLAYER_EYE,
+            machines: &[],
+        };
+        assert_eq!(town.menaced(muzzle, wide, &around), 0, "a wide aim read as a threat");
+
+        // Real terrain with a wall dropped between the two: villager 0
+        // relocated behind it, shooter aiming dead at them — but the muzzle
+        // cannot be seen through stone.
+        let mut world = world;
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        for y in 41..45 {
+            for z in -6..6 {
+                world.set_block(BlockPos::new(3, y, z), stone);
+            }
+        }
+        town.folk[0].position = Vec3::new(0.0, 41.0, 0.0);
+        let shooter = Vec3::new(6.0, 41.0, 0.0);
+        let hidden = Surroundings {
+            world: Some(&world),
+            player: Some(shooter),
+            player_eye: 0.35,
+            machines: &[],
+        };
+        let muzzle = shooter + Vec3::Y * 0.35;
+        let target = town.folk[0].position + Vec3::Y - muzzle;
+        assert_eq!(
+            town.menaced(muzzle, target.normalize(), &hidden),
+            0,
+            "a muzzle nobody can see still frightened somebody"
+        );
+    }
+
+    #[test]
+    fn an_alarmed_villager_reports_at_the_office_then_goes_home() {
+        let mut town = Villagers::new();
+        assert!(town.office.is_some(), "the home town lost its security office");
+        town.folk[0].panic = Some(Panic::Alarming);
+        town.folk[0].panic_timer = PANIC_SECONDS;
+
+        let mut reported = 0;
+        for _ in 0..2000 {
+            town.update(1.0 / 60.0, TimeOfDay::NOON, &Surroundings::empty());
+            reported += town.take_reports();
+            if reported > 0 {
+                break;
+            }
+        }
+        assert_eq!(reported, 1, "the runner never reached the office");
+        // Having reported, they de-escalate into an ordinary flight home.
+        assert_eq!(town.folk[0].panic, Some(Panic::Fleeing));
+    }
+
+    #[test]
+    fn a_blast_nearby_panics_the_bystander() {
+        let mut town = Villagers::new();
+        town.folk[1].position.x += 1000.0;
+        town.folk[2].position.x -= 1000.0;
+        let at = town.folk[0].position + Vec3::new(3.0, 0.0, 0.0);
+        town.startled(at);
+        assert_eq!(town.panicking(), 1, "a blast three metres away went unremarked");
     }
 }

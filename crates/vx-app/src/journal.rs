@@ -62,7 +62,9 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // the moment an admin action mutated state outside this log, the oracle would
 // be blind to it and every replay of that session would report a divergence
 // that is nobody's fault.
-const VERSION: u32 = 6;
+//
+// Seven added `Fire`. Shots break blocks, so a firefight is part of the hash.
+const VERSION: u32 = 7;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -117,6 +119,20 @@ pub enum Command {
     /// else on purpose: a journal with cheats in it still replays to a hash,
     /// which is what makes the panel a scenario editor rather than a taint.
     Admin(Admin),
+    /// The launcher fired: the muzzle, and the quantised aim.
+    ///
+    /// The muzzle position is recorded — the one deliberate exception to
+    /// "intent, not outcome". Live movement runs on a real-time 64 Hz clock
+    /// and journal ticks on the drones' 8 Hz clock, so the body a replay
+    /// rebuilds stands a few subticks from where the live body stood when the
+    /// trigger was pulled. A shot breaks blocks, blocks are in the hash, and
+    /// a hash must not depend on which clock you asked. The floats cross the
+    /// wire as raw bits, like `SetTuning`.
+    Fire {
+        muzzle: [f32; 3],
+        yaw_q: i16,
+        pitch_q: i16,
+    },
 }
 
 /// What the gold panel may order.
@@ -296,6 +312,8 @@ pub struct Rebuilt {
     pub movement: Movement,
     /// The command in force, carried across every `Advance` that follows it.
     held: MoveCommand,
+    /// Slugs in the air, stepped one integration per `Advance` tick.
+    pub shots: Vec<crate::arsenal::Shot>,
 }
 
 /// Replay a log over a world.
@@ -312,6 +330,7 @@ impl Default for Rebuilt {
             player: PlayerBody::default(),
             movement: Movement::default(),
             held: MoveCommand::default(),
+            shots: Vec::new(),
         }
     }
 }
@@ -419,6 +438,19 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
             // recorded on each dispatch, and the books were never replayed.
             Admin::SpawnMachine { .. } | Admin::SetStock { .. } => {}
         },
+        Command::Fire {
+            muzzle,
+            yaw_q,
+            pitch_q,
+        } => {
+            crate::arsenal::launch(
+                &mut state.shots,
+                &mut state.movement,
+                glam::Vec3::from(*muzzle),
+                *yaw_q,
+                *pitch_q,
+            );
+        }
         Command::Advance { ticks } => {
             mining.advance(world, events, *ticks);
             // The held command is re-issued for every tick it covers, at
@@ -431,6 +463,14 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                     &mut state.player,
                     world,
                     state.held,
+                );
+                // Shots step on the same clock. The sweeps are dropped: the
+                // craters are the part the hash checks, the bills were the
+                // live game's business.
+                let _ = crate::arsenal::advance_shots(
+                    &mut state.shots,
+                    world,
+                    &state.movement.tuning,
                 );
             }
         }
@@ -514,6 +554,18 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
                 file.write_all(&value.to_bits().to_le_bytes())?;
             }
         },
+        Command::Fire {
+            muzzle,
+            yaw_q,
+            pitch_q,
+        } => {
+            file.write_all(&[12u8])?;
+            for part in muzzle {
+                file.write_all(&part.to_bits().to_le_bytes())?;
+            }
+            file.write_all(&yaw_q.to_le_bytes())?;
+            file.write_all(&pitch_q.to_le_bytes())?;
+        }
     }
     Ok(())
 }
@@ -643,6 +695,21 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
             key: read_name(file)?,
             value: f32::from_bits(read_u32(file)?),
         }),
+        12 => {
+            let mut muzzle = [0f32; 3];
+            for part in &mut muzzle {
+                *part = f32::from_bits(read_u32(file)?);
+            }
+            let mut yaw = [0u8; 2];
+            file.read_exact(&mut yaw)?;
+            let mut pitch = [0u8; 2];
+            file.read_exact(&mut pitch)?;
+            Command::Fire {
+                muzzle,
+                yaw_q: i16::from_le_bytes(yaw),
+                pitch_q: i16::from_le_bytes(pitch),
+            }
+        }
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
     Ok(Entry { tick, command })
@@ -1280,6 +1347,117 @@ mod admin_tests {
             rebuilt.player.position,
             glam::Vec3::new(100.5, 80.0, -39.5),
             "the landing spot moved"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fire_tests {
+    use super::*;
+    use vx_core::ChunkPos;
+    use vx_world::region_hash;
+
+    fn world() -> World {
+        let mut world = World::new(2024);
+        world.load_around(ChunkPos::new(0, 0), 4);
+        world
+    }
+
+    /// A `Fire` survives the wire bit-exactly, muzzle floats included.
+    #[test]
+    fn a_shot_survives_the_wire() {
+        let directory = std::env::temp_dir().join(format!(
+            "vx-journal-fire-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let mut journal = CommandLog::default();
+        let shot = Command::Fire {
+            muzzle: [12.375, 81.62, -3.25],
+            yaw_q: 1023,
+            pitch_q: -77,
+        };
+        journal.record(shot.clone());
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert_eq!(read_back.entries().len(), 1);
+        assert_eq!(read_back.entries()[0].command, shot, "the shot mutated in transit");
+    }
+
+    /// The oracle covers gunfire: a session that fires into the ground twice
+    /// replays to the same craters, from the recorded orders alone.
+    #[test]
+    fn a_firefight_replays_to_the_same_ground() {
+        let fight = |world: &mut World| -> u64 {
+            let events = EventBus::new();
+            let mut journal = CommandLog::default();
+            let mut rebuilt = Rebuilt::default();
+
+            let ground = world.generator().height_at(10, 10) as f32;
+            // Stand above open ground and fire down at an angle, twice, with
+            // ticks between: each shot arcs into the dirt and craters it.
+            let muzzle = [10.5, ground + 8.0, 10.5];
+            for (yaw_q, pitch_q, wait) in [(0i16, -700i16, 6u32), (1024, -650, 8)] {
+                let shot = Command::Fire { muzzle, yaw_q, pitch_q };
+                apply(&shot, world, &events, &mut rebuilt);
+                journal.record(shot);
+                let advance = Command::Advance { ticks: wait };
+                apply(&advance, world, &events, &mut rebuilt);
+                journal.record(advance);
+            }
+            assert!(
+                rebuilt.shots.is_empty(),
+                "both rounds should have landed inside the waits"
+            );
+            let hash_live = region_hash(
+                world,
+                vx_core::BlockPos::new(-20, 40, -20),
+                vx_core::BlockPos::new(40, 100, 40),
+            );
+
+            // Now the other side of the oracle: a fresh world, orders only.
+            let mut fresh = super::fire_tests::world();
+            replay(&journal, &mut fresh, &EventBus::new());
+            let hash_replayed = region_hash(
+                &fresh,
+                vx_core::BlockPos::new(-20, 40, -20),
+                vx_core::BlockPos::new(40, 100, 40),
+            );
+            assert_eq!(hash_live, hash_replayed, "the craters diverged");
+            hash_live
+        };
+
+        let first = fight(&mut world());
+        let second = fight(&mut world());
+        assert_eq!(first, second, "the firefight itself is not deterministic");
+    }
+
+    /// Firing queues recoil, and the next `Advance` applies it: the replayed
+    /// body ends up shoved off where an unfired one stands.
+    #[test]
+    fn recoil_replays_into_the_body() {
+        let events = EventBus::new();
+
+        let mut quiet = CommandLog::default();
+        quiet.record(Command::Advance { ticks: 8 });
+        let stood = replay(&quiet, &mut world(), &events);
+
+        let mut loud = CommandLog::default();
+        // Fire level, due south (+Z is yaw_q of half the circle).
+        loud.record(Command::Fire {
+            muzzle: [0.5, 80.0, 0.5],
+            yaw_q: 2048,
+            pitch_q: 0,
+        });
+        loud.record(Command::Advance { ticks: 8 });
+        let shoved = replay(&loud, &mut world(), &events);
+
+        assert_ne!(
+            stood.player.position, shoved.player.position,
+            "recoil never reached the replayed body"
         );
     }
 }

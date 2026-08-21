@@ -675,6 +675,8 @@ Controls:
 | Hold left button | Run the drill — harder rock takes longer |
 | Right click | Place the selected block |
 | `1`–`6` | Choose stone, dirt, grass, sand, the base container or your chest |
+| `7` | Take out or sling the slug launcher (once you own one) |
+| Hold left button | (launcher out) Fire — slow, heavy rounds on a visible arc |
 | `C` | Toggle first person and over-the-shoulder |
 | `V` | Open the handheld fleet uplink (arrows pick) |
 | `Tab` | (in the handheld) Turn between the fleet roster and the map |
@@ -702,6 +704,22 @@ Controls:
 Worlds are saved on quit to `$XDG_DATA_HOME/gamingg/saves/world`, selectable
 with `--world <name>`. Reloading an existing world uses its stored seed, so
 `--seed` only applies when creating a new one.
+
+### The arsenal
+
+The shop counter sells a compact slug launcher and boxes of slugs. It is
+heavy (it rides your pack weight), loud (every sound in the game is
+synthesized — a machine with no audio device simply plays nothing), and the
+town treats it accordingly. The first shot inside a town's line gets you one
+warning, once, per town. After that the rules are the rules: property you
+break costs bounty scaled by how many people saw it; pointing the muzzle at
+somebody panics them — each one either runs home or runs for the security
+office, and an alarm that reaches the office is a signed report against you.
+Caravans can be shot down mid-flight: the cargo drops where it fell and can
+be salvaged, and the network logs the loss against your name whether or not
+anyone watched — the manifest is its own witness. Every shot is journalled
+with its muzzle and aim, so a firefight replays crater-for-crater under
+`--replay`.
 
 ### The gold panel
 

@@ -379,6 +379,24 @@ impl Economy {
         self.shipments.insert(at, shipment);
     }
 
+    /// A load shot out of the sky: remove it mid-flight and hand it to the
+    /// caller, whose problem the wreckage now is.
+    ///
+    /// No bookkeeping is owed here. The goods left the source market at
+    /// dispatch — a network that conjured freight would be lying — and the
+    /// destination deposit only ever happens on settling, so a load that
+    /// never settles leaves the destination short. That shortage working
+    /// through the price curve *is* the town noticing. Removing from the
+    /// middle keeps the arrival ordering, so `settle`'s walk off the front
+    /// never knows anything happened.
+    pub fn intercept(&mut self, index: usize) -> Option<Shipment> {
+        if index < self.shipments.len() {
+            Some(self.shipments.remove(index))
+        } else {
+            None
+        }
+    }
+
     /// Run the network up to `now`: land everything that has arrived, then look
     /// for new runs worth making.
     ///
@@ -1094,6 +1112,51 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn an_intercepted_load_never_lands_and_the_town_stays_short() {
+        let sites = frontier();
+        let mut economy = Economy::new();
+        economy.ship(Shipment {
+            from: sites[0].centre,
+            to: sites[1].centre,
+            good: BAR,
+            amount: 40.0,
+            depart: 10,
+            arrive: 500,
+            owner: Owner::Town,
+        });
+        let before = economy.market(&sites[1], 0).stock(BAR);
+
+        let load = economy.intercept(0).expect("nothing to intercept");
+        assert_eq!(load.amount, 40.0);
+        assert!(economy.shipments().is_empty(), "the wreck kept flying");
+        assert!(economy.intercept(0).is_none(), "intercepted the same load twice");
+
+        // Long past the arrival tick, the destination never saw the goods:
+        // no deposit, no phantom bookkeeping. (The market moves on its own
+        // schedule; compare against an unshot twin, not against `before`.)
+        let mut untouched = Economy::new();
+        let landed_stock = {
+            untouched.ship(Shipment {
+                from: sites[0].centre,
+                to: sites[1].centre,
+                good: BAR,
+                amount: 40.0,
+                depart: 10,
+                arrive: 500,
+                owner: Owner::Town,
+            });
+            untouched.run(&sites, 600);
+            untouched.market(&sites[1], 600).stock(BAR)
+        };
+        economy.run(&sites, 600);
+        let short_stock = economy.market(&sites[1], 600).stock(BAR);
+        assert!(
+            short_stock < landed_stock,
+            "the shortage never registered: shot {short_stock} vs landed {landed_stock} (started {before})"
+        );
     }
 
     #[test]

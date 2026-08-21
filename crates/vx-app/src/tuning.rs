@@ -24,6 +24,7 @@
 //! `step_aabb` is a bigger cut than tuning has yet earned. Economy and mining
 //! tranches join the same way when someone actually needs to drag them.
 
+use crate::arsenal;
 use crate::movement;
 
 /// Every tunable, with the shipped constants as its defaults.
@@ -54,6 +55,12 @@ pub struct Tuning {
     pub stam_regen: f32,
     pub stam_regen_delay: f32,
     pub winded: f32,
+    pub slug_speed: f32,
+    pub slug_gravity: f32,
+    pub slug_punch: f32,
+    pub slug_kick: f32,
+    pub slug_rate: f32,
+    pub shake_power: f32,
 }
 
 impl Default for Tuning {
@@ -81,6 +88,12 @@ impl Default for Tuning {
             stam_regen: movement::STAM_REGEN,
             stam_regen_delay: movement::STAM_REGEN_DELAY,
             winded: movement::WINDED,
+            slug_speed: arsenal::SLUG_SPEED,
+            slug_gravity: arsenal::SLUG_GRAVITY,
+            slug_punch: arsenal::SLUG_PUNCH,
+            slug_kick: arsenal::SLUG_KICK,
+            slug_rate: arsenal::SLUG_RATE,
+            shake_power: arsenal::SHAKE_POWER,
         }
     }
 }
@@ -141,6 +154,12 @@ tunables! {
     "stam_regen" => stam_regen,
     "stam_regen_delay" => stam_regen_delay,
     "winded" => winded,
+    "slug_speed" => slug_speed,
+    "slug_gravity" => slug_gravity,
+    "slug_punch" => slug_punch,
+    "slug_kick" => slug_kick,
+    "slug_rate" => slug_rate,
+    "shake_power" => shake_power,
 }
 
 /// How a key reads on the panel: uppercase, underscores as spaces (the bitmap

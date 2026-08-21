@@ -240,6 +240,14 @@ impl Permits {
         claim_at(&self.sites, at)
     }
 
+    /// The town whose ground `at` stands on, if any — the whole site, so a
+    /// caller can speak its name.
+    pub fn town_here(&self, at: BlockPos) -> Option<&TownSite> {
+        self.sites
+            .iter()
+            .find(|site| town::footprint_contains(std::slice::from_ref(site), at.x, at.z))
+    }
+
     /// A claim inside this box that the player may not edit, if any.
     ///
     /// The planner asks before it dispatches: a drone sent into somebody's
@@ -346,6 +354,13 @@ impl Permits {
         }
         self.bounty += points;
         true
+    }
+
+    /// Charge the player with no witness test: for crimes with their own
+    /// paper trail. A villager who reached the security office *is* the
+    /// witness; a caravan that never arrived is on the shipping manifest.
+    pub fn billed(&mut self, points: u64) {
+        self.bounty += points;
     }
 
     pub fn wanted(&self) -> bool {

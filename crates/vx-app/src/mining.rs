@@ -28,11 +28,13 @@ use vx_world::World;
 
 use crate::rig::{self, Rig};
 
-/// Drone ticks per second.
+/// Drone ticks per second — the journal's clock.
 ///
 /// A drone cuts one block per tick, so this is also its digging rate. Slow
 /// enough to watch the excavation take shape, which is most of the appeal.
-const TICK_RATE: f64 = 8.0;
+/// Crate-visible because the arsenal steps its projectiles on the same clock:
+/// one tick of `Advance` is one tick of everything.
+pub(crate) const TICK_RATE: f64 = 8.0;
 
 /// Blocks of run per block of rise the starting drone's ramps are cut to.
 const GRADE: i32 = vx_agent::DEFAULT_GRADE;

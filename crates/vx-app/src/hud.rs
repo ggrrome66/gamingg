@@ -66,6 +66,12 @@ pub struct HudContent<'a> {
     /// Passed in rather than read, like the hour above: the HUD stays a pure
     /// function of its inputs so a capture cannot wobble.
     pub movement: MovementReadout,
+    /// Slugs left, shown while the launcher is in hand. `None` = slung or
+    /// unowned, and no line is drawn.
+    pub ammo: Option<u32>,
+    /// Townsfolk running scared right now. Zero draws nothing; anything else
+    /// tells you the street knows.
+    pub panicking: usize,
 }
 
 /// What the HUD says about how the player is moving.
@@ -188,6 +194,29 @@ pub fn render_hud(content: &HudContent) -> Vec<u8> {
     }
     y += LINE_HEIGHT as i32;
 
+    // Line 4b: the launcher, while it is in hand — slugs left, and whether
+    // the town is in a state about it.
+    if content.ammo.is_some() || content.panicking > 0 {
+        if let Some(ammo) = content.ammo {
+            let line = format!("SLUGS {ammo}");
+            let tint = if ammo == 0 { WANTED } else { TEXT };
+            font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, tint, &line);
+        }
+        if content.panicking > 0 {
+            let cry = "PANIC";
+            font::draw_text(
+                &mut pixels,
+                HUD_WIDTH,
+                HUD_WIDTH as i32 - margin - font::text_width(cry, 1) as i32,
+                y,
+                1,
+                WANTED,
+                cry,
+            );
+        }
+        y += LINE_HEIGHT as i32;
+    }
+
     // Line 5: what the town thinks of you, and whether anyone is looking.
     if content.bounty > 0 || content.watched {
         if content.bounty > 0 {
@@ -243,7 +272,26 @@ mod tests {
             bounty: 0,
             watched: false,
             movement: MovementReadout::default(),
+            ammo: None,
+            panicking: 0,
         }
+    }
+
+    #[test]
+    fn the_ammo_line_appears_only_with_the_launcher_out() {
+        let skills = Skills::new();
+        let plain = base_content(&skills);
+        let mut armed = base_content(&skills);
+        armed.ammo = Some(12);
+        assert_ne!(render_hud(&plain), render_hud(&armed), "no ammo line drawn");
+
+        let mut spooked = base_content(&skills);
+        spooked.panicking = 2;
+        assert_ne!(
+            render_hud(&plain),
+            render_hud(&spooked),
+            "no panic cry drawn"
+        );
     }
 
     #[test]

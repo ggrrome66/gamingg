@@ -508,6 +508,7 @@ mod tests {
                 &here,
                 &market,
                 &crate::garage::Garage::new(),
+                &crate::arsenal::Arsenal::default(),
                 &[],
             )
         };

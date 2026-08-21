@@ -15,6 +15,7 @@ use vx_render::font::{self, LINE_HEIGHT};
 
 use vx_world::town::TownSite;
 
+use crate::arsenal::{self, Arsenal};
 use crate::economy::{self, Market};
 use crate::garage::{self, Garage};
 use crate::wallet::{self, Wallet};
@@ -55,6 +56,10 @@ pub enum Row {
     Buy(&'static str),
     /// Buy a machine. The reason to mine at all.
     BuyMachine(&'static str),
+    /// Buy the compact slug launcher, once.
+    BuyLauncher,
+    /// Buy a box of slugs for it.
+    BuySlugs,
     /// Order a parcel of this good from another town. It travels by caravan
     /// and lands in the mailbox at your house — index into the offers list.
     Order(usize),
@@ -114,6 +119,7 @@ impl Shop {
         pile: Option<&Stockpile>,
         walletbook: &Wallet,
         market: &Market,
+        rack: &Arsenal,
         offers: &[Offer],
     ) -> Vec<Row> {
         let mut rows = Vec::new();
@@ -128,6 +134,14 @@ impl Shop {
         // player who has just sold their first load should see one.
         for kind in garage::KINDS {
             rows.push(Row::BuyMachine(kind));
+        }
+        // One launcher per person; after that the counter sells the feed for
+        // it. Slugs cost credits at the counter for now — ammunition as a
+        // trade good with its own market line is on the roadmap.
+        if rack.owned {
+            rows.push(Row::BuySlugs);
+        } else {
+            rows.push(Row::BuyLauncher);
         }
         for line in [wallet::DRILL, wallet::CARGO] {
             if walletbook.upgrade(line) < wallet::MAX_UPGRADE {
@@ -162,10 +176,11 @@ impl Shop {
         walletbook: &mut Wallet,
         market: &mut Market,
         shed: &mut Garage,
+        rack: &mut Arsenal,
         offers: &[Offer],
         post: Option<&mut MailContext>,
     ) {
-        let rows = Shop::rows(pile.as_deref(), walletbook, market, offers);
+        let rows = Shop::rows(pile.as_deref(), walletbook, market, rack, offers);
         let Some(row) = rows.get(self.cursor) else {
             self.feedback = Some("NOTHING TO TRADE".into());
             return;
@@ -192,6 +207,22 @@ impl Shop {
                     self.feedback = Some("NOT ENOUGH CR".into());
                 }
             }
+            Row::BuyLauncher => {
+                if walletbook.spend(arsenal::LAUNCHER_COST) {
+                    rack.owned = true;
+                    self.feedback = Some("LAUNCHER SOLD. MIND WHERE YOU POINT IT".into());
+                } else {
+                    self.feedback = Some("NOT ENOUGH CR".into());
+                }
+            }
+            Row::BuySlugs => {
+                if walletbook.spend(arsenal::SLUG_COST) {
+                    rack.ammo += arsenal::SLUG_BATCH;
+                    self.feedback = Some(format!("SLUGS. {} IN THE SATCHEL", rack.ammo));
+                } else {
+                    self.feedback = Some("NOT ENOUGH CR".into());
+                }
+            }
             Row::Buy(line) => {
                 if buy(walletbook, line) {
                     let level = walletbook.upgrade(line);
@@ -214,7 +245,9 @@ impl Shop {
             }
         }
         // A sold-out row disappears; keep the cursor on the shelf.
-        let rows = Shop::rows(None, walletbook, market, offers).len().max(1);
+        let rows = Shop::rows(None, walletbook, market, rack, offers)
+            .len()
+            .max(1);
         self.cursor = self.cursor.min(rows - 1);
     }
 }
@@ -322,6 +355,7 @@ pub fn display_name(name: &str) -> String {
 }
 
 /// Render the panel. Pure in its inputs.
+#[allow(clippy::too_many_arguments)]
 pub fn render_shop(
     shop: &Shop,
     pile: Option<&Stockpile>,
@@ -329,6 +363,7 @@ pub fn render_shop(
     town: &TownSite,
     market: &Market,
     shed: &Garage,
+    rack: &Arsenal,
     offers: &[Offer],
 ) -> Vec<u8> {
     let mut pixels = vec![0u8; (SHOP_WIDTH * SHOP_HEIGHT * 4) as usize];
@@ -352,7 +387,7 @@ pub fn render_shop(
     );
     y += LINE_HEIGHT as i32 + 3;
 
-    let rows = Shop::rows(pile, walletbook, market, offers);
+    let rows = Shop::rows(pile, walletbook, market, rack, offers);
     if rows.is_empty() {
         font::draw_text(&mut pixels, SHOP_WIDTH, margin, y, 1, DIM, "NOTHING TO SELL");
         y += LINE_HEIGHT as i32;
@@ -377,6 +412,15 @@ pub fn render_shop(
                     garage::cost(kind, owned)
                 )
             }
+            Row::BuyLauncher => {
+                format!("BUY SLUG LAUNCHER FOR {} CR", arsenal::LAUNCHER_COST)
+            }
+            Row::BuySlugs => format!(
+                "BUY {} SLUGS FOR {} CR - HAVE {}",
+                arsenal::SLUG_BATCH,
+                arsenal::SLUG_COST,
+                rack.ammo
+            ),
             Row::Buy(line) => {
                 let next = walletbook.upgrade(line) + 1;
                 format!(
@@ -445,7 +489,7 @@ mod tests {
         let pile = stocked_pile();
         let wallet = Wallet::new();
         let market = market();
-        let rows = Shop::rows(Some(&pile), &wallet, &market, &[]);
+        let rows = Shop::rows(Some(&pile), &wallet, &market, &Arsenal::default(), &[]);
         assert_eq!(
             rows,
             vec![
@@ -456,6 +500,7 @@ mod tests {
                 // somebody who has just sold their first load should see one.
                 Row::BuyMachine(garage::DRONE),
                 Row::BuyMachine(garage::FLIER),
+                Row::BuyLauncher,
                 Row::Buy(wallet::DRILL),
                 Row::Buy(wallet::CARGO),
             ],
@@ -467,7 +512,7 @@ mod tests {
         for _ in 0..wallet::MAX_UPGRADE {
             maxed.raise(wallet::DRILL);
         }
-        let rows = Shop::rows(Some(&pile), &maxed, &market, &[]);
+        let rows = Shop::rows(Some(&pile), &maxed, &market, &Arsenal::default(), &[]);
         assert!(!rows.contains(&Row::Buy(wallet::DRILL)));
         assert!(rows.contains(&Row::Buy(wallet::CARGO)));
     }
@@ -552,7 +597,7 @@ mod tests {
         shop.open_at_counter();
         let mut wallet = Wallet::new();
         // Cursor 0 lands on the first Buy row (no pile rows exist).
-        shop.confirm(None, &mut wallet, &mut market(), &mut Garage::new(), &[], None);
+        shop.confirm(None, &mut wallet, &mut market(), &mut Garage::new(), &mut Arsenal::default(), &[], None);
         assert_eq!(shop.feedback.as_deref(), Some("NOT ENOUGH CR"));
     }
 
@@ -579,12 +624,12 @@ mod tests {
         let pile = stocked_pile();
 
         let market = market();
-        let a = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &[]);
-        let b = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &[]);
+        let a = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &Arsenal::default(), &[]);
+        let b = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &Arsenal::default(), &[]);
         assert_eq!(a.len(), (SHOP_WIDTH * SHOP_HEIGHT * 4) as usize);
         assert_eq!(a, b);
 
-        let empty = render_shop(&shop, None, &wallet, &town(), &market, &Garage::new(), &[]);
+        let empty = render_shop(&shop, None, &wallet, &town(), &market, &Garage::new(), &Arsenal::default(), &[]);
         assert_ne!(a, empty, "an empty shop drew a full shelf");
     }
 
@@ -599,19 +644,19 @@ mod tests {
 
         let mut shop = Shop::new();
         shop.open_at_counter();
-        let rows = Shop::rows(None, &wallet, &market, &[]);
+        let rows = Shop::rows(None, &wallet, &market, &Arsenal::default(), &[]);
         let at = rows
             .iter()
             .position(|row| *row == Row::BuyMachine(garage::DRONE))
             .expect("no drone on the shelf");
         shop.move_cursor(at as i32, rows.len());
 
-        shop.confirm(None, &mut wallet, &mut market, &mut shed, &[], None);
+        shop.confirm(None, &mut wallet, &mut market, &mut shed, &mut Arsenal::default(), &[], None);
         assert_eq!(shed.owned(garage::DRONE), 1, "the drone never arrived");
         assert_eq!(wallet.credits(), 0, "the wrong amount was spent");
 
         // And a second one is refused, because it costs more than the first.
-        shop.confirm(None, &mut wallet, &mut market, &mut shed, &[], None);
+        shop.confirm(None, &mut wallet, &mut market, &mut shed, &mut Arsenal::default(), &[], None);
         assert_eq!(shed.owned(garage::DRONE), 1, "a drone was bought on credit");
         assert_eq!(shop.feedback.as_deref(), Some("NOT ENOUGH CR"));
     }
@@ -758,7 +803,7 @@ mod order_tests {
         let mut books = Economy::new();
         let market = books.market(&home_site(), 0).clone();
 
-        let bare = Shop::rows(None, &wallet, &market, &[]);
+        let bare = Shop::rows(None, &wallet, &market, &Arsenal::default(), &[]);
         assert!(
             !bare.iter().any(|row| matches!(row, Row::Order(_))),
             "an order row appeared from nowhere"
@@ -766,7 +811,7 @@ mod order_tests {
 
         let mut economy = Economy::new();
         let offer = offer_from(&mut economy, 0);
-        let stocked = Shop::rows(None, &wallet, &market, &[offer]);
+        let stocked = Shop::rows(None, &wallet, &market, &Arsenal::default(), &[offer]);
         assert!(stocked.iter().any(|row| matches!(row, Row::Order(0))));
     }
 

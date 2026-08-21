@@ -4,7 +4,7 @@ A ready-to-run build of the game, for testing on a Steam Deck or any x86-64
 Linux desktop.
 
 ```
-gamingg-linux-x86_64    the game, stripped, ~9.7 MB
+gamingg-linux-x86_64    the game, stripped, ~10 MB
 SHA256SUMS              so you can tell one build from the next
 ```
 
@@ -54,10 +54,13 @@ or Bluetooth keyboard in Desktop Mode. Gamepad bindings are not built yet.
 ## What it needs from the system
 
 Almost nothing. Both shaders are compiled into the binary and there is no asset
-directory, so this one file is the whole game. It links only `libc`, `libm` and
-`libgcc_s`; X11, Wayland and Vulkan are all opened at runtime, so it uses
-whatever the machine has. The Deck's AMD GPU runs the RADV Vulkan driver
-natively and needs nothing installed.
+directory, so this one file is the whole game — every sound is synthesized at
+runtime, so there are no audio files either. It links `libc`, `libm`,
+`libgcc_s` and (since the arsenal round) `libasound.so.2` for sound, which
+SteamOS and every desktop distribution ship; X11, Wayland and Vulkan are all
+opened at runtime, so it uses whatever the machine has. A machine with no
+audio device just plays silently. The Deck's AMD GPU runs the RADV Vulkan
+driver natively and needs nothing installed.
 
 Worlds and settings follow the XDG spec:
 
@@ -83,8 +86,9 @@ expects to write to.
 
 `WASD` move, `Space` jump, `Left Shift` crouch, `Left Ctrl` sprint,
 `Left Ctrl`+`Left Shift` slide, `Z` prone, `C` first/third person, `E` interact,
-`V` handheld, `M` mark ore, `Tab` cycle mining method. Waist-high ledges are
-vaulted automatically — you do not press anything for those.
+`V` handheld, `M` mark ore, `Tab` cycle mining method, `7` the slug launcher
+once the shop has sold you one. Waist-high ledges are vaulted automatically —
+you do not press anything for those.
 
 The full list is in the main `README.md`.
 

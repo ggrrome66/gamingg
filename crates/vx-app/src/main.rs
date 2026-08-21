@@ -8,6 +8,8 @@
 //!   display, so it works over SSH, in CI, and against a software Vulkan
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
+mod arsenal;
+mod audio;
 mod awareness;
 mod beacon;
 mod board;
@@ -153,6 +155,8 @@ struct Options {
     permit: bool,
     /// Draw the operator's console over the capture (gold builds only).
     gold_capture: bool,
+    /// Hold the slug launcher in the capture instead of the drill.
+    launcher: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -177,6 +181,7 @@ fn parse_args() -> Result<Options, String> {
         welcome: false,
         permit: false,
         gold_capture: false,
+        launcher: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -240,6 +245,7 @@ fn parse_args() -> Result<Options, String> {
             "--welcome" => options.welcome = true,
             "--permit" => options.permit = true,
             "--gold-capture" => options.gold_capture = true,
+            "--launcher" => options.launcher = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -310,6 +316,7 @@ fn parse_args() -> Result<Options, String> {
                      --welcome           draw the welcome panel over the capture\n  \
                      --permit            draw a lockbox panel over the capture\n  \
                      --gold-capture      draw the operator console over the capture\n  \
+                     --launcher          hold the slug launcher in the capture\n  \
                      --time <0..1>       hour of the day to light the capture by\n  \
                      --night             shorthand for --time 0\n  \
                      --dawn --noon --dusk\n  \
@@ -643,18 +650,19 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                 vx_render::tiles::slot::COPPER_ORE,
             ));
         }
-        // The player's handheld drill rides the camera, exactly as in play.
+        // The player's handheld tool rides the camera, exactly as in play:
+        // the drill by default, the launcher under `--launcher`.
         let camera_forward = camera.forward();
         let camera_right = camera.right();
         let drill_position =
             camera.position + camera_forward * 0.85 + camera_right * 0.42 - glam::Vec3::Y * 0.38;
         let drill_yaw = rig::yaw_towards(camera_forward.x, camera_forward.z).unwrap_or(0.0);
-        objects.extend(Rig::hand_drill().objects_pitched(
-            drill_position,
-            drill_yaw,
-            camera.pitch,
-            0.7,
-        ));
+        let held = if options.launcher {
+            Rig::launcher()
+        } else {
+            Rig::hand_drill()
+        };
+        objects.extend(held.objects_pitched(drill_position, drill_yaw, camera.pitch, 0.7));
 
         renderer.set_objects(&context.device, &context.queue, &objects);
 
@@ -680,6 +688,8 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                 stamina: 0.72,
                 load: 0.4,
             },
+            ammo: options.launcher.then_some(8),
+            panicking: 0,
         });
         renderer.set_overlay(
             HUD_SLOT,
@@ -967,8 +977,16 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             .market(&here, 0)
             .clone();
         let shed = garage::Garage::new();
-        let pixels =
-            shop::render_shop(&panel, Some(&pile), &walletbook, &here, &market, &shed, &[]);
+        let pixels = shop::render_shop(
+            &panel,
+            Some(&pile),
+            &walletbook,
+            &here,
+            &market,
+            &shed,
+            &arsenal::Arsenal::default(),
+            &[],
+        );
         let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
         let panel_height = shop::SHOP_HEIGHT as f32 * shop::SHOP_SCALE;
         renderer.set_overlay(
@@ -1258,6 +1276,19 @@ struct Active {
     last_scan: (i32, i32),
     /// The dispatch window the trade network was last run for.
     last_network: u64,
+    /// The launcher, the satchel, the warnings spent and the wreckage.
+    arsenal: arsenal::Arsenal,
+    /// Slugs in the air right now — the live twin of `Rebuilt::shots`.
+    shots: Vec<arsenal::Shot>,
+    /// The speaker, when the machine has one.
+    audio: audio::Audio,
+    /// The launcher's viewmodel shape, built once.
+    launcher_rig: Rig,
+    /// Screen shake energy, 0..1. Decays; firing tops it up. Visual only —
+    /// it offsets the camera pivot and never touches the simulation.
+    shake: f32,
+    /// Accumulated *frame* time driving the shake wobble. Never wall clock.
+    shake_phase: f32,
 }
 
 struct App {
@@ -1398,7 +1429,15 @@ impl App {
                     .base
                     .as_ref()
                     .map(|base| base.stockpile.total())
-                    .unwrap_or(0);
+                    .unwrap_or(0)
+                    // The launcher weighs like cargo: folded into the load
+                    // *before* the command is journalled, so the weight
+                    // replays without the oracle learning what a weapon is.
+                    + if active.arsenal.owned {
+                        arsenal::LAUNCHER_HEFT
+                    } else {
+                        0
+                    };
                 let capacity = skills::capacity(
                     vx_agent::DEFAULT_CAPACITY,
                     active.skills.level(skills::LOGISTICS),
@@ -1433,6 +1472,26 @@ impl App {
         let pivot = match active.mode {
             MovementMode::Fly => active.camera.position,
             MovementMode::Walk => active.player.eye_position(),
+        };
+        // The launcher's kick, worn by the camera. Offset the *pivot*, not
+        // the body: the shake is theatre, the simulation never feels it, and
+        // in third person the orbit's own wall raycast still runs from the
+        // shaken anchor so the camera cannot be kicked into rock. Driven by
+        // accumulated frame time, never the wall clock.
+        active.shake = (active.shake - dt * 1.6).max(0.0);
+        active.shake_phase += dt * 35.0;
+        let pivot = if active.shake > 0.0 {
+            let wobble =
+                active.shake * active.shake * active.movement.tuning.shake_power * 0.14;
+            let phase = active.shake_phase;
+            pivot
+                + glam::Vec3::new(
+                    phase.sin(),
+                    (phase * 1.31).sin(),
+                    (phase * 0.73).cos(),
+                ) * wobble
+        } else {
+            pivot
         };
         active.camera.position =
             view::camera_placement(&active.world, &active.camera, pivot, active.view);
@@ -1580,6 +1639,43 @@ impl App {
             active.greeting = Some((line.to_string(), Instant::now()));
         }
 
+        // Carrying the launcher raised is menacing all by itself: anyone under
+        // the muzzle who can see you panics, and each fresh panic is on your
+        // sheet — the victim is their own witness.
+        if active.arsenal.equipped
+            && active.mode == MovementMode::Walk
+            && self.input.mouse_captured
+            && !trading
+        {
+            let muzzle = arsenal::muzzle_of(&active.player);
+            let frightened =
+                active
+                    .villagers
+                    .menaced(muzzle, active.camera.forward(), &around);
+            if frightened > 0 {
+                active
+                    .permits
+                    .borrow_mut()
+                    .billed(arsenal::BOUNTY_MENACE * frightened as u64);
+                active.greeting = Some((
+                    "THEY SAW THE GUN. THAT COSTS YOU".into(),
+                    Instant::now(),
+                ));
+            }
+        }
+        // An alarm that reaches the security office is a signed statement.
+        let reports = active.villagers.take_reports();
+        if reports > 0 {
+            active
+                .permits
+                .borrow_mut()
+                .billed(arsenal::BOUNTY_REPORTED * u64::from(reports));
+            active.greeting = Some((
+                "YOU HAVE BEEN REPORTED AT THE SECURITY OFFICE".into(),
+                Instant::now(),
+            ));
+        }
+
         // Drones dig before streaming, so the chunks their edits dirty get
         // re-meshed in the same frame rather than the next one.
         let report = active.mining.update(
@@ -1594,6 +1690,10 @@ impl App {
             .record(Command::Advance {
                 ticks: active.mining.last_ticks(),
             });
+        // Slugs in the air step on the same clock, through the same function
+        // replay uses — the sweeps are where the live game reads the bills.
+        Self::advance_gunfire(active, active.mining.last_ticks());
+        Self::collect_crashes(active);
 
         // The fleet's work becomes the player's experience.
         if report.sectors_completed > 0 || report.pings_found > 0 {
@@ -1779,9 +1879,32 @@ impl App {
             objects.extend(active.trade_rig.objects(at, yaw, active.mining.spin()));
         }
 
-        // The held drill, drawn in camera space so it rides the view. The bit
-        // spins up while it is cutting and idles otherwise; a slight bob sells
-        // the vibration.
+        // Slugs in the air: a small steel cube each, drawn where the last
+        // journal tick left them. At eight steps a second a round visibly
+        // *travels*, which is half of what makes leading a caravan a skill.
+        for shot in &active.shots {
+            let model = glam::Mat4::from_translation(shot.position)
+                * glam::Mat4::from_scale(glam::Vec3::splat(0.14))
+                * glam::Mat4::from_translation(glam::Vec3::splat(-0.5));
+            objects.push(vx_render::Object::new(model, vx_render::tiles::slot::STEEL));
+        }
+        // Downed cargo, waiting where it fell.
+        for crash in &active.arsenal.crashes {
+            let ground = active
+                .world
+                .generator()
+                .height_at(crash.x.floor() as i32, crash.z.floor() as i32);
+            let at = glam::Vec3::new(crash.x, ground as f32 + 1.4, crash.z);
+            let model = glam::Mat4::from_translation(at)
+                * glam::Mat4::from_scale(glam::Vec3::new(0.9, 0.8, 0.9))
+                * glam::Mat4::from_translation(glam::Vec3::splat(-0.5));
+            objects.push(vx_render::Object::new(model, vx_render::tiles::slot::HULL));
+        }
+
+        // The held tool, drawn in camera space so it rides the view. The
+        // drill's bit spins up while it is cutting and idles otherwise; a
+        // slight bob sells the vibration. The launcher hangs heavier and
+        // kicks back with the shake.
         active.drill_spin += dt * if active.digging.is_some() { 22.0 } else { 1.6 };
         let camera_forward = active.camera.forward();
         let camera_right = active.camera.right();
@@ -1790,17 +1913,28 @@ impl App {
         } else {
             0.0
         };
-        let drill_position = active.camera.position + camera_forward * 0.85
+        let recoil_back = active.shake * 0.16;
+        let drill_position = active.camera.position
+            + camera_forward * (0.85 - recoil_back)
             + camera_right * 0.42
             + glam::Vec3::Y * (-0.38 + bob);
         let drill_yaw = rig::yaw_towards(camera_forward.x, camera_forward.z).unwrap_or(0.0);
         if active.view.draws_viewmodel() {
-            objects.extend(active.hand_rig.objects_pitched(
-                drill_position,
-                drill_yaw,
-                active.camera.pitch,
-                active.drill_spin,
-            ));
+            if active.arsenal.equipped {
+                objects.extend(active.launcher_rig.objects_pitched(
+                    drill_position,
+                    drill_yaw,
+                    active.camera.pitch + active.shake * 0.25,
+                    0.0,
+                ));
+            } else {
+                objects.extend(active.hand_rig.objects_pitched(
+                    drill_position,
+                    drill_yaw,
+                    active.camera.pitch,
+                    active.drill_spin,
+                ));
+            }
         }
 
         // Your own body, once you can actually see it.
@@ -1888,6 +2022,225 @@ impl App {
     /// How far the player can reach to break or place, in blocks.
     const REACH: f32 = 6.0;
 
+    /// The trigger, held or tapped. Fires at most once per cooldown; the
+    /// order is journalled with its muzzle and quantised aim, then applied
+    /// through the same `arsenal::launch` replay uses.
+    fn update_firing(&mut self) {
+        let firing = self.drill_held && self.input.mouse_captured;
+        let Some(active) = &mut self.active else { return };
+        active.digging = None;
+        if !firing || active.mode != MovementMode::Walk || active.resuming {
+            return;
+        }
+        if active.arsenal.cooldown > 0.0 {
+            return;
+        }
+        if !active.arsenal.ready() {
+            // The dry click is paced like a shot, or holding the button
+            // rattles every frame.
+            active.audio.play(audio::Cue::Click, 0.8);
+            active.arsenal.cooldown = active.movement.tuning.slug_rate;
+            active.greeting = Some(("OUT OF SLUGS".into(), Instant::now()));
+            return;
+        }
+
+        // Quantised exactly as movement quantises a look, so live fire and
+        // replay dequantise to the same line.
+        let quantised =
+            movement::MoveCommand::looking(0, active.camera.yaw, active.camera.pitch);
+        let muzzle = arsenal::muzzle_of(&active.player);
+        active.journal.record(Command::Fire {
+            muzzle: muzzle.to_array(),
+            yaw_q: quantised.yaw_q,
+            pitch_q: quantised.pitch_q,
+        });
+        arsenal::launch(
+            &mut active.shots,
+            &mut active.movement,
+            muzzle,
+            quantised.yaw_q,
+            quantised.pitch_q,
+        );
+        active.arsenal.spend(&active.movement.tuning);
+
+        // The felt half: the aim climbs (real input state, so it rides the
+        // next Move command), the view shakes, the street hears it.
+        active.camera.pitch += 0.035;
+        active.camera.clamp_pitch();
+        active.shake = (active.shake + 0.6).min(1.0);
+        active.audio.play(audio::Cue::Boom, 1.0);
+        active.villagers.startled(muzzle);
+
+        // Town rules: the first shot inside a town's line gets a warning.
+        // Harm is billed separately, warning or none — the warning only ever
+        // covers the noise.
+        let column = vx_core::BlockPos::new(
+            muzzle.x.floor() as i32,
+            muzzle.y.floor() as i32,
+            muzzle.z.floor() as i32,
+        );
+        let town = active
+            .permits
+            .borrow()
+            .town_here(column)
+            .map(|site| site.name.to_string());
+        if let Some(name) = town {
+            if active.arsenal.warn_once(&name) {
+                active.greeting = Some((
+                    format!("{name} SAYS: THAT IS YOUR ONE WARNING. NO GUNPLAY IN TOWN"),
+                    Instant::now(),
+                ));
+            }
+        }
+    }
+
+    /// Step every slug `ticks` journal ticks and settle what they did:
+    /// caravans downed, property broken in view of witnesses, bystanders
+    /// startled. The world edits happen inside `arsenal::advance_shots`,
+    /// which is the half replay re-runs; everything else here is live-only
+    /// consequence, the same side of the line the economy lives on.
+    fn advance_gunfire(active: &mut Active, ticks: u32) {
+        active.arsenal.cool(ticks);
+        if active.shots.is_empty() {
+            return;
+        }
+        let now = active.journal.tick();
+        for step in 0..ticks {
+            if active.shots.is_empty() {
+                break;
+            }
+            let sweeps = arsenal::advance_shots(
+                &mut active.shots,
+                &mut active.world,
+                &active.movement.tuning,
+            );
+            let tick_at = now.saturating_sub(u64::from(ticks - 1 - step));
+            for sweep in &sweeps {
+                Self::settle_caravan_hits(active, sweep, tick_at);
+                let Some(impact) = &sweep.hit else { continue };
+                active.villagers.startled(impact.at);
+                let heard = (impact.at - active.player.eye_position()).length();
+                let volume = (1.0 - heard / 80.0).clamp(0.1, 1.0);
+                active.audio.play(audio::Cue::Thud, volume);
+                if impact.broke {
+                    Self::bill_property_damage(active, impact);
+                }
+            }
+        }
+    }
+
+    /// A broken block on somebody's claim, priced by the agreed curve: the
+    /// damage, plus half again per witness beyond the first. Nobody saw,
+    /// nobody pays — seen is the rule for gunfire like everything else.
+    fn bill_property_damage(active: &mut Active, impact: &arsenal::Impact) {
+        let claim = active.permits.borrow().claim_here(impact.block);
+        let Some(claim) = claim else { return };
+        if active.permits.borrow().may_edit(&claim) {
+            return;
+        }
+        let around = awareness::Surroundings {
+            player_eye: active.player.eye_height,
+            world: Some(&active.world),
+            player: Some(active.player.position),
+            machines: &[],
+        };
+        let seen = active.villagers.witnesses(&around);
+        let bill = arsenal::witnessed_bounty(arsenal::BOUNTY_PROPERTY, seen);
+        if bill > 0 {
+            active.permits.borrow_mut().caught(bill, seen);
+            active.greeting = Some((
+                format!("THAT WAS {}. {} SAW IT", claim.label, seen),
+                Instant::now(),
+            ));
+        }
+    }
+
+    /// Did this sweep pass through a caravan? Down it: the load falls where
+    /// it was hit, and the network logs the loss against you — the manifest
+    /// is its own witness, no eyes required.
+    fn settle_caravan_hits(active: &mut Active, sweep: &arsenal::Sweep, tick_at: u64) {
+        let hull = glam::Vec3::new(2.0, 1.4, 2.0);
+        let downed = active
+            .economy
+            .shipments()
+            .iter()
+            .position(|load| {
+                let (x, z) = load.position_at(tick_at);
+                let ground = active
+                    .world
+                    .generator()
+                    .height_at(x.floor() as i32, z.floor() as i32);
+                let centre = glam::Vec3::new(x, ground as f32 + CARAVAN_ALTITUDE, z);
+                arsenal::segment_hits_box(sweep.from, sweep.to, centre, hull)
+            });
+        let Some(index) = downed else { return };
+        let Some(load) = active.economy.intercept(index) else {
+            return;
+        };
+        let (x, z) = load.position_at(tick_at);
+        let amount = load.amount.round() as u64;
+        active.arsenal.crashes.push(arsenal::Crash {
+            x,
+            z,
+            good: load.good,
+            amount,
+        });
+        active.audio.play(audio::Cue::DistantBoom, 1.0);
+        match load.owner {
+            economy::Owner::Player | economy::Owner::Mail => {
+                // Your own delivery. The goods are on the ground and the
+                // payment you were owed went down with the airframe.
+                active.greeting = Some((
+                    "THAT WAS YOUR OWN DELIVERY. IT IS ON THE GROUND NOW".into(),
+                    Instant::now(),
+                ));
+            }
+            economy::Owner::Town => {
+                active.permits.borrow_mut().billed(amount / 2);
+                active.greeting = Some((
+                    format!("CARAVAN DOWN, {amount} CARGO. THE NETWORK LOGS THE LOSS"),
+                    Instant::now(),
+                ));
+            }
+        }
+    }
+
+    /// Walk-up salvage: stand next to a downed load and it goes onto the
+    /// base pile — the same pile everything else the fleet hauls lands on.
+    /// No base means the wreck simply waits.
+    fn collect_crashes(active: &mut Active) {
+        let feet = active.player.position;
+        let mut collected: Vec<arsenal::Crash> = Vec::new();
+        active.arsenal.crashes.retain(|crash| {
+            let ground = active
+                .world
+                .generator()
+                .height_at(crash.x.floor() as i32, crash.z.floor() as i32);
+            let at = glam::Vec3::new(crash.x, ground as f32 + 1.0, crash.z);
+            let near = (at - feet).length() < 3.0;
+            if near && active.mining.fleet.base.is_some() {
+                collected.push(*crash);
+                false
+            } else {
+                true
+            }
+        });
+        for crash in collected {
+            if let Some(base) = active.mining.fleet.base.as_mut() {
+                let good = economy::GOODS[crash.good].to_string();
+                base.stockpile.add(good, crash.amount);
+                active.greeting = Some((
+                    format!(
+                        "SALVAGED {} {}",
+                        crash.amount,
+                        shop::display_name(economy::GOODS[crash.good])
+                    ),
+                    Instant::now(),
+                ));
+            }
+        }
+    }
+
     /// Run the drill for one frame, if it is held on something drillable.
     ///
     /// Hold-to-dig: progress accumulates while the bit stays on one block and
@@ -1895,6 +2248,16 @@ impl App {
     /// still goes through `break_block`, so events fire and a mod's veto works
     /// exactly as it does for the drones.
     fn update_drilling(&mut self, dt: f32) {
+        // With the launcher in hand the trigger is the trigger; the drill
+        // stays on your hip.
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.arsenal.equipped)
+        {
+            self.update_firing();
+            return;
+        }
         let drilling = self.drill_held && self.input.mouse_captured;
         let Some(active) = &mut self.active else { return };
         if !drilling {
@@ -2323,8 +2686,14 @@ impl App {
                         .counter
                         .map(|site| active.economy.market(&site, active.journal.tick()).clone());
                     let Some(market) = market else { return };
-                    let rows =
-                        shop::Shop::rows(pile, &active.wallet, &market, &active.offers).len();
+                    let rows = shop::Shop::rows(
+                        pile,
+                        &active.wallet,
+                        &market,
+                        &active.arsenal,
+                        &active.offers,
+                    )
+                    .len();
                     let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
                     active.shop.move_cursor(delta, rows);
                 }
@@ -2352,6 +2721,7 @@ impl App {
                         &mut active.wallet,
                         &mut market,
                         &mut active.garage,
+                        &mut active.arsenal,
                         &offers,
                         Some(&mut post),
                     );
@@ -2458,6 +2828,28 @@ impl App {
                         active.selected = slot;
                         let name = &active.world.registry().get_or_air(active.palette[slot]).name;
                         log::info!("selected {name}");
+                    }
+                }
+            }
+            // The launcher, in and out of hand.
+            KeyCode::Digit7 => {
+                if let Some(active) = &mut self.active {
+                    if active.arsenal.owned {
+                        active.arsenal.equipped = !active.arsenal.equipped;
+                        active.digging = None;
+                        active.greeting = Some((
+                            if active.arsenal.equipped {
+                                format!("LAUNCHER OUT. {} SLUGS", active.arsenal.ammo)
+                            } else {
+                                "LAUNCHER SLUNG".to_string()
+                            },
+                            Instant::now(),
+                        ));
+                    } else {
+                        active.greeting = Some((
+                            "NO LAUNCHER. THE SHOP COUNTER SELLS THEM".into(),
+                            Instant::now(),
+                        ));
                     }
                 }
             }
@@ -2908,6 +3300,7 @@ impl App {
             &site,
             &market,
             &active.garage,
+            &active.arsenal,
             &active.offers,
         );
         let (width, height) = active.renderer.size();
@@ -3405,6 +3798,11 @@ impl App {
                     command.load as f32 / 255.0
                 }),
             },
+            ammo: active
+                .arsenal
+                .equipped
+                .then_some(active.arsenal.ammo),
+            panicking: active.villagers.panicking(),
         };
         let pixels = hud::render_hud(&content);
 
@@ -3598,6 +3996,9 @@ impl App {
         if let Err(error) = active.garage.save(save.root()) {
             log::error!("could not save the garage: {error}");
         }
+        if let Err(error) = active.arsenal.save(save.root()) {
+            log::error!("could not save the arsenal: {error}");
+        }
         match active.economy.save(save.root()) {
             Ok(()) => log::info!("saved {} town markets", active.economy.tracked()),
             Err(error) => log::error!("could not save the town books: {error}"),
@@ -3773,6 +4174,7 @@ impl ApplicationHandler for App {
         let mut garage = garage::Garage::new();
         let mut homestead = homestead::Homestead::new();
         let mut town_permits = permits::Permits::new();
+        let mut rack = arsenal::Arsenal::default();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -3784,6 +4186,7 @@ impl ApplicationHandler for App {
             garage.load(save.root());
             homestead.load(save.root());
             town_permits.load(save.root());
+            rack.load(save.root());
         }
         if self.sheriff {
             town_permits.take_office(permits::Office::Sheriff);
@@ -3874,6 +4277,12 @@ impl ApplicationHandler for App {
             // Deliberately absurd, so the first frame always scans.
             last_scan: (i32::MAX, i32::MAX),
             last_network: u64::MAX,
+            arsenal: rack,
+            shots: Vec::new(),
+            audio: audio::Audio::open(),
+            launcher_rig: Rig::launcher(),
+            shake: 0.0,
+            shake_phase: 0.0,
         });
 
         self.last_frame = Instant::now();

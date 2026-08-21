@@ -238,6 +238,27 @@ impl Rig {
         }
     }
 
+    /// The slug launcher, sized for the viewmodel: a fat barrel over a boxy
+    /// receiver, all mass and no grace. Like the drill it hangs off the
+    /// camera, so parts sit at negative Y and the ground-origin convention
+    /// does not apply.
+    pub fn launcher() -> Self {
+        Rig {
+            parts: vec![
+                // The receiver, shoulder-height and square.
+                Part::fixed(Vec3::new(-0.02, -0.02, 0.0), Vec3::new(0.36, 0.16, 0.14), slot::HULL),
+                // The barrel: wide bore, short throw.
+                Part::fixed(Vec3::new(0.28, 0.01, 0.0), Vec3::new(0.3, 0.11, 0.11), slot::STEEL),
+                // The muzzle ring, a shade wider than the barrel.
+                Part::fixed(Vec3::new(0.44, 0.01, 0.0), Vec3::new(0.05, 0.14, 0.14), slot::STEEL),
+                // The grip.
+                Part::fixed(Vec3::new(-0.1, -0.18, 0.0), Vec3::new(0.09, 0.16, 0.09), slot::TREAD),
+                // The satchel feed under the receiver.
+                Part::fixed(Vec3::new(0.06, -0.14, 0.0), Vec3::new(0.14, 0.1, 0.12), slot::TREAD),
+            ],
+        }
+    }
+
     /// Build this frame's objects: the rig at `position` (ground point under
     /// its centre), nose yawed by `yaw`, spinning parts rolled by `spin`.
     pub fn objects(&self, position: Vec3, yaw: f32, spin: f32) -> Vec<Object> {
@@ -297,6 +318,7 @@ mod tests {
         assert_eq!(flier.parts.iter().filter(|part| part.spin == Some(Spin::Yaw)).count(), 1);
 
         assert_eq!(Rig::hand_drill().parts.len(), 4);
+        assert_eq!(Rig::launcher().parts.len(), 5);
 
         let player = Rig::player();
         assert_eq!(player.parts.len(), 8);
