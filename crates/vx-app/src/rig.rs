@@ -238,6 +238,21 @@ impl Rig {
         }
     }
 
+    /// The kestrel: the flier's silhouette at a quarter of the size — the
+    /// same machine to the eye, which is the point of the symmetric tech.
+    /// A hull sliver, a spinning rotor disc, two stub skids.
+    pub fn kestrel() -> Self {
+        Rig {
+            parts: vec![
+                Part::fixed(Vec3::new(0.0, 0.14, 0.0), Vec3::new(0.34, 0.12, 0.2), slot::HULL),
+                Part::fixed(Vec3::new(0.16, 0.16, 0.0), Vec3::new(0.1, 0.08, 0.12), slot::CAB),
+                Part::spinning(Vec3::new(0.0, 0.24, 0.0), Vec3::new(0.44, 0.02, 0.06), slot::STEEL, Spin::Yaw),
+                Part::fixed(Vec3::new(0.0, 0.04, -0.08), Vec3::new(0.2, 0.04, 0.03), slot::TREAD),
+                Part::fixed(Vec3::new(0.0, 0.04, 0.08), Vec3::new(0.2, 0.04, 0.03), slot::TREAD),
+            ],
+        }
+    }
+
     /// The slug launcher, sized for the viewmodel: a fat barrel over a boxy
     /// receiver, all mass and no grace. Like the drill it hangs off the
     /// camera, so parts sit at negative Y and the ground-origin convention
@@ -319,6 +334,12 @@ mod tests {
 
         assert_eq!(Rig::hand_drill().parts.len(), 4);
         assert_eq!(Rig::launcher().parts.len(), 5);
+        let kestrel = Rig::kestrel();
+        assert_eq!(kestrel.parts.len(), 5);
+        assert_eq!(
+            kestrel.parts.iter().filter(|part| part.spin == Some(Spin::Yaw)).count(),
+            1
+        );
 
         let player = Rig::player();
         assert_eq!(player.parts.len(), 8);

@@ -36,17 +36,21 @@ const VERSION: u32 = 1;
 pub const DRONE: &str = "drone";
 /// A flier: sweeps sectors for ore and ferries piles home.
 pub const FLIER: &str = "flier";
+/// The kestrel: a palm-sized scout that rides the pack. One per person —
+/// the fleet is for swarms, the pack is for one — which `buy` enforces.
+pub const KESTREL: &str = "kestrel";
 
 /// Every machine the shop sells, in the order it lists them.
-pub const KINDS: [&str; 2] = [DRONE, FLIER];
+pub const KINDS: [&str; 3] = [DRONE, FLIER, KESTREL];
 
 /// What the first one of each kind costs.
 ///
 /// A first drone should be a few good ore runs rather than a grind — you can
 /// hand-mine and sell your way to one inside the opening session. A flier costs
 /// more because you are given one for nothing to start with; buying a second is
-/// a real expansion rather than a first step.
-const FIRST_COST: [u64; KINDS.len()] = [250, 400];
+/// a real expansion rather than a first step. The kestrel sits between: it
+/// earns nothing, but what it sees is worth a drone.
+const FIRST_COST: [u64; KINDS.len()] = [250, 400, 300];
 
 /// How much dearer each machine is than the one before, in eighths.
 ///
@@ -102,6 +106,10 @@ impl Garage {
     /// [`crate::shop::buy`].
     pub fn buy(&mut self, wallet: &mut Wallet, kind: &str) -> bool {
         if !KINDS.contains(&kind) {
+            return false;
+        }
+        // One kestrel per person, by design rather than by price curve.
+        if kind == KESTREL && self.owned(KESTREL) > 0 {
             return false;
         }
         if !wallet.spend(cost(kind, self.owned(kind))) {

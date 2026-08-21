@@ -72,6 +72,8 @@ pub struct HudContent<'a> {
     /// Townsfolk running scared right now. Zero draws nothing; anything else
     /// tells you the street knows.
     pub panicking: usize,
+    /// The scout's one-line status ("KESTREL ORBITING 32S"), if owned.
+    pub kestrel: Option<String>,
 }
 
 /// What the HUD says about how the player is moving.
@@ -217,6 +219,12 @@ pub fn render_hud(content: &HudContent) -> Vec<u8> {
         y += LINE_HEIGHT as i32;
     }
 
+    // Line 4c: the scout, while one is owned.
+    if let Some(kestrel) = &content.kestrel {
+        font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, DIM, kestrel);
+        y += LINE_HEIGHT as i32;
+    }
+
     // Line 5: what the town thinks of you, and whether anyone is looking.
     if content.bounty > 0 || content.watched {
         if content.bounty > 0 {
@@ -274,7 +282,17 @@ mod tests {
             movement: MovementReadout::default(),
             ammo: None,
             panicking: 0,
+            kestrel: None,
         }
+    }
+
+    #[test]
+    fn the_kestrel_line_appears_only_when_owned() {
+        let skills = Skills::new();
+        let plain = base_content(&skills);
+        let mut scouted = base_content(&skills);
+        scouted.kestrel = Some("KESTREL ORBITING 32S".into());
+        assert_ne!(render_hud(&plain), render_hud(&scouted), "no kestrel line drawn");
     }
 
     #[test]

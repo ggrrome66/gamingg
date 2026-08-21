@@ -679,7 +679,8 @@ Controls:
 | Hold left button | (launcher out) Fire — slow, heavy rounds on a visible arc |
 | `C` | Toggle first person and over-the-shoulder |
 | `V` | Open the handheld fleet uplink (arrows pick) |
-| `Tab` | (in the handheld) Turn between the fleet roster and the map |
+| `Tab` | (in the handheld) Turn the page: fleet roster, map, kestrel command |
+| `Enter` | (on the kestrel page) Give the selected standing order — orbit, sortie, perch, vanguard, dock |
 | `Enter` | (in the uplink) Look through the selected machine |
 | `R` | Take or release the master override of what you are watching |
 | `Escape` | (on a feed) Hang up and return to your body |
@@ -720,6 +721,28 @@ be salvaged, and the network logs the loss against your name whether or not
 anyone watched — the manifest is its own witness. Every shot is journalled
 with its muzzle and aim, so a firefight replays crater-for-crater under
 `--replay`.
+
+### The kestrel and the roost
+
+The shop sells a palm-sized scout drone that rides your pack. It flies on a
+small cell — endurance and cooldown are one budget, and the recharge costs
+what the flight spent — and takes standing orders from the handheld's third
+page: circle overhead, fly a sortie where you're looking, perch as a sentry
+(a quarter of the drain), hold ahead of you, or come home. What it sees gets
+a mark: a report of where a person or machine *was*, on both maps and over
+the spot itself, fading after thirty seconds unless re-sighted. It reveals
+contacts, never terrain — cartography stays the flier's paid trade.
+
+The same machine sits in a box on the security office roof. Breach a lock or
+fire a shot in town and it pops out, flies to the noise, and watches. The
+first time it sees you, you are *observed* — the drone overhead is the
+warning. Anything you do while observed is witnessed, on the same bounty
+arithmetic as every other pair of eyes. It can be evaded (break its line of
+sight until the mark fades), outlasted (its battery dies like yours, and
+while it recharges the town is blind), or shot down — which is property
+damage in front of the best witness in town. Cover now works in two
+directions: walls hide you from people, roofs and canopy hide you from the
+sky, and both are plain geometry.
 
 ### The gold panel
 

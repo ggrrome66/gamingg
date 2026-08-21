@@ -70,6 +70,10 @@ pub struct Mining {
     pending: f64,
     /// The air side: the flier, its surveys, and the base container.
     pub fleet: Fleet,
+    /// The pack scout, once bought. Deliberately *not* in the fleet's
+    /// roster: `dispatch_scan` can never grab it, so the survey layer stays
+    /// the paid flier's trade by construction.
+    pub kestrel: Option<vx_agent::Kestrel>,
     /// Nose directions, remembered so parked machines do not twitch.
     /// Chunks held resident for the running operation, released when it ends.
     pinned: Vec<vx_core::ChunkPos>,
@@ -91,6 +95,10 @@ pub struct Mining {
     /// Where the pilot is looking: a driven machine points its nose along the
     /// player's view rather than along its last step.
     pilot_look: f32,
+    /// The kestrel's standing order, stashed while the player has its wheel.
+    kestrel_suspended: Option<vx_agent::KestrelMode>,
+    kestrel_rig: Rig,
+    kestrel_yaw: f32,
 }
 
 /// One of the fleet's machines, by kind and index.
@@ -102,6 +110,8 @@ pub struct Mining {
 pub enum MachineRef {
     Digger(usize),
     Flier(usize),
+    /// The pack scout. No index: one per person, by design.
+    Kestrel,
 }
 
 /// One row of the handheld's roster.
@@ -130,6 +140,7 @@ impl Default for Mining {
             last_ticks: 0,
             pending: 0.0,
             fleet: Fleet::default(),
+            kestrel: None,
             drone_yaws: Vec::new(),
             flier_yaws: Vec::new(),
             spin: 0.0,
@@ -138,6 +149,9 @@ impl Default for Mining {
             piloted: None,
             pilot_command: PilotCommand::default(),
             pilot_look: 0.0,
+            kestrel_suspended: None,
+            kestrel_rig: Rig::kestrel(),
+            kestrel_yaw: 0.0,
         }
     }
 }
@@ -387,6 +401,15 @@ impl Mining {
             Some(MachineRef::Flier(_)) => {
                 self.fleet.pilot_tick(world, self.pilot_command);
             }
+            Some(MachineRef::Kestrel) => {
+                if let Some(kestrel) = &mut self.kestrel {
+                    kestrel.craft.pilot_step(
+                        world,
+                        self.pilot_command.heading,
+                        self.pilot_command.climb,
+                    );
+                }
+            }
             None => {}
         }
     }
@@ -415,6 +438,16 @@ impl Mining {
                 ) {
                     *yaw = new;
                 }
+            }
+        }
+        if let Some(kestrel) = &self.kestrel {
+            if piloted == Some(MachineRef::Kestrel) {
+                self.kestrel_yaw = self.pilot_look;
+            } else if let Some(new) = rig::yaw_towards(
+                (kestrel.craft.position.x - kestrel.craft.previous_position.x) as f32,
+                (kestrel.craft.position.z - kestrel.craft.previous_position.z) as f32,
+            ) {
+                self.kestrel_yaw = new;
             }
         }
         self.flier_yaws.resize(self.fleet.fliers.len(), 0.0);
@@ -469,9 +502,11 @@ impl Mining {
     /// Eye height above a machine's ground point, per kind.
     fn eye_height(machine: MachineRef) -> f32 {
         match machine {
-            // Roughly the digger's cab and the flier's canopy.
+            // Roughly the digger's cab and the flier's canopy; the kestrel
+            // is a palm-sized thing whose camera is most of its body.
             MachineRef::Digger(_) => 0.8,
             MachineRef::Flier(_) => 0.65,
+            MachineRef::Kestrel => 0.3,
         }
     }
 
@@ -486,6 +521,10 @@ impl Mining {
                 let flier = self.fleet.fliers.get(index)?;
                 self.interpolated(flier.previous_position, flier.position)
             }
+            MachineRef::Kestrel => {
+                let craft = &self.kestrel.as_ref()?.craft;
+                self.interpolated(craft.previous_position, craft.position)
+            }
         };
         Some(base + Vec3::Y * Self::eye_height(machine))
     }
@@ -497,6 +536,7 @@ impl Mining {
                 Some(self.operation.as_ref()?.drones.get(index)?.position)
             }
             MachineRef::Flier(index) => Some(self.fleet.fliers.get(index)?.position),
+            MachineRef::Kestrel => Some(self.kestrel.as_ref()?.craft.position),
         }
     }
 
@@ -524,6 +564,32 @@ impl Mining {
                     capacity: drone.capacity,
                 });
             }
+        }
+        if let Some(kestrel) = &self.kestrel {
+            let machine = MachineRef::Kestrel;
+            rows.push(MachineListing {
+                machine,
+                name: "KESTREL".into(),
+                state: kestrel_state(kestrel).into(),
+                distance: self
+                    .machine_eye(machine)
+                    .map_or(0.0, |at| (at - from).length()),
+                cargo: 0,
+                capacity: 0,
+            });
+        }
+        if let Some(kestrel) = &self.kestrel {
+            let machine = MachineRef::Kestrel;
+            rows.push(MachineListing {
+                machine,
+                name: "KESTREL".into(),
+                state: kestrel_state(kestrel).into(),
+                distance: self
+                    .machine_eye(machine)
+                    .map_or(0.0, |at| (at - from).length()),
+                cargo: 0,
+                capacity: 0,
+            });
         }
         for (index, flier) in self.fleet.fliers.iter().enumerate() {
             let machine = MachineRef::Flier(index);
@@ -566,6 +632,16 @@ impl Mining {
                 .as_mut()
                 .is_some_and(|operation| operation.take_control(index)),
             MachineRef::Flier(index) => self.fleet.take_control(index),
+            MachineRef::Kestrel => match &mut self.kestrel {
+                // Taking the wheel launches a ready scout; the standing
+                // order is stashed and restored on release, the same shape
+                // as the fleet's suspended flier state.
+                Some(kestrel) if kestrel.aloft() || kestrel.ready() => {
+                    self.kestrel_suspended = Some(kestrel.mode);
+                    kestrel.order(vx_agent::KestrelMode::Manual)
+                }
+                _ => false,
+            },
         };
         if taken {
             self.piloted = Some(machine);
@@ -587,6 +663,15 @@ impl Mining {
             }
             MachineRef::Flier(index) => {
                 self.fleet.release_control(index);
+            }
+            MachineRef::Kestrel => {
+                if let Some(kestrel) = &mut self.kestrel {
+                    let resume = self
+                        .kestrel_suspended
+                        .take()
+                        .unwrap_or(vx_agent::KestrelMode::Returning);
+                    kestrel.order(resume);
+                }
             }
         }
         self.pilot_command = PilotCommand::default();
@@ -651,6 +736,15 @@ impl Mining {
             }
         }
 
+        // The scout, only while off the pack: a docked kestrel is stowed,
+        // not a second hat on the player's head.
+        if let Some(kestrel) = self.kestrel.as_ref().filter(|kestrel| kestrel.aloft()) {
+            objects.extend(self.kestrel_rig.objects(
+                lerp(kestrel.craft.previous_position, kestrel.craft.position),
+                self.kestrel_yaw,
+                self.spin * 3.0,
+            ));
+        }
         for (index, flier) in self.fleet.fliers.iter().enumerate() {
             let yaw = self.flier_yaws.get(index).copied().unwrap_or(0.0);
             objects.extend(self.flier_rig.objects(
@@ -685,6 +779,7 @@ impl Mining {
             let name = match machine {
                 MachineRef::Digger(index) => format!("DIGGER {}", index + 1),
                 MachineRef::Flier(index) => format!("FLIER {}", index + 1),
+                MachineRef::Kestrel => "KESTREL".to_string(),
             };
             return Some(format!("piloting {name}"));
         }
@@ -723,6 +818,33 @@ impl Mining {
             self.chosen + 1,
             self.plans.len()
         ))
+    }
+}
+
+impl Mining {
+    /// The kestrel rig at an arbitrary position: the roost borrows the same
+    /// silhouette — one machine, two owners, made literal on screen.
+    pub fn kestrel_objects(&self, at: BlockPos) -> Vec<Object> {
+        self.kestrel_rig.objects(
+            Vec3::new(at.x as f32 + 0.5, at.y as f32, at.z as f32 + 0.5),
+            0.0,
+            self.spin * 3.0,
+        )
+    }
+}
+
+/// The kestrel's state, in a word, for the roster and the HUD.
+pub fn kestrel_state(kestrel: &vx_agent::Kestrel) -> &'static str {
+    use vx_agent::KestrelMode;
+    match kestrel.mode {
+        KestrelMode::Docked if kestrel.cooldown > 0 => "COOLING",
+        KestrelMode::Docked => "DOCKED",
+        KestrelMode::Orbit => "ORBITING",
+        KestrelMode::Sortie { .. } => "ON SORTIE",
+        KestrelMode::Perch { .. } => "PERCHED",
+        KestrelMode::Vanguard => "SCOUTING AHEAD",
+        KestrelMode::Manual => "PILOTED",
+        KestrelMode::Returning => "RETURNING",
     }
 }
 

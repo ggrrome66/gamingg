@@ -119,6 +119,7 @@ impl Shop {
         pile: Option<&Stockpile>,
         walletbook: &Wallet,
         market: &Market,
+        shed: &Garage,
         rack: &Arsenal,
         offers: &[Offer],
     ) -> Vec<Row> {
@@ -131,8 +132,12 @@ impl Shop {
             }
         }
         // Machines first among the buys: they are what the ore is *for*, and a
-        // player who has just sold their first load should see one.
+        // player who has just sold their first load should see one. The
+        // kestrel leaves the shelf once owned — one per person.
         for kind in garage::KINDS {
+            if kind == garage::KESTREL && shed.owned(garage::KESTREL) > 0 {
+                continue;
+            }
             rows.push(Row::BuyMachine(kind));
         }
         // One launcher per person; after that the counter sells the feed for
@@ -143,7 +148,11 @@ impl Shop {
         } else {
             rows.push(Row::BuyLauncher);
         }
-        for line in [wallet::DRILL, wallet::CARGO] {
+        for line in [wallet::DRILL, wallet::CARGO, wallet::CELL] {
+            // The cell line only means anything to a kestrel owner.
+            if line == wallet::CELL && shed.owned(garage::KESTREL) == 0 {
+                continue;
+            }
             if walletbook.upgrade(line) < wallet::MAX_UPGRADE {
                 rows.push(Row::Buy(line));
             }
@@ -180,7 +189,7 @@ impl Shop {
         offers: &[Offer],
         post: Option<&mut MailContext>,
     ) {
-        let rows = Shop::rows(pile.as_deref(), walletbook, market, rack, offers);
+        let rows = Shop::rows(pile.as_deref(), walletbook, market, shed, rack, offers);
         let Some(row) = rows.get(self.cursor) else {
             self.feedback = Some("NOTHING TO TRADE".into());
             return;
@@ -245,7 +254,7 @@ impl Shop {
             }
         }
         // A sold-out row disappears; keep the cursor on the shelf.
-        let rows = Shop::rows(None, walletbook, market, rack, offers)
+        let rows = Shop::rows(None, walletbook, market, shed, rack, offers)
             .len()
             .max(1);
         self.cursor = self.cursor.min(rows - 1);
@@ -387,7 +396,7 @@ pub fn render_shop(
     );
     y += LINE_HEIGHT as i32 + 3;
 
-    let rows = Shop::rows(pile, walletbook, market, rack, offers);
+    let rows = Shop::rows(pile, walletbook, market, shed, rack, offers);
     if rows.is_empty() {
         font::draw_text(&mut pixels, SHOP_WIDTH, margin, y, 1, DIM, "NOTHING TO SELL");
         y += LINE_HEIGHT as i32;
@@ -489,7 +498,7 @@ mod tests {
         let pile = stocked_pile();
         let wallet = Wallet::new();
         let market = market();
-        let rows = Shop::rows(Some(&pile), &wallet, &market, &Arsenal::default(), &[]);
+        let rows = Shop::rows(Some(&pile), &wallet, &market, &Garage::new(), &Arsenal::default(), &[]);
         assert_eq!(
             rows,
             vec![
@@ -500,6 +509,7 @@ mod tests {
                 // somebody who has just sold their first load should see one.
                 Row::BuyMachine(garage::DRONE),
                 Row::BuyMachine(garage::FLIER),
+                Row::BuyMachine(garage::KESTREL),
                 Row::BuyLauncher,
                 Row::Buy(wallet::DRILL),
                 Row::Buy(wallet::CARGO),
@@ -512,7 +522,7 @@ mod tests {
         for _ in 0..wallet::MAX_UPGRADE {
             maxed.raise(wallet::DRILL);
         }
-        let rows = Shop::rows(Some(&pile), &maxed, &market, &Arsenal::default(), &[]);
+        let rows = Shop::rows(Some(&pile), &maxed, &market, &Garage::new(), &Arsenal::default(), &[]);
         assert!(!rows.contains(&Row::Buy(wallet::DRILL)));
         assert!(rows.contains(&Row::Buy(wallet::CARGO)));
     }
@@ -644,7 +654,7 @@ mod tests {
 
         let mut shop = Shop::new();
         shop.open_at_counter();
-        let rows = Shop::rows(None, &wallet, &market, &Arsenal::default(), &[]);
+        let rows = Shop::rows(None, &wallet, &market, &Garage::new(), &Arsenal::default(), &[]);
         let at = rows
             .iter()
             .position(|row| *row == Row::BuyMachine(garage::DRONE))
@@ -803,7 +813,7 @@ mod order_tests {
         let mut books = Economy::new();
         let market = books.market(&home_site(), 0).clone();
 
-        let bare = Shop::rows(None, &wallet, &market, &Arsenal::default(), &[]);
+        let bare = Shop::rows(None, &wallet, &market, &Garage::new(), &Arsenal::default(), &[]);
         assert!(
             !bare.iter().any(|row| matches!(row, Row::Order(_))),
             "an order row appeared from nowhere"
@@ -811,7 +821,7 @@ mod order_tests {
 
         let mut economy = Economy::new();
         let offer = offer_from(&mut economy, 0);
-        let stocked = Shop::rows(None, &wallet, &market, &Arsenal::default(), &[offer]);
+        let stocked = Shop::rows(None, &wallet, &market, &Garage::new(), &Arsenal::default(), &[offer]);
         assert!(stocked.iter().any(|row| matches!(row, Row::Order(0))));
     }
 

@@ -64,7 +64,13 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // that is nobody's fault.
 //
 // Seven added `Fire`. Shots break blocks, so a firefight is part of the hash.
-const VERSION: u32 = 7;
+//
+// Eight is both kinds at once: the roost box joined the security office roof
+// (a world change, like four and five) and the kestrel's standing orders
+// joined the log (a format change). The scout itself never touches ground —
+// its orders replay as documented no-ops — but the log stays the complete
+// record of what was ordered.
+const VERSION: u32 = 8;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -119,6 +125,11 @@ pub enum Command {
     /// else on purpose: a journal with cheats in it still replays to a hash,
     /// which is what makes the panel a scenario editor rather than a taint.
     Admin(Admin),
+    /// A standing order for the kestrel. Journalled because the log is the
+    /// complete record of what the player ordered; replayed as a no-op
+    /// because the scout reveals contacts, never terrain — nothing it does
+    /// can reach the hash. The same honest line the economy draws.
+    Scout(ScoutOrder),
     /// The launcher fired: the muzzle, and the quantised aim.
     ///
     /// The muzzle position is recorded — the one deliberate exception to
@@ -161,6 +172,22 @@ pub enum Admin {
     /// later command is *interpreted*, so a journal now carries its physics.
     /// The f32 crosses the wire as raw bits — exact, not printed-and-parsed.
     SetTuning { key: String, value: f32 },
+}
+
+/// What the kestrel may be told to do. Mirrors `vx_agent::KestrelMode`
+/// minus the states only flight itself can enter (`Manual`, `Returning`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoutOrder {
+    /// Come home and dock.
+    Dock,
+    /// Circle the owner.
+    Orbit,
+    /// Fly to a column, look, come back.
+    Sortie { x: i32, z: i32 },
+    /// Land there and watch.
+    Perch { x: i32, z: i32 },
+    /// Hold ahead along the owner's heading.
+    Vanguard,
 }
 
 impl Command {
@@ -438,6 +465,10 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
             // recorded on each dispatch, and the books were never replayed.
             Admin::SpawnMachine { .. } | Admin::SetStock { .. } => {}
         },
+        // The scout reveals contacts, never terrain: nothing it does can
+        // reach the world hash, so replay only needs to decode the order and
+        // move on — the same honest line run_replay draws for the economy.
+        Command::Scout(_) => {}
         Command::Fire {
             muzzle,
             yaw_q,
@@ -565,6 +596,24 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             }
             file.write_all(&yaw_q.to_le_bytes())?;
             file.write_all(&pitch_q.to_le_bytes())?;
+        }
+        Command::Scout(order) => {
+            file.write_all(&[13u8])?;
+            match order {
+                ScoutOrder::Dock => file.write_all(&[0u8])?,
+                ScoutOrder::Orbit => file.write_all(&[1u8])?,
+                ScoutOrder::Sortie { x, z } => {
+                    file.write_all(&[2u8])?;
+                    file.write_all(&x.to_le_bytes())?;
+                    file.write_all(&z.to_le_bytes())?;
+                }
+                ScoutOrder::Perch { x, z } => {
+                    file.write_all(&[3u8])?;
+                    file.write_all(&x.to_le_bytes())?;
+                    file.write_all(&z.to_le_bytes())?;
+                }
+                ScoutOrder::Vanguard => file.write_all(&[4u8])?,
+            }
         }
     }
     Ok(())
@@ -709,6 +758,29 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
                 yaw_q: i16::from_le_bytes(yaw),
                 pitch_q: i16::from_le_bytes(pitch),
             }
+        }
+        13 => {
+            let mut which = [0u8; 1];
+            file.read_exact(&mut which)?;
+            let order = match which[0] {
+                0 => ScoutOrder::Dock,
+                1 => ScoutOrder::Orbit,
+                2 => ScoutOrder::Sortie {
+                    x: read_u32(file)? as i32,
+                    z: read_u32(file)? as i32,
+                },
+                3 => ScoutOrder::Perch {
+                    x: read_u32(file)? as i32,
+                    z: read_u32(file)? as i32,
+                },
+                4 => ScoutOrder::Vanguard,
+                other => {
+                    return Err(std::io::Error::other(format!(
+                        "unknown scout order {other}"
+                    )))
+                }
+            };
+            Command::Scout(order)
         }
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
@@ -1433,6 +1505,64 @@ mod fire_tests {
         let first = fight(&mut world());
         let second = fight(&mut world());
         assert_eq!(first, second, "the firefight itself is not deterministic");
+    }
+
+    /// Every scout order survives the wire, and a log full of them replays
+    /// to the same ground as a log with none — the scout charts nothing and
+    /// breaks nothing, so the oracle must not see it.
+    #[test]
+    fn scout_orders_round_trip_and_replay_to_unchanged_ground() {
+        let directory = std::env::temp_dir().join(format!(
+            "vx-journal-scout-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let orders = [
+            ScoutOrder::Orbit,
+            ScoutOrder::Sortie { x: -40, z: 120 },
+            ScoutOrder::Perch { x: 7, z: -3 },
+            ScoutOrder::Vanguard,
+            ScoutOrder::Dock,
+        ];
+        let mut journal = CommandLog::default();
+        for order in orders {
+            journal.record(Command::Scout(order));
+            journal.record(Command::Advance { ticks: 5 });
+        }
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let recovered: Vec<&Command> = read_back
+            .entries()
+            .iter()
+            .map(|entry| &entry.command)
+            .filter(|command| matches!(command, Command::Scout(_)))
+            .collect();
+        assert_eq!(recovered.len(), orders.len(), "orders were lost on the wire");
+        for (found, sent) in recovered.iter().zip(&orders) {
+            assert_eq!(**found, Command::Scout(*sent), "an order mutated in transit");
+        }
+
+        // Replay it against fresh ground, and replay the same ticks with no
+        // scout orders at all: identical hashes, or the scout lied.
+        let span = (
+            vx_core::BlockPos::new(-20, 40, -20),
+            vx_core::BlockPos::new(40, 100, 40),
+        );
+        let events = EventBus::new();
+        let mut scouted = world();
+        replay(&read_back, &mut scouted, &events);
+        let mut quiet_log = CommandLog::default();
+        quiet_log.record(Command::Advance { ticks: 25 });
+        let mut quiet = world();
+        replay(&quiet_log, &mut quiet, &events);
+        assert_eq!(
+            region_hash(&scouted, span.0, span.1),
+            region_hash(&quiet, span.0, span.1),
+            "scout orders changed the ground"
+        );
     }
 
     /// Firing queues recoil, and the next `Advance` applies it: the replayed

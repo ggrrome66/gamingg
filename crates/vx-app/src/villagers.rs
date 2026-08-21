@@ -724,8 +724,9 @@ impl Villagers {
             .collect()
     }
 
-    #[cfg(test)]
-    fn positions(&self) -> Vec<Vec3> {
+    /// Everyone's feet, for the tests and for anything scanning the street
+    /// from above.
+    pub fn positions(&self) -> Vec<Vec3> {
         self.folk.iter().map(|villager| villager.position).collect()
     }
 }

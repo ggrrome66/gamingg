@@ -80,7 +80,10 @@ impl Flier {
         self.cargo.total()
     }
 
-    pub(crate) fn move_to(&mut self, to: BlockPos) {
+    /// Move, keeping the previous position for the renderer to interpolate
+    /// from. Public since the scout round: the kestrel and the roost reuse
+    /// the flier's movement wholesale rather than growing their own.
+    pub fn move_to(&mut self, to: BlockPos) {
         self.previous_position = self.position;
         self.position = to;
     }

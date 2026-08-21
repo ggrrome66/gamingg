@@ -59,6 +59,21 @@ pub mod colour {
     pub const CONTRACT: [u8; 4] = [255, 90, 140, 255];
     /// A load on the trade network, yours or a town's.
     pub const TRADE: [u8; 4] = [255, 214, 90, 255];
+    /// A contact the kestrel reported: where something *was* seen.
+    pub const MARK: [u8; 4] = [255, 70, 70, 255];
+
+    /// The mark colour, faded by how old the report is: fresh intelligence
+    /// and stale intelligence must not read the same.
+    pub fn mark_aged(age: u64) -> [u8; 4] {
+        let fade = (age.min(crate::scout::MARK_DECAY) * 160 / crate::scout::MARK_DECAY) as u8;
+        let [r, g, b, a] = MARK;
+        [
+            r.saturating_sub(fade / 2),
+            g.saturating_sub(fade / 4),
+            b.saturating_sub(fade / 4),
+            a.saturating_sub(fade),
+        ]
+    }
 }
 
 /// The map's persistent and per-session state.

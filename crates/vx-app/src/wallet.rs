@@ -21,6 +21,8 @@ const VERSION: u32 = 1;
 pub const DRILL: &str = "drill";
 /// The cargo-capacity upgrade line, applied to every hold in the fleet.
 pub const CARGO: &str = "cargo";
+/// The kestrel's cell line: each mark shortens the recharge after a flight.
+pub const CELL: &str = "cell";
 
 /// Levels each upgrade line can reach.
 pub const MAX_UPGRADE: u32 = 5;
@@ -153,6 +155,15 @@ pub fn drill_multiplier(level: u32) -> f32 {
 /// A hold's capacity with the cargo line applied: +50% of base per level.
 pub fn boosted_capacity(base: u64, level: u32) -> u64 {
     base + base * level as u64 / 2
+}
+
+/// The kestrel's full-cell recharge with the cell line applied: a straight
+/// walk from the stock cost down to the best, one fifth per mark.
+pub fn recharge_ticks(level: u32) -> u32 {
+    let stock = vx_agent::kestrel::COOLDOWN;
+    let best = vx_agent::kestrel::COOLDOWN_BEST;
+    let step = (stock - best) / MAX_UPGRADE;
+    stock - step * level.min(MAX_UPGRADE)
 }
 
 #[cfg(test)]

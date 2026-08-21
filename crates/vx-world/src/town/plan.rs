@@ -337,6 +337,19 @@ const SECURITY_OFFICE: Blueprint = Blueprint {
             "GGGGGGG",
             "GGGGGGG",
         ],
+        // The roost: a two-by-two metal box on the roof, out of which the
+        // town's watcher drone launches when something loud happens. Placed
+        // toward the plaza-facing corner so the pop-out is visible from the
+        // street. Adding this layer grows the office's claim by one block of
+        // height, which is correct — the box is the sheriff's property.
+        &[
+            ".......",
+            ".......",
+            ".......",
+            "....MM.",
+            "....MM.",
+            ".......",
+        ],
     ],
 };
 

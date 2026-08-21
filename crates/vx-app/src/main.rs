@@ -29,6 +29,8 @@ mod mining;
 mod permits;
 mod movement;
 mod rig;
+mod roost;
+mod scout;
 mod shop;
 mod skills;
 mod streaming;
@@ -690,6 +692,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             },
             ammo: options.launcher.then_some(8),
             panicking: 0,
+            kestrel: None,
         });
         renderer.set_overlay(
             HUD_SLOT,
@@ -823,7 +826,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             centre: options.at,
             markers: &markers,
         };
-        let pixels = device::render_device(&handheld, &roster, Some(&country));
+        let pixels = device::render_device(&handheld, &roster, Some(&country), None);
         let panel_width = device::DEVICE_WIDTH as f32 * device::DEVICE_SCALE;
         let panel_height = device::DEVICE_HEIGHT as f32 * device::DEVICE_SCALE;
         renderer.set_overlay(
@@ -1289,6 +1292,10 @@ struct Active {
     shake: f32,
     /// Accumulated *frame* time driving the shake wobble. Never wall clock.
     shake_phase: f32,
+    /// The scout's collected intelligence.
+    marks: scout::Marks,
+    /// The hometown's watcher, once its box is in loaded ground.
+    roost: Option<roost::Roost>,
 }
 
 struct App {
@@ -1587,7 +1594,27 @@ impl App {
             player: Some(active.player.position),
             machines: &machines,
         };
-        active.watched = active.villagers.witnesses(&around) > 0;
+        // Ground witnesses, plus the eye in the sky. The roost counting as
+        // a witness is what the "observed" warning is warning you about.
+        let aerial = active.roost.as_ref().is_some_and(|roost| {
+            roost.sees(
+                &active.world,
+                active.player.position + glam::Vec3::Y * active.player.eye_height,
+            )
+        });
+        active.watched = aerial || active.villagers.witnesses(&around) > 0;
+        if aerial {
+            if let Some(roost) = &mut active.roost {
+                roost.hold_interest();
+                if !roost.observed {
+                    roost.observed = true;
+                    active.greeting = Some((
+                        "THE TOWN'S EYE IS ON YOU".into(),
+                        Instant::now(),
+                    ));
+                }
+            }
+        }
 
         // Picking a lock: you stand still and exposed while it runs, which is
         // the whole cost of the quiet route. Being seen finishing one is what
@@ -1694,6 +1721,7 @@ impl App {
         // replay uses — the sweeps are where the live game reads the bills.
         Self::advance_gunfire(active, active.mining.last_ticks());
         Self::collect_crashes(active);
+        Self::advance_scouts(active, active.mining.last_ticks());
 
         // The fleet's work becomes the player's experience.
         if report.sectors_completed > 0 || report.pings_found > 0 {
@@ -1888,6 +1916,43 @@ impl App {
                 * glam::Mat4::from_translation(glam::Vec3::splat(-0.5));
             objects.push(vx_render::Object::new(model, vx_render::tiles::slot::STEEL));
         }
+        // The town's watcher, whenever it is off its box — the same
+        // silhouette as the player's own scout, which is the point.
+        if let Some(roost) = active.roost.as_ref().filter(|roost| roost.aloft()) {
+            let at = roost.position();
+            objects.extend(active.mining.kestrel_objects(at));
+        }
+        // Live marks: a small hovering cube over wherever the contact was
+        // last seen. It hangs over the *report*, not the contact — stale
+        // intelligence pointing at empty ground is the honest picture.
+        let mark_now = active.journal.tick();
+        for mark in active.marks.live(mark_now) {
+            let over = mark.position + glam::Vec3::Y * 2.4;
+            objects.push(vx_render::Object::box_between(
+                over - glam::Vec3::splat(0.16),
+                over + glam::Vec3::splat(0.16),
+                vx_render::tiles::slot::COPPER_ORE,
+            ));
+        }
+
+        // The town's watcher, whenever it is off its box — drawn with the
+        // same silhouette as the player's own scout, which is the point.
+        if let Some(roost) = active.roost.as_ref().filter(|roost| roost.aloft()) {
+            objects.extend(active.mining.kestrel_objects(roost.position()));
+        }
+        // Live marks: a small hovering cube over wherever a contact was
+        // last seen. It hangs over the *report*, not the contact — stale
+        // intelligence pointing at empty ground is the honest picture.
+        let mark_now = active.journal.tick();
+        for mark in active.marks.live(mark_now) {
+            let over = mark.position + glam::Vec3::Y * 2.4;
+            objects.push(vx_render::Object::box_between(
+                over - glam::Vec3::splat(0.16),
+                over + glam::Vec3::splat(0.16),
+                vx_render::tiles::slot::COPPER_ORE,
+            ));
+        }
+
         // Downed cargo, waiting where it fell.
         for crash in &active.arsenal.crashes {
             let ground = active
@@ -2070,6 +2135,15 @@ impl App {
         active.shake = (active.shake + 0.6).min(1.0);
         active.audio.play(audio::Cue::Boom, 1.0);
         active.villagers.startled(muzzle);
+        // And the box on the office roof has ears for gunfire.
+        let muzzle_block = vx_core::BlockPos::new(
+            muzzle.x.floor() as i32,
+            muzzle.y.floor() as i32,
+            muzzle.z.floor() as i32,
+        );
+        if let Some(roost) = &mut active.roost {
+            roost.report(muzzle_block, roost::Report::Gunshot);
+        }
 
         // Town rules: the first shot inside a town's line gets a warning.
         // Harm is billed separately, warning or none — the warning only ever
@@ -2144,7 +2218,17 @@ impl App {
             player: Some(active.player.position),
             machines: &[],
         };
-        let seen = active.villagers.witnesses(&around);
+        let mut seen = active.villagers.witnesses(&around);
+        // The eye overhead counts, once it has made itself known: the first
+        // sighting is the warning, everything after it is a statement.
+        let overhead = active.roost.as_ref().is_some_and(|roost| {
+            roost.observed
+                && roost.sees(
+                    &active.world,
+                    active.player.position + glam::Vec3::Y * active.player.eye_height,
+                )
+        });
+        seen += usize::from(overhead);
         let bill = arsenal::witnessed_bounty(arsenal::BOUNTY_PROPERTY, seen);
         if bill > 0 {
             active.permits.borrow_mut().caught(bill, seen);
@@ -2203,6 +2287,103 @@ impl App {
                 ));
             }
         }
+    }
+
+    /// Step the kestrel and the roost `ticks` journal ticks, and let both
+    /// scan. Flight is deterministic in ticks; the marks they leave are
+    /// live-side intelligence, outside the oracle like the town books.
+    fn advance_scouts(active: &mut Active, ticks: u32) {
+        // The bought scout materialises docked, and its cell upgrade level
+        // applies retroactively like every other upgrade.
+        if active.garage.owned(garage::KESTREL) > 0 && active.mining.kestrel.is_none() {
+            let anchor = vx_core::BlockPos::new(
+                active.player.position.x.floor() as i32,
+                active.player.position.y.floor() as i32,
+                active.player.position.z.floor() as i32,
+            );
+            active.mining.kestrel = Some(vx_agent::Kestrel::new(anchor));
+            active.greeting = Some((
+                "KESTREL DELIVERED. IT RIDES YOUR PACK - SEE THE HANDHELD".into(),
+                Instant::now(),
+            ));
+        }
+        if let Some(kestrel) = &mut active.mining.kestrel {
+            kestrel.recharge_cost = wallet::recharge_ticks(active.wallet.upgrade(wallet::CELL));
+        }
+        if ticks == 0 {
+            return;
+        }
+
+        let anchor = vx_core::BlockPos::new(
+            active.player.position.x.floor() as i32,
+            active.player.position.y.floor() as i32,
+            active.player.position.z.floor() as i32,
+        );
+        // The vanguard flies along the body's facing, snapped to the axis
+        // with the most of it — the flier's own movement grid.
+        let facing = active
+            .last_move
+            .map(|command| command.yaw())
+            .unwrap_or(active.camera.yaw);
+        let (dx, dz) = (facing.sin(), -facing.cos());
+        let heading = if dx.abs() >= dz.abs() {
+            (dx.signum() as i32, 0)
+        } else {
+            (0, dz.signum() as i32)
+        };
+
+        for _ in 0..ticks {
+            if let Some(kestrel) = &mut active.mining.kestrel {
+                // A piloted kestrel is moved by pilot_sub_tick; ticking it
+                // here too would double its meter, so Manual only drains.
+                kestrel.tick(&active.world, anchor, heading);
+            }
+            if let Some(roost) = &mut active.roost {
+                roost.tick(&active.world);
+            }
+        }
+
+        // One scan per frame is plenty: contacts move at walking pace.
+        let now = active.journal.tick();
+        let mut contacts: Vec<(scout::MarkKind, glam::Vec3)> = active
+            .villagers
+            .positions()
+            .into_iter()
+            .map(|at| (scout::MarkKind::Person, at))
+            .collect();
+        for at in active.mining.drone_positions() {
+            contacts.push((
+                scout::MarkKind::Machine,
+                glam::Vec3::new(at.x as f32 + 0.5, at.y as f32, at.z as f32 + 0.5),
+            ));
+        }
+        for flier in &active.mining.fleet.fliers {
+            contacts.push((
+                scout::MarkKind::Machine,
+                glam::Vec3::new(
+                    flier.position.x as f32 + 0.5,
+                    flier.position.y as f32,
+                    flier.position.z as f32 + 0.5,
+                ),
+            ));
+        }
+        if let Some(kestrel) = active
+            .mining
+            .kestrel
+            .as_ref()
+            .filter(|kestrel| kestrel.aloft())
+        {
+            let at = kestrel.craft.position;
+            let eye = glam::Vec3::new(at.x as f32 + 0.5, at.y as f32 + 0.3, at.z as f32 + 0.5);
+            active.marks.scan(
+                &active.world,
+                eye,
+                vx_agent::kestrel::SCAN_RADIUS,
+                &contacts,
+                now,
+            );
+        }
+        active.marks.cull(now);
     }
 
     /// Walk-up salvage: stand next to a downed load and it goes onto the
@@ -2389,6 +2570,11 @@ impl App {
                         },
                         Instant::now(),
                     ));
+                    // Breaching is the loudest thing in a quiet town, and
+                    // the box on the office roof has ears.
+                    if let Some(roost) = &mut active.roost {
+                        roost.report(hit.block, roost::Report::Breach);
+                    }
                 }
 
                 // Breaking the chest packs it up: the block is forgotten, the
@@ -2478,11 +2664,23 @@ impl App {
                 let roster = active.mining.roster(from);
                 (roster.len(), active.device.selected(&roster))
             };
+            let on_kestrel_page = self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.device.page == device::Page::Kestrel);
             match code {
                 KeyCode::ArrowUp | KeyCode::ArrowDown => {
                     let Some(active) = &mut self.active else { return };
                     let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
-                    active.device.move_cursor(delta, roster_len);
+                    let rows = if on_kestrel_page {
+                        device::SCOUT_ORDERS.len()
+                    } else {
+                        roster_len
+                    };
+                    active.device.move_cursor(delta, rows);
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter if on_kestrel_page => {
+                    self.order_kestrel();
                 }
                 KeyCode::Enter | KeyCode::NumpadEnter => {
                     if let Some(machine) = selected {
@@ -2690,6 +2888,7 @@ impl App {
                         pile,
                         &active.wallet,
                         &market,
+                        &active.garage,
                         &active.arsenal,
                         &active.offers,
                     )
@@ -3112,6 +3311,56 @@ impl App {
     /// Master override: take the wheel of whatever is being watched, or give
     /// it back. Keeps the handheld's idea of control and the simulation's in
     /// step by doing both in one place.
+    /// Enter on the handheld's kestrel page: turn the cursor row into a
+    /// journalled standing order and hand it to the machine.
+    fn order_kestrel(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let Some(kestrel) = &mut active.mining.kestrel else {
+            active.device.feedback = Some("NO KESTREL ON THE PACK".into());
+            return;
+        };
+        let player = active.player.position;
+        let ahead = player + active.camera.forward_level() * 30.0;
+        let order = match active.device.cursor() {
+            0 => journal::ScoutOrder::Orbit,
+            1 => journal::ScoutOrder::Sortie {
+                x: ahead.x.floor() as i32,
+                z: ahead.z.floor() as i32,
+            },
+            2 => journal::ScoutOrder::Perch {
+                x: player.x.floor() as i32,
+                z: player.z.floor() as i32,
+            },
+            3 => journal::ScoutOrder::Vanguard,
+            _ => journal::ScoutOrder::Dock,
+        };
+        let mode = match order {
+            journal::ScoutOrder::Dock => vx_agent::KestrelMode::Docked,
+            journal::ScoutOrder::Orbit => vx_agent::KestrelMode::Orbit,
+            journal::ScoutOrder::Sortie { x, z } => vx_agent::KestrelMode::Sortie {
+                x,
+                z,
+                linger: vx_agent::kestrel::SORTIE_LINGER,
+            },
+            journal::ScoutOrder::Perch { x, z } => vx_agent::KestrelMode::Perch { x, z },
+            journal::ScoutOrder::Vanguard => vx_agent::KestrelMode::Vanguard,
+        };
+        if kestrel.order(mode) {
+            // Accepted orders go in the log; a refused one changed nothing
+            // and records nothing.
+            active.journal.record(Command::Scout(order));
+            active.device.feedback = Some(
+                device::SCOUT_ORDERS[active.device.cursor().min(device::SCOUT_ORDERS.len() - 1)]
+                    .to_string(),
+            );
+        } else {
+            active.device.feedback = Some(format!(
+                "CELL RECHARGING - READY IN {}S",
+                kestrel.cooldown / 8
+            ));
+        }
+    }
+
     fn take_or_release_control(&mut self) {
         let Some(active) = &mut self.active else { return };
         let Some((machine, taking)) = active.device.toggle_control() else {
@@ -3226,13 +3475,29 @@ impl App {
                 radius: 1,
             });
         }
+        // The scout's marks, dimming as they age — a stale report should
+        // not read like a live one.
+        let mark_now = active.journal.tick();
+        for mark in active.marks.live(mark_now) {
+            markers.push(map::Marker {
+                x: mark.position.x as i32,
+                z: mark.position.z as i32,
+                colour: map::colour::mark_aged(mark.age(mark_now)),
+                radius: 1,
+            });
+        }
         let country = device::Country {
             world: &active.world,
             explored: &active.map,
             centre,
             markers: &markers,
         };
-        let pixels = device::render_device(&active.device, &roster, Some(&country));
+        let scout = active.mining.kestrel.as_ref().map(|kestrel| device::ScoutReadout {
+            state: mining::kestrel_state(kestrel),
+            endurance: kestrel.endurance,
+            cooldown: kestrel.cooldown,
+        });
+        let pixels = device::render_device(&active.device, &roster, Some(&country), scout.as_ref());
         let (width, height) = active.renderer.size();
         let panel_width = device::DEVICE_WIDTH as f32 * device::DEVICE_SCALE;
         let panel_height = device::DEVICE_HEIGHT as f32 * device::DEVICE_SCALE;
@@ -3803,6 +4068,14 @@ impl App {
                 .equipped
                 .then_some(active.arsenal.ammo),
             panicking: active.villagers.panicking(),
+            kestrel: active.mining.kestrel.as_ref().map(|kestrel| {
+                let seconds = if kestrel.cooldown > 0 {
+                    kestrel.cooldown / 8
+                } else {
+                    kestrel.endurance / 8
+                };
+                format!("KESTREL {} {}S", mining::kestrel_state(kestrel), seconds)
+            }),
         };
         let pixels = hud::render_hud(&content);
 
@@ -3885,6 +4158,29 @@ impl App {
                 x: flier.position.x,
                 z: flier.position.z,
                 colour: map::colour::FLIER,
+                radius: 1,
+            });
+        }
+        if let Some(kestrel) = active
+            .mining
+            .kestrel
+            .as_ref()
+            .filter(|kestrel| kestrel.aloft())
+        {
+            markers.push(map::Marker {
+                x: kestrel.craft.position.x,
+                z: kestrel.craft.position.z,
+                colour: map::colour::FLIER,
+                radius: 1,
+            });
+        }
+        // The scout's reports, dimming with age.
+        let mark_now = active.journal.tick();
+        for mark in active.marks.live(mark_now) {
+            markers.push(map::Marker {
+                x: mark.position.x as i32,
+                z: mark.position.z as i32,
+                colour: map::colour::mark_aged(mark.age(mark_now)),
                 radius: 1,
             });
         }
@@ -4283,6 +4579,23 @@ impl ApplicationHandler for App {
             launcher_rig: Rig::launcher(),
             shake: 0.0,
             shake_phase: 0.0,
+            marks: scout::Marks::default(),
+            roost: {
+                // The box stands on the hometown security office roof; the
+                // roost is its tenant. Derived from the office's claim so
+                // worldgen stays the one authority on where that is.
+                let site = vx_world::town::home_site();
+                vx_world::town::plan::buildings(&site)
+                    .into_iter()
+                    .find(|building| building.role == vx_world::town::plan::Role::Security)
+                    .map(|office| {
+                        roost::Roost::new(vx_core::BlockPos::new(
+                            office.max.x - 2,
+                            office.max.y,
+                            office.max.z - 2,
+                        ))
+                    })
+            },
         });
 
         self.last_frame = Instant::now();

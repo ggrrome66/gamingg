@@ -88,7 +88,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 10c | `67aa3a6` | Pregenerated spawn, streaming off the frame thread, the player's house, mail-order, the welcome panel |
 | 11 | `289a143` | Permits: ranked claims, three grades of lockbox, witnesses and sneaking, bounty, breaching and lock-picking |
 | 12 | `bbe6756` | The gold panel: journaled admin orders, live tuning, the operator's console compiled out of shipped builds |
-| 13 | _this_ | The arsenal: the slug launcher, synthesized sound, recoil and shake, town warnings, witnessed property bounty, panic, caravan interception |
+| 13 | `4f22cd4` | The arsenal: the slug launcher, synthesized sound, recoil and shake, town warnings, witnessed property bounty, panic, caravan interception |
+| 14 | _this_ | The kestrel and the roost: a pack scout with standing orders and decaying contact marks, and the town's own watcher on the security office roof |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -550,6 +551,100 @@ somebody to take them.
 
 ---
 
+## Shipped — Stage 14: the kestrel and the roost
+
+One machine, two owners — the decision everything else followed from. The
+player's scout and the town's watcher are the same airframe with the same
+endurance and the same battery problem, so the player learns exactly what the
+law can see by owning the thing that sees it, and surveillance stays a
+mechanic instead of a punishment.
+
+**The kestrel** rides the pack: bought once at the counter (one per person —
+the fleet is for swarms, the pack is for one), tethered by recharge rather
+than fuel. Flight and cooldown are one budget — the recharge is proportional
+to what the flight spent, and the cell upgrade line shortens it. Its standing
+orders are journalled commands (`Command::Scout`, VERSION 7 → 8) set from the
+handheld's third page: orbit overhead, sortie where you look, perch as a
+sentry at a quarter drain, fly vanguard ahead, dock. Piloting it is the
+existing take-control path — `MachineRef::Kestrel` — and its movement is the
+flier's, reused whole: same terrain-safe stepping, same never-inside-terrain
+rule. It is deliberately **not** in the fleet roster, so `dispatch_scan` can
+never grab it and the survey layer stays the paid flier's trade by
+construction — the scout reveals *contacts*, never terrain, which is the line
+that keeps it from quietly obsoleting the machine you pay for.
+
+**A mark is a report, not a tracking beacon.** Contacts scanned within range
+and line of sight get a hovering cube over where they *were* seen and a pin
+on both maps, dimming as the report ages and gone after thirty seconds
+unsighted. The occlusion raycast that already ran everywhere does the work,
+which is what makes a roof — or tree canopy — real cover from above with no
+new stealth system: cover now splits into cover from people and cover from
+the sky, and the sky kind is geometry.
+
+**The roost** is the same machine in a box on the security office roof (a
+fifth blueprint layer — the worldgen half of the version bump). It hears
+loud *reports* — a lock breached, a shot fired in town — pops out over three
+readable seconds, flies to the noise, and watches. The first time it gets
+eyes on you, you are *observed*: the drone overhead, visibly, is the
+warning. Crimes committed while observed count it as one more witness in
+the arithmetic stage 11 built. It never attacks. And every counter to it is
+honest mechanics: break sky line of sight until the mark decays, or bait it
+aloft and outlast its endurance — while it recharges in the box the town is
+blind, and `the heist window exists` is a test, not a promise.
+
+### What is deliberately not in 14
+
+The homestead's own roost (stage 15, where hardening it against intrusion
+has stakes); hacking anything (stage 15); contact classification beyond
+person/machine; a second kestrel; per-kind mark decay; kestrel numbers in
+the tuning table. Known rough edges, expected: the kestrel's cell resets on
+a reload (endurance is not persisted); a perched kestrel under an overhang
+sees nothing and says nothing about why; the roost watches but nothing yet
+*acts* on what it witnesses beyond the ledger — the sheriff who serves a
+warrant is a later tenant.
+
+---
+
+## Planned — Stage 15: hacking through machines
+
+The intrusion round, recorded from the design note whole. The Security
+line's work moves *through drones* — a machine perches at the lock while
+the operator stands anywhere the link reaches — and the town's machines,
+the roost first among them, become the targets worth doing it to.
+
+- **Not a minigame.** Stage 11's rule holds: locks are gated by hard
+  floors, not dice. Moving the work onto a drone changes who is exposed
+  and where the operator stands, not the odds — which is what keeps a hack
+  journallable and honest on a Deck with no mouse to wiggle.
+- **A hack is a job, so a drone can carry it.** `Intrude { target }` is a
+  dispatched order like a dig; piloting the machine to the box by hand and
+  dispatching it are one code path, one journal entry, and a test that says
+  the two produce the same world.
+- **The machine is exposed; the owner is billed.** A witnessed machine
+  marks its owner on the bounty ledger the same as a witnessed hand, and a
+  machine caught mid-hack can be seized — impound fine at the counter.
+  Remote intrusion buys distance from the *scene*, not the *consequence*.
+- **The tool is a module, the ceiling is the skill.** The garage fits a
+  spoofer coil (light for the kestrel, heavy for ground frames); what it
+  may attempt is capped by the operator's Security level — hardware sets
+  where the work can happen, skill sets what work is possible.
+- **The roost is the first target that matters.** Three grades up the
+  Security line: *blind* it (it stands down, the town notices within a
+  day), *silence* it (it patrols and files nothing), *tap* it (its marks
+  mirror to your handheld — the strongest intelligence in the game, and
+  the view from the other side of the lens).
+- **Symmetry, on purpose.** The same spoofers arrive in faction hands
+  later, and the garage sells the counter — a hardened link that raises a
+  machine's effective lock tier. The player who has tapped a roost knows
+  exactly why their own kestrel deserves one. This round also brings the
+  **homestead's own roost box** — the sheriff's watcher on your roof, for
+  the same price the sheriff paid.
+- **Range is the link, and the link is the leash**: operator within link
+  of the machine, machine at the target; out-of-link machines finish their
+  standing order and return. The number stage 16+'s jammers will shrink.
+
+---
+
 ## Planned — star forts: walls with the receipts to justify them
 
 A worldgen round, recorded from the design note whole. Towns grow bastioned
@@ -742,27 +837,27 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-Renumbered after permits, the gold panel and the arsenal took 11–13: the
-plans kept their order, the stages moved down to make room.
+Renumbered again after the scout (14) and intrusion (15) rounds took their
+slots: the plans kept their order, the stages moved down to make room.
 
 | Stage | What | Why here |
 |---|---|---|
-| 14 | Caves | The first true 3D carve in a height-field world, and the thing that makes hand-mining pleasant — so it serves the opening loop 10a just built, not only the late game |
-| 15 | Bunkers, built and lootable | Rests on caves paying for the 3D carve. Sited on the same lattice as towns, shelled with a very high `hardness`, laid out by the jigsaw generator deferred since stage 8, and looted — a *source* to match 10a's sink |
-| 16 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
-| 17 | Star forts | Bastioned traces per town tier, gates on the roads, deterministic ruins. After the fuel loop and before hostiles: walls should exist — and have gaps — before anything arrives that makes them matter, and the arsenal is what makes a town want them |
-| 18 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
-| 19 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
-| 20 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
-| 21 | Hostiles and health | The half of combat stage 13 leaves out. `Perception` (stage 7) is already the shape a hostile needs, and stage 13's bounty contracts are already something for one to take |
-| 22 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 21 brings |
-| 23 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to |
-| 24 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
-| 25 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 16 | Caves | The first true 3D carve in a height-field world, and the thing that makes hand-mining pleasant — so it serves the opening loop 10a just built, not only the late game |
+| 17 | Bunkers, built and lootable | Rests on caves paying for the 3D carve. Sited on the same lattice as towns, shelled with a very high `hardness`, laid out by the jigsaw generator deferred since stage 8, and looted — a *source* to match 10a's sink |
+| 18 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
+| 19 | Star forts | Bastioned traces per town tier, gates on the roads, deterministic ruins. After the fuel loop and before hostiles: walls should exist — and have gaps — before anything arrives that makes them matter, and the arsenal is what makes a town want them |
+| 20 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
+| 21 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
+| 22 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
+| 23 | Hostiles and health | The half of combat stage 13 leaves out. `Perception` (stage 7) is already the shape a hostile needs, and stage 13's bounty contracts are already something for one to take |
+| 24 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 23 brings |
+| 25 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
+| 26 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
+| 27 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 13.
+The whole game at a glance, as of stage 14.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -784,9 +879,14 @@ by stance eye height, bounty, breaching, lock-picking); the gold panel
 (journaled admin orders, live tuning, compiled out of shipped builds); the
 arsenal (slug launcher, synthesized audio, recoil and screenshake, town
 warnings, witnessed property bounty, panic with flee-or-alarm, caravan
-interception and salvage); a Steam Deck dist build every round.
+interception and salvage); the kestrel (pack scout, standing orders from
+the handheld, decaying contact marks, cell upgrade line) and the roost (the
+town's watcher on the office roof, observed-then-witnessed, the heist
+window); a Steam Deck dist build every round.
 
-**Planned, in arc order:** caves; bunkers built-then-occupied; fuel loop;
+**Planned, in arc order:** hacking through machines (stage 15: drone-borne
+intrusion, spoofer coils, the roost blinded/silenced/tapped, impound, the
+homestead's own roost); caves; bunkers built-then-occupied; fuel loop;
 star forts; terminal; crafting; wear and breakdowns; hostiles and health;
 the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
 B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket
@@ -794,7 +894,8 @@ arcade.
 
 **Outstanding engineering:** floating-origin rebase; journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the
-weapon table; gamepad input for the gold panel and the game.
+weapon table; gamepad input for the gold panel and the game; the kestrel's
+cell state surviving a reload.
 
 ## Known rough edges
 

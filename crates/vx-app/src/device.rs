@@ -49,7 +49,29 @@ pub enum Page {
     Fleet,
     /// The country: where you have been, and everything on it.
     Map,
+    /// The scout's standing orders.
+    Kestrel,
 }
+
+/// What the kestrel page needs to know, read once per frame.
+pub struct ScoutReadout {
+    /// One word: DOCKED, COOLING, ORBITING...
+    pub state: &'static str,
+    /// Flight ticks left in the cell.
+    pub endurance: u32,
+    /// Recharge ticks left.
+    pub cooldown: u32,
+}
+
+/// The kestrel page's order rows, in cursor order. Main maps the selected
+/// index onto a journalled `ScoutOrder`.
+pub const SCOUT_ORDERS: [&str; 5] = [
+    "ORBIT OVERHEAD",
+    "SORTIE WHERE I LOOK",
+    "PERCH HERE",
+    "FLY VANGUARD",
+    "DOCK",
+];
 
 /// The handheld's state.
 #[derive(Debug, Default)]
@@ -77,13 +99,20 @@ impl Device {
         self.feedback = None;
     }
 
-    /// Flip between the fleet roster and the map.
+    /// Turn to the next page: fleet, map, kestrel, round again.
     pub fn turn_page(&mut self) {
         self.page = match self.page {
             Page::Fleet => Page::Map,
-            Page::Map => Page::Fleet,
+            Page::Map => Page::Kestrel,
+            Page::Kestrel => Page::Fleet,
         };
+        self.cursor = 0;
         self.feedback = None;
+    }
+
+    /// Where the cursor stands, for pages whose rows are not machines.
+    pub fn cursor(&self) -> usize {
+        self.cursor
     }
 
     /// Close the panel. A live feed keeps running — you put the handheld down
@@ -191,6 +220,7 @@ pub fn render_device(
     device: &Device,
     roster: &[MachineListing],
     country: Option<&Country<'_>>,
+    scout: Option<&ScoutReadout>,
 ) -> Vec<u8> {
     let mut pixels = vec![0u8; (DEVICE_WIDTH * DEVICE_HEIGHT * 4) as usize];
     for texel in pixels.chunks_exact_mut(4) {
@@ -232,6 +262,58 @@ pub fn render_device(
             1,
             DIM,
             "TAB TURNS THE PAGE. V CLOSES.",
+        );
+        return pixels;
+    }
+
+    if device.page == Page::Kestrel {
+        font::draw_text(&mut pixels, DEVICE_WIDTH, margin, y, 1, ACCENT, "KESTREL COMMAND");
+        y += LINE_HEIGHT as i32 + 3;
+        match scout {
+            Some(scout) => {
+                // The budget, in seconds at the 8 Hz clock: what is left to
+                // fly, or how long until it can.
+                let line = if scout.cooldown > 0 {
+                    format!("{} - READY IN {}S", scout.state, scout.cooldown / 8)
+                } else {
+                    format!("{} - {}S OF FLIGHT", scout.state, scout.endurance / 8)
+                };
+                font::draw_text(&mut pixels, DEVICE_WIDTH, margin, y, 1, TEXT, &line);
+                y += LINE_HEIGHT as i32 + 3;
+                for (index, order) in SCOUT_ORDERS.iter().enumerate() {
+                    let selected = index == device.cursor;
+                    if selected {
+                        font::draw_text(&mut pixels, DEVICE_WIDTH, margin, y, 1, ACCENT, ">");
+                    }
+                    let colour = if selected { TEXT } else { DIM };
+                    font::draw_text(&mut pixels, DEVICE_WIDTH, margin + 10, y, 1, colour, order);
+                    y += LINE_HEIGHT as i32;
+                }
+            }
+            None => {
+                font::draw_text(
+                    &mut pixels,
+                    DEVICE_WIDTH,
+                    margin,
+                    y,
+                    1,
+                    DIM,
+                    "NO KESTREL. THE SHOP COUNTER SELLS THEM",
+                );
+            }
+        }
+        if let Some(feedback) = &device.feedback {
+            y += 3;
+            font::draw_text(&mut pixels, DEVICE_WIDTH, margin, y, 1, LIVE, feedback);
+        }
+        font::draw_text(
+            &mut pixels,
+            DEVICE_WIDTH,
+            margin,
+            DEVICE_HEIGHT as i32 - LINE_HEIGHT as i32 - 2,
+            1,
+            DIM,
+            "ENTER ORDERS. TAB TURNS THE PAGE. V CLOSES.",
         );
         return pixels;
     }
@@ -422,17 +504,17 @@ mod tests {
         device.open_list();
         let roster = roster();
 
-        let a = render_device(&device, &roster, None);
-        let b = render_device(&device, &roster, None);
+        let a = render_device(&device, &roster, None, None);
+        let b = render_device(&device, &roster, None, None);
         assert_eq!(a.len(), (DEVICE_WIDTH * DEVICE_HEIGHT * 4) as usize);
         assert_eq!(a, b);
 
         // An empty fleet reads differently from a stocked one.
-        assert_ne!(a, render_device(&device, &[], None));
+        assert_ne!(a, render_device(&device, &[], None, None));
 
         // And moving the cursor is visible.
         device.move_cursor(1, roster.len());
-        assert_ne!(a, render_device(&device, &roster, None));
+        assert_ne!(a, render_device(&device, &roster, None, None));
     }
 
     #[test]
@@ -476,14 +558,46 @@ mod tests {
     }
 
     #[test]
-    fn the_handheld_turns_between_the_fleet_and_the_country() {
+    fn the_handheld_turns_between_the_fleet_the_country_and_the_kestrel() {
         let mut device = Device::new();
         device.open_list();
         assert_eq!(device.page, Page::Fleet);
         device.turn_page();
         assert_eq!(device.page, Page::Map);
         device.turn_page();
+        assert_eq!(device.page, Page::Kestrel);
+        device.turn_page();
         assert_eq!(device.page, Page::Fleet);
+    }
+
+    #[test]
+    fn the_kestrel_page_lists_orders_or_the_shop_hint() {
+        let mut device = Device::new();
+        device.open_list();
+        device.turn_page();
+        device.turn_page();
+        assert_eq!(device.page, Page::Kestrel);
+
+        let readout = ScoutReadout {
+            state: "DOCKED",
+            endurance: 360,
+            cooldown: 0,
+        };
+        let with = render_device(&device, &[], None, Some(&readout));
+        let without = render_device(&device, &[], None, None);
+        assert_ne!(with, without, "owning a kestrel changed nothing");
+
+        // Cursor movement is visible feedback.
+        let mut moved = Device::new();
+        moved.open_list();
+        moved.turn_page();
+        moved.turn_page();
+        moved.move_cursor(2, SCOUT_ORDERS.len());
+        assert_ne!(
+            render_device(&moved, &[], None, Some(&readout)),
+            with,
+            "the cursor does not draw"
+        );
     }
 
     #[test]
@@ -507,16 +621,16 @@ mod tests {
             markers: &markers,
         };
 
-        let drawn = render_device(&device, &[], Some(&country));
-        let blind = render_device(&device, &[], None);
+        let drawn = render_device(&device, &[], Some(&country), None);
+        let blind = render_device(&device, &[], None, None);
         assert_ne!(drawn, blind, "the country did not draw");
         assert_eq!(drawn.len(), (DEVICE_WIDTH * DEVICE_HEIGHT * 4) as usize);
         // Deterministic, like every other panel.
-        assert_eq!(drawn, render_device(&device, &[], Some(&country)));
+        assert_eq!(drawn, render_device(&device, &[], Some(&country), None));
 
         // And the fleet page is a different picture again.
         let mut fleet = Device::new();
         fleet.open_list();
-        assert_ne!(drawn, render_device(&fleet, &[], Some(&country)));
+        assert_ne!(drawn, render_device(&fleet, &[], Some(&country), None));
     }
 }
