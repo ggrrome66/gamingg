@@ -41,6 +41,7 @@ mod scout;
 mod shop;
 mod skills;
 mod streaming;
+mod terminal;
 mod tuning;
 mod view;
 mod villagers;
@@ -76,6 +77,8 @@ const PRINT_SLOT: usize = 10;
 const FUEL_SLOT: usize = 11;
 /// The bank's ledger.
 const VAULT_SLOT: usize = 12;
+/// The terminal.
+const TERM_SLOT: usize = 13;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -188,6 +191,8 @@ struct Options {
     vault: bool,
     /// Cut the ground away beside a building to show its footing in section.
     footing: bool,
+    /// Draw the terminal over the capture, with a session's worth of log.
+    terminal: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -221,6 +226,7 @@ fn parse_args() -> Result<Options, String> {
         fort: false,
         vault: false,
         footing: false,
+        terminal: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -293,6 +299,7 @@ fn parse_args() -> Result<Options, String> {
             "--fort" => options.fort = true,
             "--vault" => options.vault = true,
             "--footing" => options.footing = true,
+            "--terminal" => options.terminal = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -1330,6 +1337,49 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         );
     }
 
+    if options.terminal {
+        // A session's worth of console: a few answered questions, an order,
+        // a refusal and the log lines the game itself pushed in.
+        let mut console = terminal::Terminal::default();
+        console.toggle();
+        for (kind, line) in [
+            (terminal::Kind::Echo, "> WHERE"),
+            (terminal::Kind::Note, "STANDING AT 13 73 9"),
+            (terminal::Kind::Note, "NEAREST STONEHAVEN - N 11M"),
+            (terminal::Kind::Echo, "> FLEET"),
+            (terminal::Kind::Note, "DRONE 1         14M  HAULING"),
+            (terminal::Kind::Note, "DRONE 2         21M  CUTTING"),
+            (terminal::Kind::Note, "FLIER 1         48M  FERRYING"),
+            (terminal::Kind::Echo, "> SCOUT SORTIE -40 120"),
+            (terminal::Kind::Note, "KESTREL AWAY TO -40 120"),
+            (terminal::Kind::Note, "SALVAGED 18 COPPER BAR, 34 STONE"),
+            (terminal::Kind::Note, "FLEET DRY - NO HHO"),
+            (terminal::Kind::Echo, "> FROBNICATE"),
+            (terminal::Kind::Warn, "NO SUCH COMMAND: FROBNICATE"),
+        ] {
+            console.say(kind, line);
+        }
+        for character in "status".chars() {
+            console.type_char(character);
+        }
+        let pixels = terminal::render_terminal(&console, true);
+        let panel_width = terminal::TERM_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = terminal::TERM_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            TERM_SLOT,
+            &context.device,
+            &context.queue,
+            (terminal::TERM_WIDTH, terminal::TERM_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     if options.vault {
         let mut pile = vx_agent::Stockpile::new();
         pile.add("engine:copper_ore", 143);
@@ -1809,6 +1859,11 @@ struct Active {
     electrolyser: electrolysis::Electrolyser,
     /// Every town's strongroom.
     banks: bank::Bank,
+    /// The typed console, and the log the toasts also land in.
+    terminal: terminal::Terminal,
+    /// The last toast written into that log, so one line is not written
+    /// every frame it happens to still be on screen.
+    logged: Option<Instant>,
 }
 
 struct App {
@@ -2569,6 +2624,7 @@ impl App {
         self.refresh_printer();
         self.refresh_electrolyser();
         self.refresh_vault();
+        self.refresh_terminal();
         #[cfg(feature = "gold")]
         self.refresh_gold();
         self.refresh_intro();
@@ -2865,6 +2921,210 @@ impl App {
                 active.printer.feedback = Some(format!("PRINTING {label}"));
             }
             Err(reason) => active.printer.feedback = Some(reason),
+        }
+    }
+
+    /// Run whatever was typed at the terminal.
+    ///
+    /// Questions are answered here, where the live state is; orders are
+    /// handed to the very same calls the keys use, so the journal only ever
+    /// sees one kind of dispatch. A terminal that recorded its own orders
+    /// would be a second implementation of every rule in this game.
+    fn run_typed_command(&mut self) {
+        let parsed = match &mut self.active {
+            Some(active) => active.terminal.submit(),
+            None => return,
+        };
+        match parsed {
+            terminal::Parsed::Empty | terminal::Parsed::Say(_) | terminal::Parsed::Refuse(_) => {}
+            terminal::Parsed::Ask(verb, args) => {
+                let answer = self.answer(&verb, &args);
+                if let Some(active) = &mut self.active {
+                    for line in answer {
+                        active.terminal.say(terminal::Kind::Note, line);
+                    }
+                }
+            }
+            terminal::Parsed::Run(order) => self.carry_out(order),
+        }
+    }
+
+    /// Answer a question about the running world.
+    fn answer(&mut self, verb: &str, args: &[String]) -> Vec<String> {
+        let Some(active) = &mut self.active else {
+            return Vec::new();
+        };
+        match verb {
+            "status" => {
+                let permits = active.permits.borrow();
+                let mut lines = vec![
+                    format!(
+                        "MINING {}  PROSPECTING {}  FABRICATION {}",
+                        active.skills.level(skills::MINING),
+                        active.skills.level(skills::PROSPECTING),
+                        active.skills.level(skills::FABRICATION)
+                    ),
+                    format!(
+                        "CREDITS {}   BOUNTY {}   {}",
+                        active.wallet.credits(),
+                        permits.bounty,
+                        {
+                            let (hour, minute) = active.clock.hhmm();
+                            format!("{hour:02}:{minute:02}")
+                        }
+                    ),
+                ];
+                let spare = active
+                    .mining
+                    .fleet
+                    .base
+                    .as_ref()
+                    .map_or(0, |base| base.stockpile.count(fuel::CELL));
+                let burners = active.mining.burners();
+                if let Some(line) = active.mining.tank.readout(burners, spare) {
+                    lines.push(format!("{line}   MACHINES BURNING {burners}"));
+                }
+                lines
+            }
+            "fleet" => {
+                let rows = active.mining.roster(active.player.position);
+                if rows.is_empty() {
+                    return vec!["NO MACHINES. BUY ONE AT A COUNTER.".into()];
+                }
+                rows.into_iter()
+                    .map(|row| {
+                        format!("{:<12} {:>5}M  {}", row.name, row.distance as i32, row.state)
+                    })
+                    .collect()
+            }
+            "where" => {
+                let at = active.player.position;
+                let mut lines = vec![format!(
+                    "STANDING AT {} {} {}",
+                    at.x.floor() as i32,
+                    at.y.floor() as i32,
+                    at.z.floor() as i32
+                )];
+                match active
+                    .world
+                    .generator()
+                    .towns_near((at.x.floor() as i32, at.z.floor() as i32), 900)
+                    .into_iter()
+                    .next()
+                {
+                    Some(site) => {
+                        let here = (at.x.floor() as i32, at.z.floor() as i32);
+                        lines.push(format!(
+                            "NEAREST {}{} - {}",
+                            site.name.head(),
+                            site.name.tail(),
+                            map::bearing(here, site.centre)
+                        ));
+                    }
+                    None => lines.push("NO TOWN WITHIN NINE HUNDRED METRES".into()),
+                }
+                lines
+            }
+            "pile" => match active.mining.fleet.base.as_ref() {
+                Some(base) if !base.stockpile.is_empty() => base
+                    .stockpile
+                    .entries()
+                    .map(|(name, count)| {
+                        format!("{:<20} {count}", shop::display_name(name))
+                    })
+                    .collect(),
+                Some(_) => vec!["THE PILE IS EMPTY".into()],
+                None => vec!["NO BASE PILE. PLACE A CONTAINER.".into()],
+            },
+            "bank" => {
+                let at = active.player.position;
+                let Some(site) = active
+                    .world
+                    .generator()
+                    .towns_near((at.x.floor() as i32, at.z.floor() as i32), 900)
+                    .into_iter()
+                    .next()
+                else {
+                    return vec!["NO TOWN WITHIN NINE HUNDRED METRES".into()];
+                };
+                let held = active.banks.stored(site.centre);
+                let mut lines = vec![format!(
+                    "{}{} HOLDS {held} OF {}",
+                    site.name.head(),
+                    site.name.tail(),
+                    bank::CAPACITY
+                )];
+                if let Some(vault) = active.banks.vault(site.centre) {
+                    for (name, count) in vault.entries() {
+                        lines.push(format!("{:<20} {count}", shop::display_name(name)));
+                    }
+                }
+                lines
+            }
+            "scout-perch" => {
+                let at = active.player.position;
+                let (x, z) = match (args.get(1), args.get(2)) {
+                    (Some(x), Some(z)) => match (x.parse::<i32>(), z.parse::<i32>()) {
+                        (Ok(x), Ok(z)) => (x, z),
+                        _ => return vec!["PERCH WANTS TWO WHOLE NUMBERS".into()],
+                    },
+                    // Bare `perch` means here, which is what a person means
+                    // when they point at the ground they are standing on.
+                    _ => (at.x.floor() as i32, at.z.floor() as i32),
+                };
+                self.order_scout(journal::ScoutOrder::Perch { x, z }, format!("PERCH {x} {z}"));
+                vec![format!("PERCHING AT {x} {z}")]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// Carry out a terminal order through the path the keys already use.
+    fn carry_out(&mut self, order: terminal::Order) {
+        match order {
+            terminal::Order::Close => {
+                if let Some(active) = &mut self.active {
+                    active.terminal.close();
+                    active.renderer.clear_overlay(TERM_SLOT);
+                }
+            }
+            terminal::Order::Dig => self.start_mining(),
+            terminal::Order::Cancel => {
+                if let Some(active) = &mut self.active {
+                    active.mining.cancel(&mut active.world);
+                    active.journal.record(Command::Cancel);
+                    active.terminal.say(terminal::Kind::Note, "PLAN DROPPED");
+                }
+            }
+            terminal::Order::Survey => {
+                if let Some(active) = &mut self.active {
+                    let at = active.camera.position;
+                    let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
+                    let line = if active.mining.dispatch_scan(x, z) {
+                        "FLIER SWEEPING THIS SECTOR"
+                    } else {
+                        "THE FLIER IS BUSY"
+                    };
+                    active.terminal.say(terminal::Kind::Note, line);
+                }
+            }
+            terminal::Order::Lights => {
+                if let Some(active) = &mut self.active {
+                    active.optics.cycle();
+                    let line = active.optics.label().unwrap_or("LIGHTS OFF").to_string();
+                    active.terminal.say(terminal::Kind::Note, line);
+                }
+            }
+            terminal::Order::Save => {
+                self.save_world();
+                if let Some(active) = &mut self.active {
+                    active.terminal.say(terminal::Kind::Note, "WORLD WRITTEN OUT");
+                }
+            }
+            terminal::Order::Scout(scout) => {
+                let label = format!("{scout:?}").to_uppercase();
+                self.order_scout(scout, label);
+            }
         }
     }
 
@@ -3821,6 +4081,63 @@ impl App {
             return;
         }
 
+        // The terminal owns the keyboard outright while it is open, and it
+        // has to come first: every other panel here answers to single letters,
+        // and a console that dropped a key because the letter happened to
+        // mean something elsewhere would be unusable.
+        if self.active.as_ref().is_some_and(|active| active.terminal.open) {
+            match code {
+                KeyCode::Escape => {
+                    let Some(active) = &mut self.active else { return };
+                    active.terminal.close();
+                    active.renderer.clear_overlay(TERM_SLOT);
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => self.run_typed_command(),
+                KeyCode::Backspace => {
+                    let Some(active) = &mut self.active else { return };
+                    active.terminal.backspace();
+                }
+                KeyCode::Delete => {
+                    let Some(active) = &mut self.active else { return };
+                    active.terminal.delete();
+                }
+                KeyCode::ArrowLeft => {
+                    let Some(active) = &mut self.active else { return };
+                    active.terminal.move_caret(-1);
+                }
+                KeyCode::ArrowRight => {
+                    let Some(active) = &mut self.active else { return };
+                    active.terminal.move_caret(1);
+                }
+                KeyCode::ArrowUp => {
+                    let Some(active) = &mut self.active else { return };
+                    active.terminal.recall(-1);
+                }
+                KeyCode::ArrowDown => {
+                    let Some(active) = &mut self.active else { return };
+                    active.terminal.recall(1);
+                }
+                KeyCode::Home => {
+                    let Some(active) = &mut self.active else { return };
+                    active.terminal.caret_home();
+                }
+                KeyCode::End => {
+                    let Some(active) = &mut self.active else { return };
+                    active.terminal.caret_end();
+                }
+                KeyCode::PageUp => {
+                    let Some(active) = &mut self.active else { return };
+                    active.terminal.scroll_by(terminal::WINDOW as i32 / 2);
+                }
+                KeyCode::PageDown => {
+                    let Some(active) = &mut self.active else { return };
+                    active.terminal.scroll_by(-(terminal::WINDOW as i32) / 2);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // The bank's ledger: two columns, one cursor, deposit and draw.
         if self.active.as_ref().is_some_and(|active| active.banks.open) {
             match code {
@@ -4123,6 +4440,14 @@ impl App {
                 if let Some(active) = &mut self.active {
                     active.view = active.view.cycled();
                     log::info!("view: {:?}", active.view);
+                }
+            }
+            KeyCode::KeyT => {
+                if let Some(active) = &mut self.active {
+                    active.terminal.toggle();
+                    if !active.terminal.open {
+                        active.renderer.clear_overlay(TERM_SLOT);
+                    }
                 }
             }
             KeyCode::KeyL => {
@@ -5428,6 +5753,18 @@ impl App {
     fn refresh_hud(&mut self) {
         let Some(active) = &mut self.active else { return };
 
+        // Every toast is also a log line. A toast lasts three seconds and
+        // then the thing it said is gone — which is fine for "you levelled
+        // up" and useless for "the crew ran dry while you were in a cave".
+        // The terminal is where it stops being useless.
+        if let Some((line, at)) = &active.greeting {
+            if active.logged != Some(*at) {
+                active.logged = Some(*at);
+                let line = line.clone();
+                active.terminal.say(terminal::Kind::Note, line);
+            }
+        }
+
         let level_up = active.level_up.as_ref().and_then(|(skill, level, at)| {
             (at.elapsed().as_secs_f32() < 2.5).then(|| (skill.clone(), *level))
         });
@@ -5493,6 +5830,35 @@ impl App {
                 y: screen_height as f32 - height - margin,
                 width,
                 height,
+            },
+        );
+    }
+
+    /// Draw the terminal when it is open.
+    fn refresh_terminal(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.terminal.open {
+            return;
+        }
+        // The caret blinks on the frame counter rather than on wall time, so
+        // two captures of one state are identical — the same rule every other
+        // panel here follows.
+        let blink = (self.frames / 30).is_multiple_of(2);
+        let pixels = terminal::render_terminal(&active.terminal, blink);
+        let (width, height) = active.renderer.size();
+        let panel_width = terminal::TERM_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = terminal::TERM_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            TERM_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (terminal::TERM_WIDTH, terminal::TERM_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
             },
         );
     }
@@ -6132,6 +6498,8 @@ impl ApplicationHandler for App {
             optics: eyes,
             electrolyser: bath,
             banks: vaults,
+            terminal: terminal::Terminal::default(),
+            logged: None,
             roost: {
                 // The box stands on the hometown security office roof; the
                 // roost is its tenant. Derived from the office's claim so
@@ -6195,6 +6563,31 @@ impl ApplicationHandler for App {
                 };
                 match event.state {
                     ElementState::Pressed => {
+                        // Typing comes from the platform's own text for the
+                        // key, not from the scancode: a scancode is a
+                        // *position*, and reading letters off positions is how
+                        // a console ends up unusable on half the world's
+                        // keyboards. Repeats count here — holding backspace
+                        // or a letter should do what it looks like it does.
+                        let typing = self
+                            .active
+                            .as_ref()
+                            .is_some_and(|active| active.terminal.open);
+                        if typing {
+                            if let Some(text) = event.text.as_ref() {
+                                let characters: Vec<char> = text.chars().collect();
+                                if let Some(active) = &mut self.active {
+                                    for character in characters {
+                                        if !character.is_control() {
+                                            active.terminal.type_char(character);
+                                        }
+                                    }
+                                }
+                            }
+                            if event.repeat {
+                                self.handle_press(code);
+                            }
+                        }
                         // Key repeat re-fires this, so anything that toggles
                         // state must ignore repeats or it flickers.
                         if !event.repeat {

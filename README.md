@@ -724,6 +724,7 @@ Controls:
 | `N` | Toggle the minimap |
 | `[` / `]` | Zoom the minimap out / in |
 | `9` | The electrolyser, to place on a shore |
+| `T` | The terminal — type `help` |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
 | `F5` | Save |
@@ -825,6 +826,25 @@ a **night vision visor** that amplifies what little light there is into green
 geometry, and a **thermal visor** that ignores light entirely and paints
 warm machinery and warm bodies against cold rock. One key cycles the dial
 through what you own; the HUD names what you are looking through.
+
+### The terminal
+
+Press `T` and a console opens. It is the first place in this game you type,
+and it answers questions the panels never could — `status`, `fleet`, `where`,
+`pile`, `bank` — and takes a few orders besides: `dig`, `cancel`, `survey`,
+`lights`, `scout sortie -40 120`. `help` lists the lot, and anything it does
+not know it refuses by name rather than by silence.
+
+The real reason it exists is the scrollback. Every toast the game shows you
+lasts three seconds and then the thing it said is gone, which is fine for "you
+levelled up" and useless for "the crew ran dry while you were down a cave".
+The terminal keeps four hundred lines of them, so the message you missed is
+still there when you come up.
+
+Nothing it does is new. An order typed at the prompt goes out through the very
+same call the keys use, so the journal only ever sees one kind of dispatch —
+a console that recorded its own orders would be a second implementation of
+every rule in this game, and the first one to drift.
 
 ### Walls, and what they are for
 
@@ -1020,6 +1040,9 @@ cargo run --release -p vx-app -- --screenshot town.ppm --at 0,22 --dawn
 
 # from inside the roomiest cave pocket near a spot, facing down the gallery
 cargo run --release -p vx-app -- --screenshot cave.ppm --at -244,-14 --cave
+
+# the terminal, with a session's worth of log in it
+cargo run --release -p vx-app -- --screenshot term.ppm --at 0,10 --terminal
 
 # the nearest walled town, from above its own trace
 cargo run --release -p vx-app -- --screenshot fort.ppm --at 1258,-148 --fort

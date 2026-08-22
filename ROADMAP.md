@@ -96,7 +96,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 18 | `8bbc730` | Lights in the dark: baked skylight makes the world below genuinely black, the suit's hand lamp cuts a warm cone through it, and the fabricator prints a high beam, night vision and thermal |
 | 19 | `94f1ed1` | Bunkers: sacred-geometry layouts on their own lattice — three proportion systems, golden BSP on a Fibonacci vocabulary, golden-angle bearings, a 400-hardness shell, and supply caches to strip |
 | 20 | `60b53e8` | The fuel loop: the fleet burns oxyhydrogen, an electrolyser on a shore splits water into it, and HHO joins the trade network as the first shortage that can stop you |
-| 21 | _this_ | Star forts and banks: bastioned traces per town tier with gates, ditches and deterministic breaches, and a strongroom in every town behind the first Tier Three lock ever stamped |
+| 21 | `38024dc` | Star forts and banks: bastioned traces per town tier with gates, ditches and deterministic breaches, a strongroom in every town behind the first Tier Three lock ever stamped, and foundations under everything |
+| 22 | _this_ | The terminal: the font's third user — typed commands, a caret and history, and four hundred lines of scrollback the toasts also land in |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1092,6 +1093,46 @@ decision; and towns reacting to their own gates being locked or breached.
 
 ---
 
+## Shipped — Stage 22: the terminal
+
+**The font's third user, and the game's first typed input.** Every readout so
+far answers one question in one place: the HUD says how you are, the handheld
+says where your machines are, a shop panel says what is on the shelf. None of
+them answer *"what just happened"* — because the answer has been a toast that
+fades in three seconds. That is fine for "you levelled up" and useless for
+"the crew ran dry while you were down a cave". The terminal keeps four hundred
+lines of scrollback, and every toast the game raises is written into it, so
+the message you missed is still there when you come up.
+
+**Typing was its own round's worth of work.** A caret that edits *behind*
+itself, a command history the arrows walk in both directions, page-up
+scrollback, and word wrapping at the panel's width. Characters come from the
+platform's own text for the key rather than from the scancode — a scancode is
+a *position*, and reading letters off positions is how a console ends up
+unusable on half the world's keyboards. Anything the bitmap font cannot draw
+is refused at the point of typing rather than stored, so no line can ever
+render as a hole; a test caught the first casualty of that rule, which was the
+`|` in the help text for `scout`.
+
+**Orders go the long way round on purpose.** The parser is pure — it returns
+data, not effects — and an order typed at the prompt is handed to the very
+same call the keys use. The journal therefore only ever sees one kind of
+dispatch. A console that recorded its own orders would be a second
+implementation of every rule in this game and the first one to drift, which is
+the same argument that keeps the replay oracle honest everywhere else.
+
+It answers `status`, `fleet`, `where`, `pile` and `bank` from live state, and
+takes `dig`, `cancel`, `survey`, `lights`, `save` and the scout's whole order
+set. `help` lists them, and a test holds the help and the parser to each
+other: the help may not list a verb the parser has never heard of.
+
+**Deliberately not in 22:** scripting, aliases or anything that would let the
+terminal replay itself; a command that does something no key can already do,
+which would make the console mandatory rather than convenient; and completion,
+which wants a wider panel than the font is comfortable in.
+
+---
+
 ## Planned — the civic layer: permits, offices, elections
 
 The town-law arc, in three rounds. The user's design, recorded whole so none of
@@ -1190,7 +1231,6 @@ plans kept their order, the stages moved down to make room.
 
 | Stage | What | Why here |
 |---|---|---|
-| 22 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
 | 23 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
 | 24 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
 | 25 | Hostiles and health | The half of combat stage 13 leaves out. `Perception` (stage 7) is already the shape a hostile needs, and stage 13's bounty contracts are already something for one to take |
@@ -1201,7 +1241,7 @@ plans kept their order, the stages moved down to make room.
 
 ## The feature map
 
-The whole game at a glance, as of stage 21.
+The whole game at a glance, as of stage 22.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1244,9 +1284,11 @@ water into it on any shore, and HHO trades on the network like any other
 good); star forts (bastioned traces by town tier, gates on the road axes,
 ditches, and deterministic breaches) and town banks (a strongroom per town
 behind the first Tier Three lock, for staging trade or keeping what you
-cannot lose); a Steam Deck dist build every round.
+cannot lose); foundations under every building and fort wall; the terminal
+(typed commands, a caret and history, and a scrollback the toasts land in);
+a Steam Deck dist build every round.
 
-**Planned, in arc order:** terminal; crafting; wear and breakdowns; hostiles and health
+**Planned, in arc order:** crafting; wear and breakdowns; hostiles and health
 (and with them bunkers occupied);
 the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
 B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket
