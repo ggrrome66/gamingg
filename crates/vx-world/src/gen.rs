@@ -462,13 +462,19 @@ impl TerrainGenerator {
         // chunk, stamped only where it lands inside. Trunks overwrite the
         // tufts fill_column may have dropped on their base columns.
         let height_at = |x: i32, z: i32| self.height_with_sites(x, z, &sites);
-        let trees = crate::flora::trees_overlapping(
+        let mut trees = crate::flora::trees_overlapping(
             self.seed,
             (origin.x, origin.z),
             (origin.x + CHUNK_SIZE - 1, origin.z + CHUNK_SIZE - 1),
             &height_at,
             &sites,
         );
+        // No tree grows over a cave mouth: its base block was never placed.
+        // The field is pure, so every chunk a canopy reaches drops the same
+        // trees and the stamping stays seamless.
+        trees.retain(|tree| {
+            !crate::caves::carved(self.seed, tree.base.x, tree.base.y, tree.base.z, tree.base.y)
+        });
         for tree in &trees {
             let top = tree.base.y + tree.height + 2;
             for local_z in 0..CHUNK_SIZE {
@@ -556,9 +562,21 @@ impl TerrainGenerator {
             }
         };
 
+        // The cave field, masked out of towns entirely: a plaza must not open
+        // into a void. A carved cell is simply never filled — the chunk
+        // starts as air, so a hole costs nothing to make. The carve wins over
+        // ore: a tunnel cuts *through* a body, which is what leaves the rest
+        // of the vein showing in the cut faces — a wall you can mine into —
+        // and guarantees no ore ever hangs in the middle of a gallery.
+        let hollow =
+            |y: i32| !in_village && crate::caves::carved(self.seed, world_x, y, world_z, surface);
+
         // Rock, with ore wherever a body reaches. Restricting ore to what would
         // otherwise be stone or soil is what guarantees it never hangs in air.
         for y in 1..stone_top {
+            if hollow(y) {
+                continue;
+            }
             let has_ore =
                 !in_village && ore_at(deposits, BlockPos::new(world_x, y, world_z)).is_some();
             place(chunk, y, if has_ore { blocks.copper_ore } else { blocks.stone });
@@ -567,6 +585,9 @@ impl TerrainGenerator {
         // Overburden. A body reaching up through here is on its way to becoming
         // a visible outcrop.
         for y in stone_top.max(1)..surface {
+            if hollow(y) {
+                continue;
+            }
             let has_ore =
                 !in_village && ore_at(deposits, BlockPos::new(world_x, y, world_z)).is_some();
             place(chunk, y, if has_ore { blocks.copper_ore } else { subsoil });
@@ -574,14 +595,21 @@ impl TerrainGenerator {
 
         // The surface block itself only shows ore when the body also fills the
         // blocks beneath it, so every outcrop a player can see leads somewhere.
+        // A carved surface block is a cave mouth: the one place the world
+        // below announces itself to somebody walking.
+        let mouth = hollow(surface);
         let surface_pos = BlockPos::new(world_x, surface, world_z);
         let outcrop = !in_village && breaks_surface(deposits, surface_pos);
-        place(chunk, surface, if outcrop { blocks.copper_ore } else { top });
+        if !mouth {
+            place(chunk, surface, if outcrop { blocks.copper_ore } else { top });
+        }
 
         // A scattering of grass tufts on plain grass tops — never on an
-        // outcrop, which players need to be able to spot at distance.
+        // outcrop, which players need to be able to spot at distance, and
+        // never floating over a mouth.
         if !coastal
             && !outcrop
+            && !mouth
             && crate::flora::tuft_at(self.seed, world_x, world_z, surface, sites)
         {
             place(chunk, surface + 1, blocks.tall_grass);
@@ -1115,6 +1143,64 @@ mod tests {
             "village palette blew up: {} entries",
             chunk.storage().palette_len()
         );
+    }
+
+    #[test]
+    fn caves_hollow_the_wilderness_but_never_a_town() {
+        let (_, generator) = generator(2024);
+
+        // Wilderness: somewhere in a sweep of far-from-town chunks there is
+        // air strictly below the surface — the height field alone can never
+        // produce that, so this is the 3D carve proving it exists.
+        let mut found = false;
+        'search: for cx in 6..12 {
+            for cz in 6..12 {
+                let pos = ChunkPos::new(cx, cz);
+                let origin = pos.origin();
+                if !generator.sites_for_chunk(pos).is_empty() {
+                    continue;
+                }
+                let chunk = generator.generate(pos);
+                for x in 0..CHUNK_SIZE {
+                    for z in 0..CHUNK_SIZE {
+                        let surface = generator.height_at(origin.x + x, origin.z + z);
+                        for y in crate::caves::CAVE_FLOOR + 1..surface - 1 {
+                            if chunk.get(LocalPos::new(x, y, z).unwrap()).is_air() {
+                                found = true;
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found, "no cave anywhere in a six-chunk sweep of wilderness");
+
+        // Town: every column under the hometown footprint is solid all the
+        // way to its surface. A plaza must not open into a void.
+        for pos in [ChunkPos::new(0, 0), ChunkPos::new(-1, -1)] {
+            let origin = pos.origin();
+            let chunk = generator.generate(pos);
+            let sites = generator.towns_overlapping(
+                (origin.x, origin.z),
+                (origin.x + CHUNK_SIZE - 1, origin.z + CHUNK_SIZE - 1),
+            );
+            for x in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    let (world_x, world_z) = (origin.x + x, origin.z + z);
+                    if !crate::town::footprint_contains(&sites, world_x, world_z) {
+                        continue;
+                    }
+                    let surface = generator.height_with_sites(world_x, world_z, &sites);
+                    for y in 1..=surface {
+                        assert!(
+                            !chunk.get(LocalPos::new(x, y, z).unwrap()).is_air(),
+                            "a hole under the town at ({world_x}, {y}, {world_z})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

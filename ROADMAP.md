@@ -91,7 +91,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 13 | `4f22cd4` | The arsenal: the slug launcher, synthesized sound, recoil and shake, town warnings, witnessed property bounty, panic, caravan interception |
 | 14 | `6b56c46` | The kestrel and the roost: a pack scout with standing orders and decaying contact marks, and the town's own watcher on the security office roof |
 | 15 | `7e8d4f1` | Hacking through machines: spoofer coils, drone-borne intrusion on a leash, the watch box blinded, silenced or tapped, the impound, and a watch box for your own roof |
-| 16 | _this_ | The fabricator: every block is stock, and a printer that turns raw material into ammunition, cells, building goods, modules and whole machines |
+| 16 | `75bbb1b` | The fabricator: every block is stock, and a printer that turns raw material into ammunition, cells, building goods, modules and whole machines |
+| 17 | _this_ | Caves: the first true 3D carve — tunnel galleries and deep chambers, pure in the seed, mouths in hillsides, ore showing in the cut faces |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -746,6 +747,62 @@ only place goods live.
 
 ---
 
+## Shipped — Stage 17: caves
+
+**The first hole in a height field.** `fill_column` fills one column from
+bedrock to a surface height, and until this round nothing anywhere carved a
+hole in the middle of it. Caves are the first genuinely **3D** thing worldgen
+has ever done, and the cost was exactly what the plan predicted: not the caves
+but the carve — a volumetric field that stays pure in `(seed, x, y, z)` so
+chunks keep generating in parallel with no cross-chunk context, and a saved
+world keeps regenerating identically. `noise.rs` grew the trilinear sibling of
+its 2D value noise; `caves.rs` is the field.
+
+**Tunnels are an intersection, not a threshold.** One noise field thresholded
+into air gives bubbles. Two independent signed fields, carved where *both* run
+near zero at once, give the intersection of two surfaces — a long winding tube.
+That is the whole tunnel algorithm: `a² + b² < r²`, with the y-frequency
+squashed so galleries run wide and low rather than as chimneys. A third,
+slower field opens chambers where it peaks, gated `CHAMBER_COVER` below the
+surface where a room cannot crater a hillside. Girth tapers toward the surface
+(`MOUTH_FACTOR`), so mouths exist and stay scarce: at depth the rock is about
+a tenth hollow, at the skin far less.
+
+**What is never carved:** town footprints (`fill_column` masks them — a plaza
+must not open into a void); the bedrock floor plus a margin (`CAVE_FLOOR`);
+and the top `SEA_BED_COVER` blocks of any column ending at or below the
+waterline, because there is no fluid simulation and a mouth under the sea
+would be a hole the ocean visibly fails to pour into. Where a tunnel meets an
+ore body it carves the vein with it — the carve wins — which both guarantees
+no copper ever floats in the middle of a gallery and leaves the rest of the
+body showing in the cut faces. That is the stage's opening-loop payoff: ore
+at the surface of a wall, where hand-mining is pleasant.
+
+**The agents already coped.** The plan flagged `flow::settle`, the mine
+planners and span pinning for a pass. Settle was built for "the ground under
+me vanished" the day drones learned to dig, so a machine over a void drops to
+the gallery floor and carries on; a mine plan that meets a cavity finds part
+of its digging already done and the whole agent suite runs green over the new
+ground. Flora needed the one real fix: a tree whose base column got carved
+into a mouth would have floated, so trees filter on the same pure field the
+carve uses — every chunk a canopy reaches agrees, and the stamping stays
+seamless.
+
+**Journal VERSION 10 → 11**, a world change alone: every hash a version-ten
+journal recorded was taken over terrain that no longer exists, and pretending
+the old hashes still bound would make every old session replay as a divergence
+that is really this bump. `--cave` joined the capture flags: it hunts the
+roomiest pocket of underground air near `--at` and stands the camera in it,
+facing down the longest gallery — the capture reads the generated world, not
+the field, so what it frames is what generation actually built.
+
+**Deliberately not in 17:** darkness — caves are lit by the same sun as the
+surface, and an underground lighting model is its own round; bunkers (next,
+now the 3D carve is paid for); anything living down there (hostiles wait for
+health); water in caves; per-biome cave styles.
+
+---
+
 ## Planned — star forts: walls with the receipts to justify them
 
 A worldgen round, recorded from the design note whole. Towns grow bastioned
@@ -826,30 +883,8 @@ seed, stamped rather than stored, and original in every name and shape.
 
 ### Caves
 
-The engine's terrain is a **height field**. `fill_column` (`gen.rs:480`) fills
-one column from bedrock to a surface height, and nothing anywhere carves a hole
-in the middle of it. Caves are therefore the first genuinely **3D** thing
-worldgen has ever done, and that — not the caves themselves — is the cost of
-the stage.
-
-The shape: 3D ridged or Worley noise thresholded into air below the surface,
-evaluated per block, pure in `(seed, x, y, z)` so it stays chunk-parallel and
-needs no cross-chunk context. Masked out of every town footprint
-(`town::footprint_contains`) so a plaza cannot open into a void, and floored
-above bedrock so the world keeps its bottom.
-
-**Why caves are worth doing early:** stage 10a made you hand-mine your way to a
-first drone. A cave is where hand-mining is *pleasant* — ore at the surface of
-a wall rather than under twenty blocks of overburden — so it directly serves the
-opening loop rather than only the late game.
-
-**What caves break, precisely.** `flow::settle` (`flow.rs:56`) walks a drone
-down until it finds solid ground. Carve a void under one and it falls in. The
-mine planners assume a solid column to cut through, and `working_span` pinning
-assumes the ground stays where it was surveyed. None of that is fatal, but all
-of it needs a pass, and pretending otherwise would be how a stage overruns.
-`World::surface_y` is safe — it reads the topmost solid block, so a cave beneath
-does not confuse it.
+Shipped as stage 17 — see the shipped section above. What remains below is
+the bunkers half, which rests on the carve the caves round paid for.
 
 ### Bunkers
 
@@ -938,27 +973,26 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-Renumbered again after the scout (14) and intrusion (15) rounds took their
+Renumbered again after the fabricator (16) and caves (17) rounds took their
 slots: the plans kept their order, the stages moved down to make room.
 
 | Stage | What | Why here |
 |---|---|---|
-| 16 | Caves | The first true 3D carve in a height-field world, and the thing that makes hand-mining pleasant — so it serves the opening loop 10a just built, not only the late game |
-| 17 | Bunkers, built and lootable | Rests on caves paying for the 3D carve. Sited on the same lattice as towns, shelled with a very high `hardness`, laid out by the jigsaw generator deferred since stage 8, and looted — a *source* to match 10a's sink |
-| 18 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
-| 19 | Star forts | Bastioned traces per town tier, gates on the roads, deterministic ruins. After the fuel loop and before hostiles: walls should exist — and have gaps — before anything arrives that makes them matter, and the arsenal is what makes a town want them |
-| 20 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
-| 21 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
-| 22 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
-| 23 | Hostiles and health | The half of combat stage 13 leaves out. `Perception` (stage 7) is already the shape a hostile needs, and stage 13's bounty contracts are already something for one to take |
-| 24 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 23 brings |
-| 25 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
-| 26 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
-| 27 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 18 | Bunkers, built and lootable | Rests on caves paying for the 3D carve. Sited on the same lattice as towns, shelled with a very high `hardness`, laid out by the jigsaw generator deferred since stage 8, and looted — a *source* to match 10a's sink |
+| 19 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
+| 20 | Star forts | Bastioned traces per town tier, gates on the roads, deterministic ruins. After the fuel loop and before hostiles: walls should exist — and have gaps — before anything arrives that makes them matter, and the arsenal is what makes a town want them |
+| 21 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
+| 22 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
+| 23 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
+| 24 | Hostiles and health | The half of combat stage 13 leaves out. `Perception` (stage 7) is already the shape a hostile needs, and stage 13's bounty contracts are already something for one to take |
+| 25 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 24 brings |
+| 26 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
+| 27 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
+| 28 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 15.
+The whole game at a glance, as of stage 17.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -985,9 +1019,14 @@ the handheld, decaying contact marks, cell upgrade line) and the roost (the
 town's watcher on the office roof, observed-then-witnessed, the heist
 window); intrusion through machines (spoofer coils, the leash, machine
 witnesses and the impound, the watch box blinded/silenced/tapped, a watch
-box for your own roof); a Steam Deck dist build every round.
+box for your own roof); the fabricator (every broken block is stock on the
+one pile, and a printer that turns named goods into ammunition, bars, planks,
+wall panels, charged cells, spoofer coils and whole machines, with the
+Fabrication skill buying speed); caves (the first true 3D carve: tunnel
+galleries, deep chambers, hillside mouths, ore in the cut faces, nothing
+under towns or into the sea); a Steam Deck dist build every round.
 
-**Planned, in arc order:** caves; bunkers built-then-occupied; fuel loop;
+**Planned, in arc order:** bunkers built-then-occupied; fuel loop;
 star forts; terminal; crafting; wear and breakdowns; hostiles and health;
 the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
 B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket

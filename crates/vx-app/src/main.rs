@@ -162,6 +162,10 @@ struct Options {
     gold_capture: bool,
     /// Hold the slug launcher in the capture instead of the drill.
     launcher: bool,
+    /// Stand a fabricator in the frame and open its panel mid-print.
+    fab: bool,
+    /// Frame the capture from inside the largest cave pocket near `--at`.
+    cave: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -187,6 +191,8 @@ fn parse_args() -> Result<Options, String> {
         permit: false,
         gold_capture: false,
         launcher: false,
+        fab: false,
+        cave: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -251,6 +257,8 @@ fn parse_args() -> Result<Options, String> {
             "--permit" => options.permit = true,
             "--gold-capture" => options.gold_capture = true,
             "--launcher" => options.launcher = true,
+            "--fab" => options.fab = true,
+            "--cave" => options.cave = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -544,6 +552,85 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
     let (mut world, mut camera) = build_scene(&context, &mut renderer, options.seed, 6, options.at);
     camera.aspect = width as f32 / height as f32;
+
+    if options.cave {
+        // Hunt the roomiest pocket of underground air near the requested
+        // spot and stand the camera in it, facing down the longest gallery.
+        // The cave field is pure, but the capture reads the *world* — what
+        // this frames is what generation actually built.
+        let air = |at: vx_core::BlockPos| {
+            world.surface_y(at.x, at.z).is_some_and(|stand| at.y < stand - 1)
+                && !world.is_solid(at)
+        };
+        let mut best: Option<(vx_core::BlockPos, u32)> = None;
+        for x in options.at.0 - 48..options.at.0 + 48 {
+            for z in options.at.1 - 48..options.at.1 + 48 {
+                let Some(stand) = world.surface_y(x, z) else { continue };
+                for y in vx_world::caves::CAVE_FLOOR + 2..stand - 6 {
+                    let at = vx_core::BlockPos::new(x, y, z);
+                    if !air(at) || world.is_solid(at.offset([0, 1, 0])) || !air(at.offset([0, 1, 0])) {
+                        continue;
+                    }
+                    let mut room = 0u32;
+                    for dx in -3i32..=3 {
+                        for dy in -1i32..=2 {
+                            for dz in -3i32..=3 {
+                                room += u32::from(air(at.offset([dx, dy, dz])));
+                            }
+                        }
+                    }
+                    if best.is_none_or(|(_, held)| room > held) {
+                        best = Some((at, room));
+                    }
+                }
+            }
+        }
+        let (spot, _) = best.ok_or("no cave pocket within 48 blocks of --at")?;
+        let mut heading = (0i32, -1i32, 0u32);
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
+            let mut clear = 0u32;
+            for step in 1..=14 {
+                if !air(spot.offset([dx * step, 0, dz * step])) {
+                    break;
+                }
+                clear += 1;
+            }
+            if clear > heading.2 {
+                heading = (dx, dz, clear);
+            }
+        }
+        camera.position = glam::Vec3::new(
+            spot.x as f32 + 0.5,
+            spot.y as f32 + 1.1,
+            spot.z as f32 + 0.5,
+        );
+        camera.yaw = (heading.0 as f32).atan2(-(heading.1 as f32));
+        camera.pitch = -0.08;
+        println!(
+            "cave capture from {:?}, facing ({}, {}) with {} blocks of gallery",
+            spot, heading.0, heading.1, heading.2
+        );
+    }
+
+    if options.fab {
+        // A fabricator standing on the ground ahead of the camera, offset
+        // left so the panel drawn over the frame's centre does not hide the
+        // machine it belongs to.
+        if let Some(id) = world.registry().id_of("engine:printer") {
+            let (x, z) = (options.at.0 - 5, options.at.1 + 10);
+            let ground = world.surface_y(x, z).unwrap_or(80);
+            world.set_block(vx_core::BlockPos::new(x, ground, z), id);
+            remesh_all(&context, &mut renderer, &mut world);
+            if options.close {
+                // `--close` walks up to the machine instead of opening its
+                // panel: the capture that shows the block, not the screen.
+                let subject =
+                    glam::Vec3::new(x as f32 + 0.5, ground as f32 + 0.5, z as f32 + 0.5);
+                camera.position = subject + glam::Vec3::new(2.4, 1.6, 3.0);
+                look_at(&mut camera, subject);
+            }
+        }
+    }
 
     // Optionally run a whole excavation before capturing, so the frame shows a
     // real mine on real generated terrain rather than a hand-built fixture.
@@ -957,6 +1044,49 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             &context.device,
             &context.queue,
             (intro::INTRO_WIDTH, intro::INTRO_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
+    if options.fab && !options.close {
+        // The fabricator's screen over the frame, stocked mid-print: a slug
+        // batch running, the cursor parked on a row the pile cannot cover so
+        // the SHORT line shows too.
+        let mut pile = vx_agent::Stockpile::new();
+        pile.add("engine:copper_bar", 5);
+        pile.add("engine:stone", 64);
+        pile.add("engine:copper_ore", 22);
+        pile.add("engine:log", 9);
+        let mut fab_skills = Skills::new();
+        while fab_skills.level(skills::FABRICATION) < 8 {
+            fab_skills.add_xp(skills::FABRICATION, 500);
+        }
+        let fabrication = fab_skills.level(skills::FABRICATION);
+        let panel = printer::Printer {
+            at: Some(vx_core::BlockPos::new(options.at.0 - 5, 0, options.at.1 + 10)),
+            open: true,
+            cursor: 4,
+            job: Some(printer::Job {
+                recipe: 0,
+                done: 9.1,
+                total: printer::duration(&printer::CATALOGUE[0], fabrication),
+            }),
+            feedback: None,
+        };
+        let pixels = printer::render_printer(&panel, Some(&pile), fabrication);
+        let panel_width = printer::PRINT_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = printer::PRINT_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            PRINT_SLOT,
+            &context.device,
+            &context.queue,
+            (printer::PRINT_WIDTH, printer::PRINT_HEIGHT),
             &pixels,
             vx_render::OverlayRect {
                 x: (width as f32 - panel_width) / 2.0,

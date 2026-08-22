@@ -256,6 +256,52 @@ impl Spline {
     }
 }
 
+
+/// Hash a 3D lattice point to a float in `[0, 1)`.
+///
+/// The third axis gets its own multiplier so `(x, y, z)` and `(x, z, y)`
+/// decorrelate; reusing a 2D constant would fold the lattice onto itself.
+#[inline]
+fn hash_3d(seed: u64, x: i32, y: i32, z: i32) -> f32 {
+    let key = seed
+        ^ mix64(x as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ mix64(y as i64 as u64).wrapping_mul(0xd6e8_feb8_6659_fd93)
+        ^ mix64(z as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
+    ((mix64(key) >> 40) as f32) / ((1u32 << 24) as f32)
+}
+
+/// Sample 3D value noise in `[0, 1)`.
+///
+/// The trilinear sibling of [`value_2d`], and the first genuinely volumetric
+/// field in the engine — terrain is a height field, but a cave is a shape *in*
+/// the rock, and only a function of all three coordinates can make one.
+pub fn value_3d(seed: u64, x: f32, y: f32, z: f32) -> f32 {
+    let x0 = x.floor();
+    let y0 = y.floor();
+    let z0 = z.floor();
+    let tx = smooth(x - x0);
+    let ty = smooth(y - y0);
+    let tz = smooth(z - z0);
+
+    let (xi, yi, zi) = (x0 as i32, y0 as i32, z0 as i32);
+    let bottom = lerp(
+        lerp(hash_3d(seed, xi, yi, zi), hash_3d(seed, xi + 1, yi, zi), tx),
+        lerp(hash_3d(seed, xi, yi, zi + 1), hash_3d(seed, xi + 1, yi, zi + 1), tx),
+        tz,
+    );
+    let top = lerp(
+        lerp(hash_3d(seed, xi, yi + 1, zi), hash_3d(seed, xi + 1, yi + 1, zi), tx),
+        lerp(hash_3d(seed, xi, yi + 1, zi + 1), hash_3d(seed, xi + 1, yi + 1, zi + 1), tx),
+        tz,
+    );
+    lerp(bottom, top, ty)
+}
+
+/// Sample 3D value noise remapped to `[-1, 1]`.
+pub fn signed_3d(seed: u64, x: f32, y: f32, z: f32) -> f32 {
+    value_3d(seed, x, y, z) * 2.0 - 1.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

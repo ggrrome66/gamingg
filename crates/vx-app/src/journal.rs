@@ -81,7 +81,13 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // the base pile, and the pile is something `Rebuilt` carries. So replay
 // spends the materials exactly as the live game did, and only the outputs
 // that live outside the pile are the honest no-ops.
-const VERSION: u32 = 10;
+//
+// Eleven is a world change alone: caves. The carve is part of generated
+// ground, so every hash a version-ten journal recorded was taken over
+// terrain that no longer exists. No format change — the same commands read
+// the same way — but pretending the old hashes still bind would make every
+// old session replay as a divergence that is really this bump.
+const VERSION: u32 = 11;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///

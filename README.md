@@ -175,6 +175,10 @@ build in it, and it survives quitting — skills included.
 
 ### Known rough edges
 
+- Caves are lit by the same sun as the surface: no darkness, no torches, no
+  skylight falloff. An underground lighting model is its own round.
+- A cave mouth on flat ground is a pothole you notice at your feet, not a
+  landmark; the mouths that read from a distance are the ones in hillsides.
 - Bounty never decays. The town's memory is perfect and permanent, which will
   want a statute of limitations once the warrant chain exists.
 - The player cannot hold an office in ordinary play, so the sheriff's override
@@ -764,6 +768,26 @@ Materials come off the pile the moment you start, so a print is a decision
 rather than a queue, and the Fabrication skill buys speed and unlocks the
 harder patterns. Nothing here costs credits.
 
+### The world below
+
+The terrain used to be a height field: one surface height per column, solid
+rock all the way down. Caves are the first genuinely three-dimensional thing
+worldgen has ever done — winding tunnel galleries where two 3D noise fields
+run near zero together, and rarer chambers deeper down, all of it a pure
+function of the seed and the block position so chunks still generate in
+parallel and a saved world still regenerates identically.
+
+Tunnels thin as they approach the surface, so mouths exist — a hole in a
+hillside you can walk into — but stay scarce enough to be worth marking on
+the map. Nothing opens under a town, nothing opens into the sea, and the
+bedrock floor keeps a margin of rock below the deepest gallery. Where a
+tunnel cuts through an ore body it carves the vein with it, which leaves
+copper showing in the cut faces: a cave is where hand-mining is pleasant,
+ore at the surface of a wall instead of under twenty blocks of overburden.
+
+Drones already cope: a machine over a void settles to the cave floor, and a
+mine plan that meets a cavity simply finds part of its digging already done.
+
 ### Hacking through machines
 
 Once Security 10, the counter stocks spoofer coils. Fitted to a machine, a
@@ -840,6 +864,12 @@ cargo run --release -p vx-app -- --screenshot third.ppm --at 0,10 --third-person
 
 # the container town at dawn, mast against the sky (--night, --noon, --dusk too)
 cargo run --release -p vx-app -- --screenshot town.ppm --at 0,22 --dawn
+
+# from inside the roomiest cave pocket near a spot, facing down the gallery
+cargo run --release -p vx-app -- --screenshot cave.ppm --at -244,-14 --cave
+
+# a fabricator standing in frame with its panel open mid-print
+cargo run --release -p vx-app -- --screenshot fab.ppm --at 13,9 --fab
 
 # the beacon console, work posted and one contract already taken
 cargo run --release -p vx-app -- --screenshot board.ppm --at 0,4 --board
