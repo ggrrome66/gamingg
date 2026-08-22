@@ -94,7 +94,11 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // index. A version-eleven journal's Print entries would replay as different
 // recipes spending different materials, which is exactly the divergence this
 // number exists to name.
-const VERSION: u32 = 12;
+//
+// Thirteen is a world change alone, like eleven: bunkers. The ground now
+// holds works that were not there, so every hash a version-twelve journal
+// recorded was taken over terrain that no longer exists.
+const VERSION: u32 = 13;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -156,6 +160,11 @@ pub enum Command {
     /// can be renamed by a mod. If the catalogue ever becomes moddable this
     /// becomes a name, and the version bump that brings it will say so.
     Print { recipe: u32 },
+    /// A supply cache stripped. Not a no-op and not merely a break: it
+    /// clears a block *and* pays out a haul, and both sides derive the haul
+    /// from the same position, so a replay finishes holding exactly what the
+    /// live session held.
+    Salvage { at: BlockPos },
     /// A machine sent to work a lock or the town's watch box. Journalled
     /// for the record; replayed as a no-op, because what an intrusion moves
     /// is claims and grants — permits state, kept in its own file — and not
@@ -523,6 +532,17 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
         // An intrusion moves grants and claims, which live in their own file
         // outside the hash, so it draws the same line.
         Command::Scout(_) | Command::Intrude(_) => {}
+        Command::Salvage { at } => {
+            // The crate goes, and its haul lands on the pile. The contents
+            // are a pure function of the position, so the two sides cannot
+            // drift: there is nothing rolled here to disagree about.
+            world.set_block(*at, vx_core::BlockId::AIR);
+            if let Some(base) = state.mining.fleet.base.as_mut() {
+                for (name, count) in crate::salvage::contents(*at, 1) {
+                    base.stockpile.add(name, count);
+                }
+            }
+        }
         Command::Print { recipe } => {
             // The materials come off the pile on both sides: the pile is
             // state `Rebuilt` carries, so a replay that skipped this would
@@ -673,6 +693,10 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
         Command::Print { recipe } => {
             file.write_all(&[15u8])?;
             file.write_all(&recipe.to_le_bytes())?;
+        }
+        Command::Salvage { at } => {
+            file.write_all(&[16u8])?;
+            write_pos(file, *at)?;
         }
         Command::Intrude(order) => {
             file.write_all(&[14u8])?;
@@ -922,6 +946,9 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
         }
         15 => Command::Print {
             recipe: read_u32(file)?,
+        },
+        16 => Command::Salvage {
+            at: read_pos(file)?,
         },
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
@@ -1651,6 +1678,47 @@ mod fire_tests {
     /// Every scout order survives the wire, and a log full of them replays
     /// to the same ground as a log with none — the scout charts nothing and
     /// breaks nothing, so the oracle must not see it.
+    #[test]
+    fn salvage_round_trips_and_replays_to_the_same_haul() {
+        let directory =
+            std::env::temp_dir().join(format!("vx-journal-salvage-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let crates_opened = [
+            BlockPos::new(-1217, 96, 1116),
+            BlockPos::new(340, 71, -9_708),
+        ];
+        let mut journal = CommandLog::default();
+        for at in crates_opened {
+            journal.record(Command::Salvage { at });
+        }
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let recovered: Vec<Command> = read_back
+            .entries()
+            .iter()
+            .map(|entry| entry.command.clone())
+            .collect();
+        assert_eq!(
+            recovered,
+            crates_opened
+                .iter()
+                .map(|at| Command::Salvage { at: *at })
+                .collect::<Vec<_>>(),
+            "a salvaged crate did not survive the wire"
+        );
+
+        // And the haul is a pure function of the position, so what a replay
+        // hands back is exactly what the session took — no roll to disagree
+        // about, which is the whole reason the contents are derived.
+        for at in crates_opened {
+            assert_eq!(crate::salvage::contents(at, 1), crate::salvage::contents(at, 1));
+            assert!(!crate::salvage::contents(at, 1).is_empty());
+        }
+    }
+
     #[test]
     fn scout_orders_round_trip_and_replay_to_unchanged_ground() {
         let directory = std::env::temp_dir().join(format!(

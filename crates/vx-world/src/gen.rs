@@ -46,6 +46,12 @@ pub struct TerrainBlocks {
     /// The fabricator: place one, feed it the pile, print what you want.
     /// Soft enough to pick up and move again, like the chest.
     pub printer: BlockId,
+    /// A bunker's skin. Breakable — `Some`, never `None` — because the point
+    /// is that digging in is a choice you can make and usually regret, not a
+    /// wall. Four hundred is "possible, and almost never worth it".
+    pub bunker_shell: BlockId,
+    /// A supply cache: what a bunker is actually for.
+    pub supply_cache: BlockId,
     /// The watch box the sheriff's drone lives in — and, bought, the one on
     /// your own roof. Hard enough that a slug glances off it; a drill gets
     /// through eventually, which is the loud way to blind the town.
@@ -151,6 +157,12 @@ impl TerrainBlocks {
             ),
             roost: register(BlockDef::uniform("engine:roost", 33).with_hardness(Some(6.0))),
             printer: register(BlockDef::uniform("engine:printer", 34).with_hardness(Some(1.5))),
+            bunker_shell: register(
+                BlockDef::uniform("engine:bunker_shell", 35).with_hardness(Some(400.0)),
+            ),
+            supply_cache: register(
+                BlockDef::uniform("engine:supply_cache", 36).with_hardness(Some(2.0)),
+            ),
         }
     }
 
@@ -185,6 +197,8 @@ impl TerrainBlocks {
             permit_box_iii: registry.id_of("engine:permit_box_iii")?,
             roost: registry.id_of("engine:roost")?,
             printer: registry.id_of("engine:printer")?,
+            bunker_shell: registry.id_of("engine:bunker_shell")?,
+            supply_cache: registry.id_of("engine:supply_cache")?,
         })
     }
 }
@@ -413,6 +427,23 @@ impl TerrainGenerator {
         crate::town::towns_near(self.seed, at, radius, &|x, z| self.natural_height_at(x, z))
     }
 
+    /// The bunkers reaching a chunk, gathered once like the towns.
+    fn bunkers_for_chunk(&self, pos: ChunkPos) -> Vec<crate::bunker::BunkerSite> {
+        let origin = pos.origin();
+        crate::bunker::bunkers_overlapping(
+            self.seed,
+            (origin.x, origin.z),
+            (origin.x + CHUNK_SIZE - 1, origin.z + CHUNK_SIZE - 1),
+            &|x, z| self.natural_height_at(x, z),
+        )
+    }
+
+    /// Bunkers near a column, nearest first, loading nothing — what the map
+    /// pins and the handheld ask.
+    pub fn bunkers_near(&self, at: (i32, i32), radius: i32) -> Vec<crate::bunker::BunkerSite> {
+        crate::bunker::bunkers_near(self.seed, at, radius, &|x, z| self.natural_height_at(x, z))
+    }
+
     /// The towns reaching a chunk, gathered with the margin every per-chunk
     /// helper needs, so one gather serves terrain, ore masking, flora and
     /// stamping alike.
@@ -433,6 +464,7 @@ impl TerrainGenerator {
         // The towns reaching this chunk, gathered once. Every helper below
         // shares the list, which is what keeps them agreeing about a column.
         let sites = self.sites_for_chunk(pos);
+        let bunkers = self.bunkers_for_chunk(pos);
 
         // Gather the ore bodies reaching this chunk once. Hashing the deposit
         // lattice per block would cost far more than the terrain itself.
@@ -454,6 +486,7 @@ impl TerrainGenerator {
                     surface,
                     &deposits,
                     &sites,
+                    &bunkers,
                 );
             }
         }
@@ -516,6 +549,11 @@ impl TerrainGenerator {
         // Each town's authored buildings, where this chunk overlaps them.
         crate::town::plan::stamp(&mut chunk, pos, &sites, &self.blocks);
 
+        // And whatever is buried here. Last, because a bunker is cut *into*
+        // finished ground: it writes air as well as blocks, and nothing that
+        // ran earlier gets a say over its shell.
+        crate::bunker::stamp(&mut chunk, pos, &bunkers, &self.blocks);
+
         // Generation touches the palette heavily; compact before it is cached.
         chunk.optimise();
         chunk.clear_dirty();
@@ -527,6 +565,11 @@ impl TerrainGenerator {
 
     /// Lay down the vertical stack for one column.
     ///
+    /// Eight arguments because a column genuinely depends on eight things,
+    /// and every one of them is gathered once per chunk by the caller —
+    /// bundling them into a struct would move the same list behind a name.
+    #[allow(clippy::too_many_arguments)]
+    ///
     /// `local` is the position within the chunk, `world` the same column in
     /// world coordinates — ore lookup needs the latter.
     fn fill_column(
@@ -537,6 +580,7 @@ impl TerrainGenerator {
         surface: i32,
         deposits: &[Deposit],
         sites: &[TownSite],
+        bunkers: &[crate::bunker::BunkerSite],
     ) {
         let blocks = self.blocks;
         let [x, z] = local;
@@ -568,8 +612,14 @@ impl TerrainGenerator {
         // ore: a tunnel cuts *through* a body, which is what leaves the rest
         // of the vein showing in the cut faces — a wall you can mine into —
         // and guarantees no ore ever hangs in the middle of a gallery.
-        let hollow =
-            |y: i32| !in_village && crate::caves::carved(self.seed, world_x, y, world_z, surface);
+        // A cave must not open into a sealed shell, so the carve stops over a
+        // bunker's works the way it stops under a town.
+        let in_works = crate::bunker::works_contains(bunkers, world_x, world_z);
+        let hollow = |y: i32| {
+            !in_village
+                && !in_works
+                && crate::caves::carved(self.seed, world_x, y, world_z, surface)
+        };
 
         // Rock, with ore wherever a body reaches. Restricting ore to what would
         // otherwise be stone or soil is what guarantees it never hangs in air.
@@ -1143,6 +1193,60 @@ mod tests {
             "village palette blew up: {} entries",
             chunk.storage().palette_len()
         );
+    }
+
+    #[test]
+    fn a_bunker_generates_the_same_whatever_order_chunks_are_asked_for() {
+        // The oldest rule in this crate, pointed underground: a bunker spans
+        // several chunks and each one derives the whole works to cut its own
+        // slice, so any disagreement between them would be a seam through a
+        // sealed shell.
+        let (registry, generator) = generator(2024);
+        let site = generator
+            .bunkers_near((0, 0), 4_000)
+            .into_iter()
+            .next()
+            .expect("a bunker within four kilometres of home");
+        let shell = registry.id_of("engine:bunker_shell").unwrap();
+
+        let middle = vx_core::BlockPos::new(site.centre.0, 0, site.centre.1).chunk();
+        let around: Vec<ChunkPos> = (-1..=1)
+            .flat_map(|dx| (-1..=1).map(move |dz| ChunkPos::new(dx, dz)))
+            .map(|offset| ChunkPos::new(middle.x + offset.x, middle.z + offset.z))
+            .collect();
+
+        let forwards: Vec<Chunk> = around.iter().map(|pos| generator.generate(*pos)).collect();
+        let backwards: Vec<Chunk> = around
+            .iter()
+            .rev()
+            .map(|pos| generator.generate(*pos))
+            .collect();
+        for (ahead, behind) in forwards.iter().zip(backwards.iter().rev()) {
+            assert_eq!(ahead, behind, "two orders, two bunkers");
+        }
+
+        // And the works are actually there: a shell in the ground, and air
+        // inside it that the height field alone could never produce.
+        let mut shells = 0;
+        let mut buried_air = 0;
+        for (chunk, pos) in forwards.iter().zip(&around) {
+            let origin = pos.origin();
+            for x in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    let surface = generator.height_at(origin.x + x, origin.z + z);
+                    for y in 1..surface {
+                        let block = chunk.get(LocalPos::new(x, y, z).unwrap());
+                        if block == shell {
+                            shells += 1;
+                        } else if block.is_air() {
+                            buried_air += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(shells > 40, "only {shells} shell blocks around the site");
+        assert!(buried_air > 40, "only {buried_air} blocks of buried air");
     }
 
     #[test]

@@ -175,6 +175,12 @@ build in it, and it survives quitting — skills included.
 
 ### Known rough edges
 
+- A bunker's room pool is small, and it shows: after enough of them the
+  furniture repeats even though the arrangements never do. That is content to
+  author, not code to write.
+- The coil's spine is a run of straight corridors, not a true golden spiral;
+  ruin is not modelled at all, so every bunker is intact; and a room on the
+  bottom floor is the same room as one at the top — depth means nothing yet.
 - Underground light is column depth, not light transport: a lit shaft does not
   spill light into the gallery beside it, and the lamp casts no shadows. Cheap,
   pure, and wrong in ways that mostly read as atmosphere.
@@ -807,6 +813,31 @@ geometry, and a **thermal visor** that ignores light entirely and paints
 warm machinery and warm bodies against cold rock. One key cycles the dial
 through what you own; the HUD names what you are looking through.
 
+### The world below, and what is in it
+
+Bunkers are buried out on their own lattice, far from any town: a concrete
+stair head cut into a hillside, and behind it somebody's works. Every one is
+laid out by a proportion system drawn from its own site hash — a golden-ratio
+**coil** whose rooms shrink as the plan turns inward, a √2 **grid** that halves
+like a barracks, or a √3 **hive** that branches three ways — and every room
+size is a Fibonacci number, because those are the whole numbers that read as
+golden on a block grid. The result is that no two bunkers in a world share a
+layout, and none of it is stored: a bunker three kilometres away costs nothing
+until you walk to it.
+
+Each one faces its own way, too. Bunker *k* takes a bearing of *k* × 137.507°
+— the golden angle, the irrational rotation — so no two hatches on a ridge
+line point the same direction and the sequence never repeats, world-wide,
+without a single byte written down.
+
+The shell is the gate, and it is one number rather than a new mechanic:
+bunker concrete has a hardness of 400 against stone's 1, so cutting in through
+the wall is possible, and almost never worth it. The way in is the stair. Down
+there are supply caches — the first goods in this game you cannot buy at any
+price and cannot mine at any depth. What a crate holds is derived from where it
+stands, so two visits agree; that it was opened is remembered by the crate not
+being there any more.
+
 ### Hacking through machines
 
 Once Security 10, the counter stocks spoofer coils. Fitted to a machine, a
@@ -886,6 +917,10 @@ cargo run --release -p vx-app -- --screenshot town.ppm --at 0,22 --dawn
 
 # from inside the roomiest cave pocket near a spot, facing down the gallery
 cargo run --release -p vx-app -- --screenshot cave.ppm --at -244,-14 --cave
+
+# the nearest bunker to a spot: its hatch from outside, its works from within
+cargo run --release -p vx-app -- --screenshot hatch.ppm --at 2026,364 --bunker
+cargo run --release -p vx-app -- --screenshot works.ppm --at 2026,364 --bunker --close --optic lamp
 
 # the same gallery by hand lamp, night vision or thermal
 cargo run --release -p vx-app -- --screenshot lamp.ppm --at -244,-14 --cave --optic lamp

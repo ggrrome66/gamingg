@@ -93,7 +93,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 15 | `7e8d4f1` | Hacking through machines: spoofer coils, drone-borne intrusion on a leash, the watch box blinded, silenced or tapped, the impound, and a watch box for your own roof |
 | 16 | `75bbb1b` | The fabricator: every block is stock, and a printer that turns raw material into ammunition, cells, building goods, modules and whole machines |
 | 17 | `1643f59` | Caves: the first true 3D carve — tunnel galleries and deep chambers, pure in the seed, mouths in hillsides, ore showing in the cut faces |
-| 18 | _this_ | Lights in the dark: baked skylight makes the world below genuinely black, the suit's hand lamp cuts a warm cone through it, and the fabricator prints a high beam, night vision and thermal |
+| 18 | `8bbc730` | Lights in the dark: baked skylight makes the world below genuinely black, the suit's hand lamp cuts a warm cone through it, and the fabricator prints a high beam, night vision and thermal |
+| 19 | _this_ | Bunkers: sacred-geometry layouts on their own lattice — three proportion systems, golden BSP on a Fibonacci vocabulary, golden-angle bearings, a 400-hardness shell, and supply caches to strip |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -851,6 +852,92 @@ anyway.
 
 ---
 
+## Shipped — Stage 19: bunkers, and the geometry that makes each one unique
+
+**The claim, and why it is not mysticism.** The golden ratio is the *most
+irrational* number — its continued fraction is all ones, so no fraction
+approximates it well — and by the equidistribution theorem `{n·φ}` never
+repeats, never clusters and spreads as evenly as a sequence can. That is the
+property uniqueness actually needs. Uniform randomness makes every dungeon
+feel like every other dungeon because noise has no grammar; quasirandomness is
+deterministic, non-repeating and evenly varied. It is also plain arithmetic on
+a site hash — no rejection loops, no stored state — which is the only kind of
+mathematics the worldgen rules here admit.
+
+**Variation between sites, invariance within one.** A bunker where every room
+rolled its own dice is unique the way static is unique. Instead the site hash
+picks a handful of numbers — a proportion system, a tier, a footprint, a
+bearing — and everything inside derives from those. Each bunker is governed by
+one geometry the way each town is governed by one plan.
+
+| System | Ratio | Splits | Reads as |
+|---|---|---|---|
+| φ | 1.618 | two at `1/φ`, recursing deeper into the *smaller* child | a coil: rooms shrinking inward |
+| √2 | 1.414 | two at `1/√2`, both children equally | the barracks grid |
+| √3 | 1.732 | three at a time on the long axis | the industrial hive |
+
+Tier weights the draw: shelters coil, works branch. **Golden BSP** places the
+rooms — splits at `1/P` of the parent, jittered ±4%, on the longer axis, which
+for a P-proportioned rectangle alternates by itself and never yields the
+slivers a uniform split does. **Fibonacci is how an irrational proportion
+lives on a block grid**: every room dimension snaps to `{3, 5, 8, 13, 21, 34}`,
+adjacent pairs approximate φ, and they land exactly on voxels. Orientation is
+the **golden angle**: bunker `k` faces `k · 137.507…°`, so no two hatches on a
+ridge point the same way and the sequence never repeats world-wide, with not
+one byte stored.
+
+**Where the note's plan bent to the block grid** — two deviations, both
+documented in the module and both because voxels are not paper. Orientation
+is the *entry bearing* rather than a rotation of the plan, because rotating a
+voxel BSP by an irrational angle aliases every wall into a staircase; and the
+pool *furnishes* generated rooms rather than replacing them, because the
+vocabulary cross-product is over thirty room shapes per system and the shell
+is identical in all of them. The guarantee the note asked for survives whole:
+every legal room size has at least one piece that fits, checked at authoring
+time by test.
+
+**The shell is one number, not a new mechanic.** Bunker concrete has hardness
+400 against stone's 1 — cutting in is possible and almost never worth it — and
+it is `Some(400)`, never `None`, because the point is a choice you can make
+and usually regret rather than a wall. Caves are masked over the works so a
+tunnel cannot open a sealed shell, and bunkers are refused under towns for the
+same reason a plaza may not open into a void.
+
+**Three bugs the tests caught, all of the same family.** Connectivity is the
+one failure invisible from the surface — a sealed room is loot the ledger
+promises and nothing can collect — so it is asserted, not argued: every room,
+every level, every tier, reachable on foot from the hatch. Getting there found
+(1) furnishings that ringed their own footprint and sealed an air pocket, now
+a flood-fill test over every piece; (2) a stairwell plated per level, which
+sealed the very column the levels are threaded on, now one open shaft with
+landings beside the run; and (3) the entry corridor paving its floor straight
+over the staircase's air — fixed by a rule worth stating plainly, that the way
+in is cut *into* finished works and never paves over open space it finds. A
+fourth, subtler one: the golden angle computed in `f32` collapsed distinct
+bearings onto each other, because `k · 137.5°` runs to tens of millions of
+degrees before the modulo and an `f32` that size has an ulp of about four
+degrees. The whole irrational-rotation argument was quietly dead until it was
+computed in `f64`.
+
+**Loot is the first source to match the sinks.** Supply caches hold goods
+derived from where they stand — so two visits agree and nothing is rolled
+twice — and *that a crate was opened* is remembered by the crate not being
+there any more, which is the one thing this engine already stores. Prising one
+open with the drill pays out the same haul as opening it by hand, through one
+shared path, so neither can start paying something the other does not.
+Prospecting scales the haul rather than re-rolling it. **Journal VERSION 12 →
+13**, a world change: the ground now holds works that were not there.
+
+**Deliberately not in 19:** occupants — mobs and military both attack you, and
+that needs the health model stage 25 brings; ruin and partial collapse; new
+goods (rations, spirits, oil) which are a trade round wearing a bunker's
+clothes; pressure, damp or anything else that makes a room at level three
+different from the same room at level one; and the geodesic dome and
+phyllotaxis silo columns of the large tier's concept art, which want a
+rasterisation pass of their own.
+
+---
+
 ## Planned — star forts: walls with the receipts to justify them
 
 A worldgen round, recorded from the design note whole. Towns grow bastioned
@@ -936,62 +1023,9 @@ the bunkers half, which rests on the carve the caves round paid for.
 
 ### Bunkers
 
-**Siting** is the lattice idiom used three times already — ore deposits, trees,
-towns: a jittered cell, splitmix64 per property, a large cell because bunkers
-should be rare. Tier from the same hash, weighted so the big ones are rarer and
-further out. Derived, so a bunker three kilometres away costs nothing until
-somebody goes there, exactly like a town.
-
-**The shell is the interesting part, and the engine already has it.** Blocks
-carry `hardness: Option<f32>` and the drill spends `dt * power / hardness`
-(`main.rs:1535`). Stone is `1.0`. A bunker shell at, say, `400.0` is four
-hundred times slower to cut — perfectly possible, and almost never worth it.
-That is the soft gate asked for, with **no new mechanic at all**: just a block
-with a big number.
-
-It must be `Some(large)` and never `None`. `None` means bedrock — genuinely
-unbreakable — and that would be the wrong answer: the point is that digging in
-is a *choice you can make and usually regret*, not a wall.
-
-**Getting in** is meant to be the door. A bunker breaks the surface with a hatch
-or a stair head, which makes it findable by walking, by the flier's scanner (it
-already sweeps sectors and drops pings — a structure ping is the same
-machinery), and pinnable on the maps 10a just built. A large one is partly
-above ground by design, so it reads as a landmark from a distance; a small one
-you stumble on.
-
-**Interiors** are the reason to finally build the **jigsaw / template-pool**
-generator that has been deferred since stage 8: a start room plus modules
-attached at connection points, drawn from a pool, deterministic from the site
-hash. Rooms are the existing origin-relative ASCII layer blueprints
-(`town/plan.rs`) stamped at a negative height instead of a positive one — the
-same code, a different Y.
-
-**Loot** is a name-keyed table over goods that already exist, plus the ones the
-concept sheet lists: rations, water, spirits, cigarettes, oil, rope, blankets,
-a first aid kit, tools, mechanical and electrical parts. Derived from the site
-hash and consumed through the ledger, exactly as `postings_for` derives a board
-and `Ledger` remembers what was taken — so two visits agree and nothing is
-rolled twice. This also gives the economy a **source** to match the sink stage
-10a added: things you cannot buy, only take.
-
-**Occupants**, the two flavours asked for:
-
-- *Mobs.* A hostile is a drone that walks toward you instead of toward a job.
-  `FlowField`, `is_standable` and `settle` already move a machine through a
-  world, and `Perception` with `sight::obstruction` (stage 7) is already the
-  "can it see you, with rock in between counting" primitive. The movement half
-  is close to free.
-- *Military.* The same movement, carrying the arsenal's weapons, and aligned to
-  something — which is what makes them a faction problem rather than a monster
-  problem.
-
-**The honest sequencing problem:** both flavours attack you, and stage 13
-deliberately leaves out player health, hostiles and death. So bunkers split in
-two. The **built** half — sited, shelled, entered, laid out, looted — can ship
-as soon as caves have paid for the 3D carve. The **occupied** half waits for
-health, and a bunker without occupants is still worth entering, because the loot
-is the point.
+The built half shipped as stage 19 — see the shipped section above. What
+remains is the *occupied* half: mobs and military, held until the health
+model exists, because both of them attack you.
 
 ### The three tiers
 
@@ -1021,13 +1055,12 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-Renumbered again after the fabricator (16), caves (17) and optics (18)
-rounds took their slots: the plans kept their order, the stages moved down
-to make room.
+Renumbered again after the fabricator (16), caves (17), optics (18) and
+bunkers (19) took their slots: the plans kept their order, the stages moved
+down to make room.
 
 | Stage | What | Why here |
 |---|---|---|
-| 19 | Bunkers, built and lootable | Rests on caves paying for the 3D carve. Sited on the same lattice as towns, shelled with a very high `hardness`, laid out by the jigsaw generator deferred since stage 8, and looted — a *source* to match 10a's sink |
 | 20 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
 | 21 | Star forts | Bastioned traces per town tier, gates on the roads, deterministic ruins. After the fuel loop and before hostiles: walls should exist — and have gaps — before anything arrives that makes them matter, and the arsenal is what makes a town want them |
 | 22 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
@@ -1041,7 +1074,7 @@ to make room.
 
 ## The feature map
 
-The whole game at a glance, as of stage 18.
+The whole game at a glance, as of stage 19.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1075,10 +1108,15 @@ Fabrication skill buying speed); caves (the first true 3D carve: tunnel
 galleries, deep chambers, hillside mouths, ore in the cut faces, nothing
 under towns or into the sea); lights in the dark (baked per-face skylight,
 a genuinely black underground, the suit's hand lamp, and printed optics —
-high beam, night vision, thermal); a Steam Deck dist build every round.
+high beam, night vision, thermal); bunkers (a lattice of their own, three
+proportion systems, golden BSP on a Fibonacci vocabulary, golden-angle
+bearings, a 400-hardness shell, an authored furnishing pool, and supply
+caches whose contents are derived from where they stand); a Steam Deck dist
+build every round.
 
-**Planned, in arc order:** bunkers built-then-occupied; fuel loop;
-star forts; terminal; crafting; wear and breakdowns; hostiles and health;
+**Planned, in arc order:** fuel loop;
+star forts; terminal; crafting; wear and breakdowns; hostiles and health
+(and with them bunkers occupied);
 the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
 B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket
 arcade.

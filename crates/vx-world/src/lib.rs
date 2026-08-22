@@ -4,6 +4,7 @@
 //! rendering or windowing, so it can be driven headlessly — by tests today, by
 //! a dedicated server later.
 
+pub mod bunker;
 pub mod caves;
 pub mod chunk;
 pub mod edit;

@@ -32,6 +32,7 @@ mod movement;
 mod optics;
 mod printer;
 mod rig;
+mod salvage;
 mod roost;
 mod scout;
 mod shop;
@@ -169,6 +170,9 @@ struct Options {
     cave: bool,
     /// See the capture through the optics kit: lamp, nvg or thermal.
     optic: Option<String>,
+    /// Frame the capture on the nearest bunker to `--at`: its hatch by
+    /// default, a named room inside it with `--close`.
+    bunker: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -197,6 +201,7 @@ fn parse_args() -> Result<Options, String> {
         fab: false,
         cave: false,
         optic: None,
+        bunker: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -264,6 +269,7 @@ fn parse_args() -> Result<Options, String> {
             "--fab" => options.fab = true,
             "--cave" => options.cave = true,
             "--optic" => options.optic = Some(value()?),
+            "--bunker" => options.bunker = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -557,6 +563,74 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
     let (mut world, mut camera) = build_scene(&context, &mut renderer, options.seed, 6, options.at);
     camera.aspect = width as f32 / height as f32;
+
+    if options.bunker {
+        // Find the nearest bunker to the requested spot and frame it: the
+        // hatch from outside, or — with `--close` — standing in the works.
+        // The capture reads the generated world, not the layout, so what it
+        // shows is what a player walking there would find.
+        let site = world
+            .generator()
+            .bunkers_near(options.at, 4_000)
+            .into_iter()
+            .next()
+            .ok_or("no bunker within four kilometres of --at")?;
+        let plan = vx_world::bunker::layout(&site);
+        println!(
+            "bunker: {:?} {:?} at {:?}, {} levels, {} rooms, bearing {:.0}°",
+            site.tier,
+            site.system,
+            site.centre,
+            site.levels,
+            plan.rooms.len(),
+            site.bearing.to_degrees()
+        );
+
+        // Load the ground around it, since `--at` may be kilometres away.
+        let centre = vx_core::BlockPos::new(site.centre.0, 0, site.centre.1).chunk();
+        world.load_around(centre, 6);
+        remesh_all(&context, &mut renderer, &mut world);
+
+        if options.close {
+            // Stand in the biggest room on the top floor, looking along it.
+            let room = plan
+                .rooms
+                .iter()
+                .filter(|room| room.level == 0)
+                .max_by_key(|room| room.w * room.d)
+                .ok_or("the bunker has no rooms")?;
+            let base = site.level_base(room.level);
+            let (cx, cz) = room.centre();
+            camera.position = glam::Vec3::new(
+                cx as f32 + 0.5 - room.w as f32 * 0.32,
+                base as f32 + 2.2,
+                cz as f32 + 0.5,
+            );
+            look_at(
+                &mut camera,
+                glam::Vec3::new(cx as f32 + room.w as f32 * 0.4, base as f32 + 1.8, cz as f32),
+            );
+        } else {
+            // Stand off along the bearing and above whatever the ground does
+            // there — a fixed height over the *hatch* puts the camera inside
+            // the hill whenever the approach runs into rising terrain.
+            let out = glam::Vec3::new(site.bearing.cos(), 0.0, site.bearing.sin());
+            let stand = glam::Vec3::new(site.hatch.0 as f32, 0.0, site.hatch.1 as f32) + out * 14.0;
+            let local = world
+                .surface_y(stand.x.floor() as i32, stand.z.floor() as i32)
+                .unwrap_or(site.hatch_ground);
+            camera.position =
+                glam::Vec3::new(stand.x, local.max(site.hatch_ground) as f32 + 7.0, stand.z);
+            look_at(
+                &mut camera,
+                glam::Vec3::new(
+                    site.hatch.0 as f32,
+                    site.hatch_ground as f32 - 1.0,
+                    site.hatch.1 as f32,
+                ),
+            );
+        }
+    }
 
     if options.cave {
         // Hunt the roomiest pocket of underground air near the requested
@@ -2918,6 +2992,31 @@ impl App {
         }
     }
 
+    /// Hand a crate's contents to the pile, and say what came out.
+    ///
+    /// Shared by the two ways in — pressing `E` on a crate and prising it
+    /// open with the drill — so one of them can never start paying out
+    /// something the other does not.
+    fn pay_out_cache(active: &mut Active, at: vx_core::BlockPos) {
+        let level = active.skills.level(salvage::SKILL);
+        let haul = salvage::contents(at, level);
+        let Some(base) = active.mining.fleet.base.as_mut() else {
+            return;
+        };
+        for (name, count) in &haul {
+            base.stockpile.add(*name, *count);
+        }
+        let listed: Vec<String> = haul
+            .iter()
+            .map(|(name, count)| format!("{count} {}", shop::display_name(name)))
+            .collect();
+        let xp = salvage::experience(at);
+        if let Some(level) = active.skills.add_xp(salvage::SKILL, xp) {
+            active.level_up = Some((salvage::SKILL.to_string(), level, Instant::now()));
+        }
+        active.greeting = Some((format!("SALVAGED {}", listed.join(", ")), Instant::now()));
+    }
+
     /// Run the drill for one frame, if it is held on something drillable.
     ///
     /// Hold-to-dig: progress accumulates while the bit stays on one block and
@@ -3022,7 +3121,19 @@ impl App {
                 log::debug!("could not break {:?}: {error}", hit.block);
             }
             Ok(_) => {
-                active.journal.record(Command::Break { at: hit.block });
+                // A crate prised open with a drill is still a crate opened:
+                // it pays out its haul rather than yielding one crate-shaped
+                // block, and it records the order that says so, so a replay
+                // that only saw `Break` cannot end up holding different goods
+                // than the session did.
+                let crate_here = active.world.registry().get_or_air(hit.id).name
+                    == "engine:supply_cache";
+                if crate_here {
+                    active.journal.record(Command::Salvage { at: hit.block });
+                    Self::pay_out_cache(active, hit.block);
+                } else {
+                    active.journal.record(Command::Break { at: hit.block });
+                }
                 // Everything you break is stock. Every block yields itself by
                 // name onto the same pile the drones haul into and the shop
                 // sells out of — one pile, no transfer minigame, and the
@@ -3030,8 +3141,10 @@ impl App {
                 // used to simply vanish, which made the drill the one tool
                 // in the game that produced nothing.
                 if let Some(base) = active.mining.fleet.base.as_mut() {
-                    base.stockpile
-                        .add_block(active.world.registry(), hit.id, 1);
+                    if !crate_here {
+                        base.stockpile
+                            .add_block(active.world.registry(), hit.id, 1);
+                    }
                 }
                 let xp = (hardness * skills::MINING_XP_PER_HARDNESS) as u64;
                 if let Some(level) = active.skills.add_xp(skills::MINING, xp) {
@@ -3850,6 +3963,25 @@ impl App {
             }
             "engine:printer" => {
                 active.printer.open_at(hit.block);
+            }
+            "engine:supply_cache" => {
+                // Whatever the crate holds goes straight onto the pile — the
+                // one store this game has — and the crate goes with it. The
+                // order is journalled because it changes the ground.
+                if active.mining.fleet.base.is_none() {
+                    active.greeting =
+                        Some(("NO BASE PILE TO HAUL IT TO".to_string(), Instant::now()));
+                    return;
+                }
+                match break_block(&mut active.world, &active.events, hit.block) {
+                    Ok(_) => {
+                        active.journal.record(Command::Salvage { at: hit.block });
+                        Self::pay_out_cache(active, hit.block);
+                    }
+                    Err(error) => {
+                        log::debug!("could not open the cache at {:?}: {error}", hit.block);
+                    }
+                }
             }
             "engine:chest" => {
                 active.home_panel.open_at_chest();

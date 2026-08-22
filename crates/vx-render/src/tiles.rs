@@ -54,7 +54,13 @@ pub mod slot {
     /// The fabricator: raw stock in, anything out.
     pub const PRINTER: u32 = 34;
     /// Total generated tiles.
-    pub const COUNT: u32 = 35;
+    /// The bunker's skin: poured, reinforced, and four hundred times slower
+    /// to cut than stone.
+    pub const BUNKER_SHELL: u32 = 35;
+    /// A supply cache, sealed until somebody opens it.
+    pub const SUPPLY_CACHE: u32 = 36;
+
+    pub const COUNT: u32 = 37;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -384,6 +390,41 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.22, 0.24, 0.28], noise * 0.06)
                     } else {
                         shade([0.17, 0.18, 0.22], noise * 0.06)
+                    }
+                }
+                slot::BUNKER_SHELL => {
+                    // Poured concrete with the formwork seams still on it and
+                    // rebar showing where the face has spalled. It has to read
+                    // as "somebody built this to survive something", and — at
+                    // four hundred hardness — as not worth your afternoon.
+                    let seam = y % 8 == 0 || (x % 12 == 0 && y % 8 > 4);
+                    let spall = ((x * 7 + y * 13) % 61) < 4;
+                    let rebar = spall && (x + y) % 3 == 0;
+                    if rebar {
+                        shade([0.35, 0.24, 0.18], noise * 0.05)
+                    } else if spall {
+                        shade([0.44, 0.43, 0.41], noise * 0.07)
+                    } else if seam {
+                        shade([0.33, 0.33, 0.34], noise * 0.05)
+                    } else {
+                        shade([0.52, 0.52, 0.51], noise * 0.06)
+                    }
+                }
+                slot::SUPPLY_CACHE => {
+                    // A strapped crate with a stencilled band. Bright enough
+                    // to spot down a dark corridor by lamplight, which is the
+                    // whole job of the texture.
+                    let band = (6..10).contains(&y);
+                    let strap = (2..4).contains(&x) || (TILE_SIZE - 4..TILE_SIZE - 2).contains(&x);
+                    let edge = !(1..TILE_SIZE - 1).contains(&x) || !(1..TILE_SIZE - 1).contains(&y);
+                    if edge {
+                        shade([0.24, 0.20, 0.14], noise * 0.05)
+                    } else if strap {
+                        shade([0.30, 0.31, 0.33], noise * 0.05)
+                    } else if band {
+                        shade([0.78, 0.62, 0.16], noise * 0.05)
+                    } else {
+                        shade([0.42, 0.33, 0.20], noise * 0.07)
                     }
                 }
                 slot::PRINTER => {
