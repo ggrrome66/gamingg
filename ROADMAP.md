@@ -1051,6 +1051,13 @@ you cannot afford to lose. Unlike nearly everything else in this world a
 vault's contents are **not derived**: they are exactly what somebody put
 there, which is what a bank is.
 
+**Robbing one is the loudest thing in the game.** A breach bills by the grade
+of what was breached, and Tier Three is stamped on exactly one building in a
+town — so a vault door costs `BOUNTY_VAULT`, several times any other crime and
+past the warrant threshold on its own. Picking the same lock quietly still
+costs the quiet price: that asymmetry *is* the permits round, and Security 60
+is the toll on the quiet road.
+
 `Command::Bank` records **the amount that actually moved**, not the amount
 asked for — a vault's capacity can bite mid-deposit, and a log saying "all of
 it" while the world took two thirds is a divergence waiting for the next

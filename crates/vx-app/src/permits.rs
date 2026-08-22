@@ -45,8 +45,30 @@ pub const BOUNTY_PRYING: u64 = 5;
 pub const BOUNTY_HACK: u64 = 25;
 /// Bounty for being seen destroying one.
 pub const BOUNTY_BREACH: u64 = 60;
+/// Bounty for being seen taking a bank's strongroom door off its hinges.
+///
+/// The maximum on the sheet, and by a long way. Every other crime in this
+/// game is against one person or one machine; a bank holds what a whole town
+/// left with it, so smashing into one is the only act here that is against
+/// everybody at once. It is set well past [`WARRANT_THRESHOLD`] on purpose:
+/// one vault, once, and the warrant chain is looking at you before you have
+/// carried anything out of the building.
+pub const BOUNTY_VAULT: u64 = 500;
 /// Where stage 12's warrant chain starts paying attention.
 pub const WARRANT_THRESHOLD: u64 = 100;
+
+/// What breaching a lock costs, by the grade of what was breached.
+///
+/// The tier is already on the claim, and Tier Three is stamped on exactly one
+/// building in a town — so "was this a bank?" needs nothing looked up. Note
+/// that *picking* a bank's lock still costs the quiet price: that is the
+/// whole shape of the permits round, and Security 60 is its own toll.
+pub fn breach_bounty(tier: Option<Tier>) -> u64 {
+    match tier {
+        Some(Tier::Three) => BOUNTY_VAULT,
+        _ => BOUNTY_BREACH,
+    }
+}
 
 /// The lowest Security level that can attempt each grade of lock.
 ///
@@ -1042,6 +1064,31 @@ pub fn render_permit(panel: &PermitPanel, permits: &Permits) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vault_breach_is_the_maximum_on_the_sheet() {
+        // The single loudest thing a player can do. Every other crime here is
+        // against one person or one machine; a bank holds what a whole town
+        // left with it.
+        assert_eq!(breach_bounty(Some(Tier::Three)), BOUNTY_VAULT);
+        for lesser in [None, Some(Tier::One), Some(Tier::Two)] {
+            assert_eq!(breach_bounty(lesser), BOUNTY_BREACH);
+        }
+        for other in [BOUNTY_PRYING, BOUNTY_HACK, BOUNTY_BREACH] {
+            assert!(BOUNTY_VAULT > other, "a vault is not the worst thing here");
+        }
+
+        // And one is enough to bring the warrant chain down on its own —
+        // there is no walking this one off by keeping your head down.
+        assert!(BOUNTY_VAULT > WARRANT_THRESHOLD);
+        let mut permits = Permits::new();
+        permits.set_sites(vec![town::home_site()]);
+        assert!(permits.caught(BOUNTY_VAULT, 1), "nobody saw the loudest crime");
+        assert!(
+            permits.bounty >= WARRANT_THRESHOLD,
+            "one vault did not reach the warrant threshold"
+        );
+    }
 
     fn home() -> TownSite {
         town::home_site()

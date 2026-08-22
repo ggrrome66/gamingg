@@ -881,6 +881,14 @@ selling it in one lump; now you can leave a load in the town you mean to sell
 it in and come back when the price is right. And anything you cannot afford to
 lose can sit somewhere with a door on it instead of in a container in a field.
 
+Taking a strongroom door off its hinges carries the **maximum bounty in the
+game** — several times what any other crime costs, and enough on its own to
+put you over the warrant threshold before you have carried anything out of the
+building. Every other crime here is against one person or one machine; a bank
+holds what a whole town left with it. Picking the lock quietly still costs the
+quiet price, which is the whole shape of the permits system — though Security
+60 is its own toll.
+
 Each town's books are separate — goods left in Stonehaven are in Stonehaven —
 and the vault holds six thousand units. Unlike almost everything else in this
 world its contents are not derived from anything: they are exactly what

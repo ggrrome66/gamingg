@@ -3532,20 +3532,32 @@ impl App {
                 // A lock went down. The claim it held sleeps until the town
                 // puts a new box up, and if anybody saw, that is the loudest
                 // thing on the sheet.
-                if let Some(_tier) = lock_tier {
+                if let Some(tier) = lock_tier {
                     let now = active.journal.tick();
                     let claim = active.permits.borrow().claim_here(hit.block);
-                    let label = claim.map_or_else(|| "SOMETHING".into(), |claim| claim.label);
+                    let label = claim
+                        .as_ref()
+                        .map_or_else(|| "SOMETHING".to_string(), |claim| claim.label.clone());
+                    // What a breach costs depends on what was breached, and
+                    // the claim already carries the grade. A bank is the one
+                    // building whose strongroom holds what a whole town left
+                    // with it, so it is the one crime that bills the maximum.
+                    let bill = permits::breach_bounty(
+                        claim.as_ref().and_then(|claim| claim.tier).or(Some(tier)),
+                    );
                     let seen = usize::from(active.watched);
                     let mut permits = active.permits.borrow_mut();
                     permits.broke(hit.block, now);
-                    let caught = permits.caught(permits::BOUNTY_BREACH, seen);
+                    let caught = permits.caught(bill, seen);
                     drop(permits);
                     active.greeting = Some((
-                        if caught {
-                            format!("{label} IS OPEN - AND YOU WERE SEEN")
-                        } else {
-                            format!("{label} IS OPEN")
+                        match (caught, bill >= permits::BOUNTY_VAULT) {
+                            (true, true) => {
+                                format!("{label} IS OPEN - AND EVERY BADGE IN THE COUNTY SAW IT")
+                            }
+                            (true, false) => format!("{label} IS OPEN - AND YOU WERE SEEN"),
+                            (false, true) => format!("{label} IS OPEN. THEY WILL COUNT IT"),
+                            (false, false) => format!("{label} IS OPEN"),
                         },
                         Instant::now(),
                     ));
