@@ -34,6 +34,11 @@ pub struct Object {
     pub tile: u32,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
+    /// Sky exposure at the object's position, 0 buried .. 1 open sky. The
+    /// caller sets it from the same column-depth rule the mesher bakes into
+    /// terrain; the default is daylight, which every overlay and fixture
+    /// object wants.
+    pub light: f32,
 }
 
 impl Object {
@@ -60,6 +65,7 @@ impl Object {
             tile,
             bounds_min: min,
             bounds_max: max,
+            light: 1.0,
         }
     }
 
@@ -71,6 +77,7 @@ impl Object {
             tile,
             bounds_min: min,
             bounds_max: max,
+            light: 1.0,
         }
     }
 
@@ -87,6 +94,7 @@ impl Object {
             model: self.model.to_cols_array_2d(),
             normal: normal_matrix(self.model),
             tile: self.tile,
+            light: self.light,
         }
     }
 }
@@ -128,6 +136,8 @@ pub struct ObjectInstance {
     /// for transforming normals — see [`normal_matrix`].
     pub normal: [[f32; 4]; 3],
     pub tile: u32,
+    /// Sky exposure at the object's position — see [`Object::light`].
+    pub light: f32,
 }
 
 /// Instance-rate vertex layout. Locations continue past the terrain vertex's
@@ -178,6 +188,12 @@ pub const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBuffe
             offset: 112,
             shader_location: 11,
             format: wgpu::VertexFormat::Uint32,
+        },
+        // Sky exposure at the object's position.
+        wgpu::VertexAttribute {
+            offset: 116,
+            shader_location: 12,
+            format: wgpu::VertexFormat::Float32,
         },
     ],
 };
@@ -373,12 +389,12 @@ mod tests {
     fn the_instance_layout_matches_the_instance_struct() {
         // A mismatch scrambles every transform, which shows up as objects in
         // wild positions rather than as an error, so pin it explicitly.
-        assert_eq!(std::mem::size_of::<ObjectInstance>(), 116);
-        assert_eq!(INSTANCE_LAYOUT.array_stride, 116);
+        assert_eq!(std::mem::size_of::<ObjectInstance>(), 120);
+        assert_eq!(INSTANCE_LAYOUT.array_stride, 120);
         assert_eq!(INSTANCE_LAYOUT.step_mode, wgpu::VertexStepMode::Instance);
 
         let offsets: Vec<u64> = INSTANCE_LAYOUT.attributes.iter().map(|a| a.offset).collect();
-        assert_eq!(offsets, vec![0, 16, 32, 48, 64, 80, 96, 112]);
+        assert_eq!(offsets, vec![0, 16, 32, 48, 64, 80, 96, 112, 116]);
     }
 
     #[test]

@@ -177,7 +177,7 @@ fn the_camera_looking_up_sees_only_sky() {
 fn facing_quad(plane: i32, iu: i32, iv: i32, w: i32, h: i32, tile: u32) -> vx_mesh::Mesh {
     vx_mesh::Mesh {
         // Kind 5 is PosZ in `Face::ALL` order.
-        quads: vec![vx_mesh::PackedQuad::face(5, plane, iu, iv, w, h, tile)],
+        quads: vec![vx_mesh::PackedQuad::face(5, plane, iu, iv, w, h, tile, 15)],
     }
 }
 
@@ -366,6 +366,7 @@ fn a_night_sun_darkens_the_frame_and_takes_the_horizon_with_it() {
             direction: [0.42, 0.86, 0.29, 0.0],
             sky: [0.02, 0.03, 0.06, 1.0],
             light: [0.05, 0.14, 0.0, 0.0],
+            ..vx_render::SunUniform::default()
         },
     );
     let night = capture_frame(&context, &renderer, WIDTH, HEIGHT);

@@ -54,7 +54,7 @@ pub struct Vertex {
 /// # Layout
 ///
 /// ```text
-/// kind:4 | plane:9 | iu:9 | iv:9 | w:9 | h:9 | tile:8   = 57 bits
+/// kind:4 | plane:9 | iu:9 | iv:9 | w:9 | h:9 | tile:8 | light:4   = 61 bits
 /// ```
 ///
 /// `kind` 0..=5 is a [`Face`] index and `plane`/`iu`/`iv`/`w`/`h` describe a
@@ -77,16 +77,23 @@ pub const CROSS_KINDS: [u32; 4] = [6, 7, 8, 9];
 
 impl PackedQuad {
     /// Pack a cube face. `plane` is the position along the face's own axis;
-    /// `iu`/`iv` and `w`/`h` are the rectangle in the other two.
-    pub fn face(kind: u32, plane: i32, iu: i32, iv: i32, w: i32, h: i32, tile: u32) -> Self {
+    /// `iu`/`iv` and `w`/`h` are the rectangle in the other two. `light` is
+    /// the face's baked sky exposure, 0 (buried dark) to 15 (open sky).
+    ///
+    /// Eight arguments because a quad genuinely has eight independent fields;
+    /// bundling them into a struct would just move the same list.
+    #[allow(clippy::too_many_arguments)]
+    pub fn face(kind: u32, plane: i32, iu: i32, iv: i32, w: i32, h: i32, tile: u32, light: u32) -> Self {
         debug_assert!(kind < 10, "quad kind {kind} is not a face or a cross");
+        debug_assert!(light < 16, "light {light} does not fit its nibble");
         let bits = (kind as u64)
             | ((plane as u64 & 0x1ff) << 4)
             | ((iu as u64 & 0x1ff) << 13)
             | ((iv as u64 & 0x1ff) << 22)
             | ((w as u64 & 0x1ff) << 31)
             | ((h as u64 & 0x1ff) << 40)
-            | ((tile as u64 & 0xff) << 49);
+            | ((tile as u64 & 0xff) << 49)
+            | ((light as u64 & 0xf) << 57);
         PackedQuad {
             low: bits as u32,
             high: (bits >> 32) as u32,
@@ -94,8 +101,8 @@ impl PackedQuad {
     }
 
     /// Pack one of a plant's crossed quads at a block.
-    pub fn cross(variant: usize, x: i32, y: i32, z: i32, tile: u32) -> Self {
-        PackedQuad::face(CROSS_KINDS[variant], y, x, z, 1, 1, tile)
+    pub fn cross(variant: usize, x: i32, y: i32, z: i32, tile: u32, light: u32) -> Self {
+        PackedQuad::face(CROSS_KINDS[variant], y, x, z, 1, 1, tile, light)
     }
 
     fn bits(self) -> u64 {
@@ -128,6 +135,11 @@ impl PackedQuad {
 
     pub fn tile(self) -> u32 {
         ((self.bits() >> 49) & 0xff) as u32
+    }
+
+    /// Baked sky exposure, 0..=15.
+    pub fn light(self) -> u32 {
+        ((self.bits() >> 57) & 0xf) as u32
     }
 
     pub fn is_cross(self) -> bool {
@@ -276,6 +288,76 @@ impl Mesh {
 }
 
 /// Should this block show a face toward `neighbour`?
+/// Full daylight, the top of the light nibble.
+pub const FULL_LIGHT: u32 = 15;
+
+/// Depth below a column's roof at which the last light dies.
+const LIGHT_REACH: f32 = 18.0;
+
+/// Baked sky exposure for a cell `depth` blocks beneath the topmost opaque
+/// block of its column. Zero or negative depth is open sky.
+///
+/// The curve is gentle at first and steep later on purpose: two or three
+/// blocks of cover — a house interior, the shade under a canopy — reads as
+/// shade, while a gallery twenty blocks down is genuinely black. Column
+/// depth is an approximation of enclosure, not a light transport model; it
+/// is cheap, pure, and rebakes for free whenever a chunk remeshes, which is
+/// exactly when digging changes what the sky can reach.
+pub fn sky_light(depth: i32) -> u32 {
+    if depth <= 0 {
+        return FULL_LIGHT;
+    }
+    let fade = 1.0 - (depth as f32 / LIGHT_REACH).powf(1.2);
+    (FULL_LIGHT as f32 * fade.max(0.0)).round() as u32
+}
+
+/// The topmost opaque block per column, for the chunk plus a one-block ring —
+/// every column a face's *air* neighbour can sit in. `i32::MIN` marks a column
+/// with no opaque block at all.
+///
+/// Opaque, not solid: water covers the sea floor without plunging it into
+/// night, and a pane of anything see-through would behave the same way.
+struct ColumnRoofs {
+    min_x: i32,
+    min_z: i32,
+    top: Vec<i32>,
+}
+
+const ROOF_SPAN: i32 = CHUNK_SIZE + 2;
+
+impl ColumnRoofs {
+    fn survey(view: &impl BlockView, registry: &BlockRegistry, origin: [i32; 3]) -> Self {
+        let (min_x, min_z) = (origin[0] - 1, origin[2] - 1);
+        let mut top = vec![i32::MIN; (ROOF_SPAN * ROOF_SPAN) as usize];
+        for dz in 0..ROOF_SPAN {
+            for dx in 0..ROOF_SPAN {
+                let (x, z) = (min_x + dx, min_z + dz);
+                for y in (0..CHUNK_HEIGHT).rev() {
+                    if registry.is_opaque(view.block_at(x, y, z)) {
+                        top[(dz * ROOF_SPAN + dx) as usize] = y;
+                        break;
+                    }
+                }
+            }
+        }
+        ColumnRoofs { min_x, min_z, top }
+    }
+
+    /// Sky exposure of the (air) cell at a world position.
+    fn light_at(&self, x: i32, y: i32, z: i32) -> u32 {
+        let (dx, dz) = (x - self.min_x, z - self.min_z);
+        debug_assert!(
+            (0..ROOF_SPAN).contains(&dx) && (0..ROOF_SPAN).contains(&dz),
+            "light sampled outside the surveyed ring at ({x}, {z})"
+        );
+        let roof = self.top[(dz * ROOF_SPAN + dx) as usize];
+        if roof == i32::MIN {
+            return FULL_LIGHT;
+        }
+        sky_light(roof - y)
+    }
+}
+
 fn face_is_visible(registry: &BlockRegistry, block: BlockId, neighbour: BlockId) -> bool {
     if block.is_air() {
         return false;
@@ -303,10 +385,11 @@ fn face_is_visible(registry: &BlockRegistry, block: BlockId, neighbour: BlockId)
 /// chunk on every side, so seam faces can be culled against real neighbours.
 pub fn build_mesh(view: &impl BlockView, registry: &BlockRegistry, chunk_origin: [i32; 3]) -> Mesh {
     let mut mesh = Mesh::default();
+    let roofs = ColumnRoofs::survey(view, registry, chunk_origin);
     for face in Face::ALL {
-        mesh_face_direction(&mut mesh, view, registry, chunk_origin, face);
+        mesh_face_direction(&mut mesh, view, registry, chunk_origin, face, &roofs);
     }
-    mesh_cross_blocks(&mut mesh, view, registry, chunk_origin);
+    mesh_cross_blocks(&mut mesh, view, registry, chunk_origin, &roofs);
     mesh
 }
 
@@ -320,6 +403,7 @@ fn mesh_cross_blocks(
     view: &impl BlockView,
     registry: &BlockRegistry,
     origin: [i32; 3],
+    roofs: &ColumnRoofs,
 ) {
     for y in 0..CHUNK_HEIGHT {
         for z in 0..CHUNK_SIZE {
@@ -333,12 +417,15 @@ fn mesh_cross_blocks(
                     continue;
                 }
                 let tile = def.texture(Face::PosX) as u32;
+                // A plant is see-through, so its own cell's exposure is the
+                // light falling on it.
+                let light = roofs.light_at(origin[0] + x, origin[1] + y, origin[2] + z);
                 for diagonal in 0..2 {
                     // Each diagonal is pushed twice with reversed winding: the
                     // terrain pipeline culls back faces, so a plant must carry
                     // its own back or vanish from half the compass.
-                    mesh.push_quad(PackedQuad::cross(diagonal * 2, x, y, z, tile));
-                    mesh.push_quad(PackedQuad::cross(diagonal * 2 + 1, x, y, z, tile));
+                    mesh.push_quad(PackedQuad::cross(diagonal * 2, x, y, z, tile, light));
+                    mesh.push_quad(PackedQuad::cross(diagonal * 2 + 1, x, y, z, tile, light));
                 }
             }
         }
@@ -352,6 +439,7 @@ fn mesh_face_direction(
     registry: &BlockRegistry,
     origin: [i32; 3],
     face: Face,
+    roofs: &ColumnRoofs,
 ) {
     let d = face.axis();
     // u and v are the two axes spanning the face plane. Choosing them
@@ -363,7 +451,10 @@ fn mesh_face_direction(
     let (du, dv, dd) = (DIMS[u], DIMS[v], DIMS[d]);
     let offset = face.offset();
 
-    let mut mask: Vec<Option<BlockId>> = vec![None; (du * dv) as usize];
+    // Each visible face carries the sky exposure of the air cell it faces —
+    // that is the cell the light actually stands in. Part of the merge key:
+    // a rectangle spanning a light change would smear one value across both.
+    let mut mask: Vec<Option<(BlockId, u32)>> = vec![None; (du * dv) as usize];
 
     for slice in 0..dd {
         // Build the visibility mask for this slice.
@@ -386,12 +477,19 @@ fn mesh_face_direction(
                     world[2] + offset[2],
                 );
 
-                mask[(iv * du + iu) as usize] =
-                    face_is_visible(registry, block, neighbour).then_some(block);
+                mask[(iv * du + iu) as usize] = face_is_visible(registry, block, neighbour)
+                    .then(|| {
+                        let light = roofs.light_at(
+                            world[0] + offset[0],
+                            world[1] + offset[1],
+                            world[2] + offset[2],
+                        );
+                        (block, light)
+                    });
             }
         }
 
-        emit_merged_quads(&mut mask, du, dv, |iu, iv, w, h, block| {
+        emit_merged_quads(&mut mask, du, dv, |iu, iv, w, h, (block, light)| {
             let tile = registry.get_or_air(block).texture(face) as u32;
 
             // The quad sits on the far side of the voxel for positive faces.
@@ -405,6 +503,7 @@ fn mesh_face_direction(
                 w,
                 h,
                 tile,
+                light,
             ));
         });
     }
@@ -413,11 +512,11 @@ fn mesh_face_direction(
 /// Merge the mask into maximal rectangles, calling `emit` for each.
 ///
 /// Consumed entries are cleared as it goes, so every face is emitted once.
-fn emit_merged_quads(
-    mask: &mut [Option<BlockId>],
+fn emit_merged_quads<K: Copy + PartialEq>(
+    mask: &mut [Option<K>],
     du: i32,
     dv: i32,
-    mut emit: impl FnMut(i32, i32, i32, i32, BlockId),
+    mut emit: impl FnMut(i32, i32, i32, i32, K),
 ) {
     for iv in 0..dv {
         let mut iu = 0;
@@ -828,7 +927,7 @@ mod tests {
         // wrong together.
         //
         // Kind 3 is PosY, whose plane axis is Y and whose (u, v) are (Z, X).
-        let top = PackedQuad::face(3, 8, 1, 2, 3, 4, 7);
+        let top = PackedQuad::face(3, 8, 1, 2, 3, 4, 7, 15);
         assert_eq!(top.normal(), [0.0, 1.0, 0.0]);
         assert_eq!(
             top.corners(),
@@ -845,7 +944,7 @@ mod tests {
         );
 
         // Kind 0 is NegX, which winds the other way so its outward face is -X.
-        let west = PackedQuad::face(0, 5, 0, 0, 1, 1, 2);
+        let west = PackedQuad::face(0, 5, 0, 0, 1, 1, 2, 15);
         assert_eq!(west.normal(), [-1.0, 0.0, 0.0]);
         assert_eq!(
             west.corners(),
@@ -859,8 +958,8 @@ mod tests {
 
         // A plant's second winding is its first one backwards, which is how it
         // survives backface culling from either side.
-        let front = PackedQuad::cross(0, 3, 9, 4, 5);
-        let back = PackedQuad::cross(1, 3, 9, 4, 5);
+        let front = PackedQuad::cross(0, 3, 9, 4, 5, 15);
+        let back = PackedQuad::cross(1, 3, 9, 4, 5, 15);
         let forward = front.corners();
         assert_eq!(
             back.corners(),
@@ -894,6 +993,57 @@ mod tests {
     }
 
     #[test]
+    fn faces_bake_the_sky_they_can_see() {
+        // A stone floor with a slab of roof high over half of it: the covered
+        // half bakes dark, the open half bakes full light, and the two halves
+        // must not merge into one quad smearing a single value across both.
+        let f = fixture();
+        let mut chunk = Chunk::empty(ChunkPos::new(0, 0));
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                chunk.set(local(x, 10, z), f.stone);
+                if x < 8 {
+                    chunk.set(local(x, 40, z), f.stone);
+                }
+            }
+        }
+        let mesh = build_mesh(&SoloChunkView(&chunk), &f.registry, [0, 0, 0]);
+
+        let floor: Vec<_> = mesh
+            .quads
+            .iter()
+            .filter(|quad| quad.kind() == 3 && quad.plane() == 11)
+            .collect();
+        assert!(floor.len() >= 2, "covered and open floor merged into one quad");
+        for quad in &floor {
+            // PosY: u is z, v is x — iv is the x edge of the rectangle.
+            let covered = quad.iv() < 8;
+            let expected = if covered { sky_light(40 - 11) } else { FULL_LIGHT };
+            assert_eq!(
+                quad.light(),
+                expected,
+                "wrong bake at x={} (covered: {covered})",
+                quad.iv()
+            );
+        }
+        assert_eq!(sky_light(40 - 11), 0, "a 29-block shaft should be black");
+    }
+
+    #[test]
+    fn the_light_curve_is_gentle_then_gone() {
+        assert_eq!(sky_light(0), FULL_LIGHT, "open sky is full light");
+        assert_eq!(sky_light(-5), FULL_LIGHT);
+        assert!(sky_light(3) >= 11, "a house interior should read as shade, not night");
+        assert_eq!(sky_light(30), 0, "deep galleries are black");
+        for depth in 0..40 {
+            assert!(
+                sky_light(depth + 1) <= sky_light(depth),
+                "the curve brightened while descending at depth {depth}"
+            );
+        }
+    }
+
+    #[test]
     fn a_packed_quad_round_trips_every_field() {
         // Bit-packing is exactly the kind of code that silently loses the top
         // of a field, so walk the extremes of each one.
@@ -901,22 +1051,25 @@ mod tests {
             for plane in [0, 1, 16, 255, 256] {
                 for (iu, iv, w, h) in [(0, 0, 1, 1), (15, 255, 1, 1), (0, 0, 16, 256)] {
                     for tile in [0, 1, 26, 255] {
-                        let quad = PackedQuad::face(kind, plane, iu, iv, w, h, tile);
-                        assert_eq!(quad.kind(), kind);
-                        assert_eq!(quad.plane(), plane);
-                        assert_eq!(quad.iu(), iu);
-                        assert_eq!(quad.iv(), iv);
-                        assert_eq!(quad.width(), w);
-                        assert_eq!(quad.height(), h);
-                        assert_eq!(quad.tile(), tile);
-                        assert!(!quad.is_cross());
+                        for light in [0, 1, 9, 15] {
+                            let quad = PackedQuad::face(kind, plane, iu, iv, w, h, tile, light);
+                            assert_eq!(quad.kind(), kind);
+                            assert_eq!(quad.plane(), plane);
+                            assert_eq!(quad.iu(), iu);
+                            assert_eq!(quad.iv(), iv);
+                            assert_eq!(quad.width(), w);
+                            assert_eq!(quad.height(), h);
+                            assert_eq!(quad.tile(), tile);
+                            assert_eq!(quad.light(), light);
+                            assert!(!quad.is_cross());
+                        }
                     }
                 }
             }
         }
 
         for variant in 0..4 {
-            let quad = PackedQuad::cross(variant, 15, 200, 3, 12);
+            let quad = PackedQuad::cross(variant, 15, 200, 3, 12, 15);
             assert!(quad.is_cross());
             assert_eq!(quad.tile(), 12);
             assert_eq!((quad.iu(), quad.plane(), quad.iv()), (15, 200, 3));

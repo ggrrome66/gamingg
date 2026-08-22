@@ -29,6 +29,7 @@ mod map;
 mod mining;
 mod permits;
 mod movement;
+mod optics;
 mod printer;
 mod rig;
 mod roost;
@@ -166,6 +167,8 @@ struct Options {
     fab: bool,
     /// Frame the capture from inside the largest cave pocket near `--at`.
     cave: bool,
+    /// See the capture through the optics kit: lamp, nvg or thermal.
+    optic: Option<String>,
 }
 
 /// Which method a `--dig` run should use.
@@ -193,6 +196,7 @@ fn parse_args() -> Result<Options, String> {
         launcher: false,
         fab: false,
         cave: false,
+        optic: None,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -259,6 +263,7 @@ fn parse_args() -> Result<Options, String> {
             "--launcher" => options.launcher = true,
             "--fab" => options.fab = true,
             "--cave" => options.cave = true,
+            "--optic" => options.optic = Some(value()?),
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -783,6 +788,12 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             ammo: options.launcher.then_some(8),
             panicking: 0,
             kestrel: None,
+            optic: options.optic.as_deref().and_then(|choice| match choice {
+                "lamp" => Some("LAMP"),
+                "nvg" => Some("NIGHT VISION"),
+                "thermal" => Some("THERMAL"),
+                _ => None,
+            }),
         });
         renderer.set_overlay(
             HUD_SLOT,
@@ -1217,10 +1228,27 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
     // The capture is lit by an explicit hour, never by a wall clock — which
     // is what keeps two runs of the same command byte-identical.
-    renderer.set_sun(
-        &context.queue,
-        clock::sun_uniform(clock::sky_at(TimeOfDay::new(options.time))),
-    );
+    let mut sun = clock::sun_uniform(clock::sky_at(TimeOfDay::new(options.time)));
+    // `--optic` sees the capture through the kit: the lamp shines from the
+    // capture camera, the visors change how every fragment reads.
+    match options.optic.as_deref() {
+        Some("lamp") => {
+            let aim = camera.forward();
+            sun.lamp_position = [camera.position.x, camera.position.y, camera.position.z, 1.35];
+            sun.lamp_direction = [aim.x, aim.y, aim.z, 30.0];
+        }
+        Some("nvg") => {
+            sun.light[2] = 1.0;
+            sun.sky = [0.01, 0.09, 0.02, 1.0];
+        }
+        Some("thermal") => {
+            sun.light[2] = 2.0;
+            sun.sky = [0.01, 0.01, 0.04, 1.0];
+        }
+        Some(other) => eprintln!("--optic {other} is not lamp, nvg or thermal"),
+        None => {}
+    }
+    renderer.set_sun(&context.queue, sun);
 
     let capture = capture_frame(&context, &renderer, width, height);
     capture
@@ -1446,6 +1474,8 @@ struct Active {
     intrusion: intrusion::Intrusions,
     /// The fabricator: where it stands, and what is on its bed.
     printer: printer::Printer,
+    /// The lamp and the visors: how the player sees the dark.
+    optics: optics::Optics,
 }
 
 struct App {
@@ -2028,10 +2058,25 @@ impl App {
         active
             .renderer
             .update_camera(&active.context.queue, &active.camera);
-        active.renderer.set_sun(
-            &active.context.queue,
-            clock::sun_uniform(clock::sky_at(active.clock)),
-        );
+        let mut sun = clock::sun_uniform(clock::sky_at(active.clock));
+        // The optics ride the sun uniform: the lamp is a light from the
+        // active eye, the visors are how the eye reads what arrives.
+        if active.optics.mode == optics::Mode::Lamp {
+            let beam = active.optics.beam();
+            let eye = active.camera.position;
+            let aim = active.camera.forward();
+            sun.lamp_position = [eye.x, eye.y, eye.z, beam.strength];
+            sun.lamp_direction = [aim.x, aim.y, aim.z, beam.reach];
+        }
+        sun.light[2] = active.optics.shader_mode();
+        match active.optics.mode {
+            // The sky is drawn by clear colour, not fragments, so the visors
+            // have to tint it here or a green cave would open onto a blue day.
+            optics::Mode::NightVision => sun.sky = [0.01, 0.09, 0.02, 1.0],
+            optics::Mode::Thermal => sun.sky = [0.01, 0.01, 0.04, 1.0],
+            _ => {}
+        }
+        active.renderer.set_sun(&active.context.queue, sun);
         // After the camera, because objects are culled against the frustum it
         // just refreshed.
         let mut objects = active.mining.objects();
@@ -2170,6 +2215,16 @@ impl App {
             objects.extend(posed.objects(active.player.position, facing, 0.0));
         }
 
+        // Machines and people darken with the ground they stand on, by the
+        // same column-depth rule the mesher bakes into terrain.
+        for object in &mut objects {
+            let at = object.model.transform_point3(glam::Vec3::splat(0.5));
+            if let Some(stand) = active.world.surface_y(at.x.floor() as i32, at.z.floor() as i32)
+            {
+                let depth = (stand - 1) - at.y.floor() as i32;
+                object.light = vx_mesh::sky_light(depth) as f32 / vx_mesh::FULL_LIGHT as f32;
+            }
+        }
         active
             .renderer
             .set_objects(&active.context.device, &active.context.queue, &objects);
@@ -2451,6 +2506,16 @@ impl App {
         let Some(active) = &mut self.active else { return };
         let level = active.skills.level(skills::FABRICATION);
         let index = active.printer.cursor;
+        // Optics are one-per-person, like the machines the counter refuses to
+        // double-sell: refuse before the journal ever hears about it.
+        if let Some(printer::Output::Optic(name)) =
+            printer::recipe(index).map(|recipe| recipe.output)
+        {
+            if active.optics.owned.contains(name) {
+                active.printer.feedback = Some("YOU ALREADY OWN ONE".into());
+                return;
+            }
+        }
         let Some(base) = active.mining.fleet.base.as_mut() else {
             active.printer.feedback = Some("NO BASE PILE TO DRAW ON".into());
             return;
@@ -2513,6 +2578,10 @@ impl App {
             printer::Output::Module(module) => {
                 active.garage.grant(module, 1);
                 format!("PRINTED A {}", module.to_uppercase())
+            }
+            printer::Output::Optic(name) => {
+                active.optics.owned.insert(name.to_string());
+                format!("PRINTED A {}", name.to_uppercase())
             }
         };
         active.printer.feedback = Some(line.clone());
@@ -3482,6 +3551,13 @@ impl App {
                 if let Some(active) = &mut self.active {
                     active.view = active.view.cycled();
                     log::info!("view: {:?}", active.view);
+                }
+            }
+            KeyCode::KeyL => {
+                if let Some(active) = &mut self.active {
+                    active.optics.cycle();
+                    let line = active.optics.label().unwrap_or("LIGHTS OFF");
+                    active.greeting = Some((line.to_string(), Instant::now()));
                 }
             }
             KeyCode::F5 => self.save_world(),
@@ -4772,6 +4848,7 @@ impl App {
                 };
                 format!("KESTREL {} {}S", mining::kestrel_state(kestrel), seconds)
             }),
+            optic: active.optics.label(),
         };
         let pixels = hud::render_hud(&content);
 
@@ -5029,6 +5106,9 @@ impl App {
         if let Err(error) = active.printer.save(save.root()) {
             log::error!("could not save the fabricator: {error}");
         }
+        if let Err(error) = active.optics.save(save.root()) {
+            log::error!("could not save the optics kit: {error}");
+        }
         match active.economy.save(save.root()) {
             Ok(()) => log::info!("saved {} town markets", active.economy.tracked()),
             Err(error) => log::error!("could not save the town books: {error}"),
@@ -5208,6 +5288,7 @@ impl ApplicationHandler for App {
         let mut rack = arsenal::Arsenal::default();
         let mut kit = intrusion::Intrusions::default();
         let mut press = printer::Printer::default();
+        let mut eyes = optics::Optics::default();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -5222,6 +5303,7 @@ impl ApplicationHandler for App {
             rack.load(save.root());
             kit.load(save.root());
             press.load(save.root());
+            eyes.load(save.root());
         }
         if self.sheriff {
             town_permits.take_office(permits::Office::Sheriff);
@@ -5321,6 +5403,7 @@ impl ApplicationHandler for App {
             marks: scout::Marks::default(),
             intrusion: kit,
             printer: press,
+            optics: eyes,
             roost: {
                 // The box stands on the hometown security office roof; the
                 // roost is its tenant. Derived from the office's claim so

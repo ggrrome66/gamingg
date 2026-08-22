@@ -175,8 +175,11 @@ build in it, and it survives quitting — skills included.
 
 ### Known rough edges
 
-- Caves are lit by the same sun as the surface: no darkness, no torches, no
-  skylight falloff. An underground lighting model is its own round.
+- Underground light is column depth, not light transport: a lit shaft does not
+  spill light into the gallery beside it, and the lamp casts no shadows. Cheap,
+  pure, and wrong in ways that mostly read as atmosphere.
+- The visors are full-screen transforms with no battery, no grain and no wear;
+  thermal paints every machine warm, including your own cold wreckage.
 - A cave mouth on flat ground is a pothole you notice at your feet, not a
   landmark; the mouths that read from a distance are the ones in hillsides.
 - Bounty never decays. The town's memory is perfect and permanent, which will
@@ -702,6 +705,7 @@ Controls:
 | `G` | Send the flier to scan the sector you are standing in |
 | `N` | Toggle the minimap |
 | `[` / `]` | Zoom the minimap out / in |
+| `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
 | `F5` | Save |
 | `F10` | The gold panel — the operator's console (dev builds only, see below) |
@@ -788,6 +792,21 @@ ore at the surface of a wall instead of under twenty blocks of overburden.
 Drones already cope: a machine over a void settles to the cave floor, and a
 mine plan that meets a cavity simply finds part of its digging already done.
 
+### Lights in the dark
+
+The world below is genuinely dark now. Every face bakes how much sky its
+column can see, so daylight dies a few blocks under a roof and is gone twenty
+under rock — house interiors read as shade, caves as night. Machines and
+people darken with the ground they stand on.
+
+Against that: the suit's hand lamp, on `L` — a warm cone thrown from wherever
+you are looking, short and honest. Everything better comes off the
+fabricator, not the counter: a **high beam** that throws nearly twice as far,
+a **night vision visor** that amplifies what little light there is into green
+geometry, and a **thermal visor** that ignores light entirely and paints
+warm machinery and warm bodies against cold rock. One key cycles the dial
+through what you own; the HUD names what you are looking through.
+
 ### Hacking through machines
 
 Once Security 10, the counter stocks spoofer coils. Fitted to a machine, a
@@ -867,6 +886,11 @@ cargo run --release -p vx-app -- --screenshot town.ppm --at 0,22 --dawn
 
 # from inside the roomiest cave pocket near a spot, facing down the gallery
 cargo run --release -p vx-app -- --screenshot cave.ppm --at -244,-14 --cave
+
+# the same gallery by hand lamp, night vision or thermal
+cargo run --release -p vx-app -- --screenshot lamp.ppm --at -244,-14 --cave --optic lamp
+cargo run --release -p vx-app -- --screenshot nvg.ppm --at -244,-14 --cave --optic nvg
+cargo run --release -p vx-app -- --screenshot heat.ppm --at 0,8 --time 0.95 --optic thermal
 
 # a fabricator standing in frame with its panel open mid-print
 cargo run --release -p vx-app -- --screenshot fab.ppm --at 13,9 --fab

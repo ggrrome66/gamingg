@@ -142,6 +142,9 @@ pub fn sun_uniform(state: SkyState) -> SunUniform {
         direction: [direction.x, direction.y, direction.z, 0.0],
         sky: [state.sky[0], state.sky[1], state.sky[2], 1.0],
         light: [state.light, state.ambient, 0.0, 0.0],
+        // The lamp and the view mode are the player's, not the sky's: main
+        // fills them in after asking the clock what the sun is doing.
+        ..SunUniform::default()
     }
 }
 

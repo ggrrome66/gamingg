@@ -87,7 +87,14 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // terrain that no longer exists. No format change — the same commands read
 // the same way — but pretending the old hashes still bind would make every
 // old session replay as a divergence that is really this bump.
-const VERSION: u32 = 11;
+//
+// Twelve is the promised "recipe indices are content" bump: the optics rows
+// joined the fabricator's catalogue in ladder order rather than at the end,
+// which renumbers every recipe after them — and `Print` records a recipe by
+// index. A version-eleven journal's Print entries would replay as different
+// recipes spending different materials, which is exactly the divergence this
+// number exists to name.
+const VERSION: u32 = 12;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///

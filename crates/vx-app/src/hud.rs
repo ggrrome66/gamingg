@@ -74,6 +74,9 @@ pub struct HudContent<'a> {
     pub panicking: usize,
     /// The scout's one-line status ("KESTREL ORBITING 32S"), if owned.
     pub kestrel: Option<String>,
+    /// The optics dial, when it is not off: LAMP / HIGH BEAM / NIGHT VISION /
+    /// THERMAL.
+    pub optic: Option<&'static str>,
 }
 
 /// What the HUD says about how the player is moving.
@@ -220,6 +223,10 @@ pub fn render_hud(content: &HudContent) -> Vec<u8> {
     }
 
     // Line 4c: the scout, while one is owned.
+    if let Some(optic) = content.optic {
+        font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, ACCENT, optic);
+        y += LINE_HEIGHT as i32;
+    }
     if let Some(kestrel) = &content.kestrel {
         font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, DIM, kestrel);
         y += LINE_HEIGHT as i32;
@@ -283,7 +290,17 @@ mod tests {
             ammo: None,
             panicking: 0,
             kestrel: None,
+            optic: None,
         }
+    }
+
+    #[test]
+    fn the_optic_line_appears_only_when_the_dial_is_on() {
+        let skills = Skills::new();
+        let plain = base_content(&skills);
+        let mut lit = base_content(&skills);
+        lit.optic = Some("NIGHT VISION");
+        assert_ne!(render_hud(&plain), render_hud(&lit), "no optic line drawn");
     }
 
     #[test]

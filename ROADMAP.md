@@ -92,7 +92,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 14 | `6b56c46` | The kestrel and the roost: a pack scout with standing orders and decaying contact marks, and the town's own watcher on the security office roof |
 | 15 | `7e8d4f1` | Hacking through machines: spoofer coils, drone-borne intrusion on a leash, the watch box blinded, silenced or tapped, the impound, and a watch box for your own roof |
 | 16 | `75bbb1b` | The fabricator: every block is stock, and a printer that turns raw material into ammunition, cells, building goods, modules and whole machines |
-| 17 | _this_ | Caves: the first true 3D carve — tunnel galleries and deep chambers, pure in the seed, mouths in hillsides, ore showing in the cut faces |
+| 17 | `1643f59` | Caves: the first true 3D carve — tunnel galleries and deep chambers, pure in the seed, mouths in hillsides, ore showing in the cut faces |
+| 18 | _this_ | Lights in the dark: baked skylight makes the world below genuinely black, the suit's hand lamp cuts a warm cone through it, and the fabricator prints a high beam, night vision and thermal |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -803,6 +804,53 @@ health); water in caves; per-biome cave styles.
 
 ---
 
+## Shipped — Stage 18: lights in the dark
+
+**Darkness first, then the tools that cut it.** Stage 17 left one honest gap:
+caves were lit by the same sun as the surface. This round closes it without a
+light-transport system. Every face the mesher emits now bakes a 4-bit **sky
+exposure** — how deep the air it faces sits beneath the topmost opaque block
+of its column. The curve is gentle then steep: two blocks of roof reads as
+shade, twenty reads as night. It is an approximation of enclosure, not
+radiosity — cheap, pure, and rebaked for free exactly when digging changes
+what the sky reaches, because that is when a chunk remeshes anyway. The
+packed quad had seven spare bits; light took four of them, and it joined the
+greedy merge key so a rectangle never smears one value across a light change.
+Machines and people darken by the same column rule, per instance.
+
+**The lamp is a light; the visors are ways of seeing.** The suit's hand lamp
+(`L`) is a warm spot cone in the fragment shader, thrown from the active eye —
+strength, reach and aim ride the sun uniform, which had reserved its `zw`
+lanes for exactly this since the day/night round. Everything better is
+printed, not bought: a **high beam** with nearly twice the throw, a **night
+vision visor** (an intensifier: it amplifies received light plus a floor read
+off the surface, shaped by facing and fading with range, so black galleries
+resolve into green geometry rather than one flat wash), and a **thermal
+visor** that ignores light entirely — terrain graded cold, objects rendered
+as warm bodies, which is what the terrain/object flag in the shared fragment
+shader is for. The sky is a clear colour, not fragments, so the visors tint
+it on the CPU or a green cave would open onto a blue day.
+
+**Optics are possessions, not upgrades.** `optics.rs` keeps a name-keyed
+owned set and the dial, saved as `VXOL` (a dial restored onto gear that is
+not owned falls back to Off). One key cycles Off → lamp → night vision →
+thermal, skipping what you do not own; the HUD names what you are looking
+through. The rows sit in the fabricator's ladder in floor order — beam at 6,
+night vision at 12, thermal at 18 — which renumbered the recipes after them,
+and `Print` records recipes by index: **journal VERSION 11 → 12**, the
+"recipe indices are content" bump stage 16 promised by name. One-per-person
+is enforced before the journal ever hears about a duplicate print. Rendering
+touches no world state, so nothing else in the log changed.
+
+**Deliberately not in 18:** placeable lights — a torch or floodlight block
+needs flood-fill light propagation, which is the real lighting round;
+batteries or wear on the visors; light bleed around corners (a lit shaft
+does not illuminate the gallery beside it); villagers reacting to a lamp
+beam sweeping over them, which wants the perception work hostiles will need
+anyway.
+
+---
+
 ## Planned — star forts: walls with the receipts to justify them
 
 A worldgen round, recorded from the design note whole. Towns grow bastioned
@@ -973,26 +1021,27 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-Renumbered again after the fabricator (16) and caves (17) rounds took their
-slots: the plans kept their order, the stages moved down to make room.
+Renumbered again after the fabricator (16), caves (17) and optics (18)
+rounds took their slots: the plans kept their order, the stages moved down
+to make room.
 
 | Stage | What | Why here |
 |---|---|---|
-| 18 | Bunkers, built and lootable | Rests on caves paying for the 3D carve. Sited on the same lattice as towns, shelled with a very high `hardness`, laid out by the jigsaw generator deferred since stage 8, and looted — a *source* to match 10a's sink |
-| 19 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
-| 20 | Star forts | Bastioned traces per town tier, gates on the roads, deterministic ruins. After the fuel loop and before hostiles: walls should exist — and have gaps — before anything arrives that makes them matter, and the arsenal is what makes a town want them |
-| 21 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
-| 22 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
-| 23 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
-| 24 | Hostiles and health | The half of combat stage 13 leaves out. `Perception` (stage 7) is already the shape a hostile needs, and stage 13's bounty contracts are already something for one to take |
-| 25 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 24 brings |
-| 26 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
-| 27 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
-| 28 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 19 | Bunkers, built and lootable | Rests on caves paying for the 3D carve. Sited on the same lattice as towns, shelled with a very high `hardness`, laid out by the jigsaw generator deferred since stage 8, and looted — a *source* to match 10a's sink |
+| 20 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
+| 21 | Star forts | Bastioned traces per town tier, gates on the roads, deterministic ruins. After the fuel loop and before hostiles: walls should exist — and have gaps — before anything arrives that makes them matter, and the arsenal is what makes a town want them |
+| 22 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
+| 23 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
+| 24 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
+| 25 | Hostiles and health | The half of combat stage 13 leaves out. `Perception` (stage 7) is already the shape a hostile needs, and stage 13's bounty contracts are already something for one to take |
+| 26 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 25 brings |
+| 27 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
+| 28 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
+| 29 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 17.
+The whole game at a glance, as of stage 18.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1024,7 +1073,9 @@ one pile, and a printer that turns named goods into ammunition, bars, planks,
 wall panels, charged cells, spoofer coils and whole machines, with the
 Fabrication skill buying speed); caves (the first true 3D carve: tunnel
 galleries, deep chambers, hillside mouths, ore in the cut faces, nothing
-under towns or into the sea); a Steam Deck dist build every round.
+under towns or into the sea); lights in the dark (baked per-face skylight,
+a genuinely black underground, the suit's hand lamp, and printed optics —
+high beam, night vision, thermal); a Steam Deck dist build every round.
 
 **Planned, in arc order:** bunkers built-then-occupied; fuel loop;
 star forts; terminal; crafting; wear and breakdowns; hostiles and health;

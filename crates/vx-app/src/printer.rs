@@ -55,6 +55,8 @@ pub enum Output {
     Machine(&'static str),
     /// An intrusion module.
     Module(&'static str),
+    /// A piece of the optics kit: a better lamp or a visor.
+    Optic(&'static str),
 }
 
 /// One row of the catalogue.
@@ -120,11 +122,36 @@ pub const CATALOGUE: &[Recipe] = &[
         floor: 4,
     },
     Recipe {
+        label: "HIGH BEAM LAMP",
+        output: Output::Optic(crate::optics::HIGH_BEAM),
+        inputs: &[("engine:copper_bar", 3), ("engine:copper_ore", 4)],
+        seconds: 20.0,
+        floor: 6,
+    },
+    Recipe {
         label: "CHARGED CELL",
         output: Output::Cell,
         inputs: &[("engine:copper_bar", 2), ("engine:copper_ore", 6)],
         seconds: 25.0,
         floor: 8,
+    },
+    Recipe {
+        label: "NIGHT VISION VISOR",
+        output: Output::Optic(crate::optics::NIGHT_VISION),
+        inputs: &[("engine:copper_bar", 6), ("engine:copper_ore", 8)],
+        seconds: 40.0,
+        floor: 12,
+    },
+    Recipe {
+        label: "THERMAL VISOR",
+        output: Output::Optic(crate::optics::THERMAL),
+        inputs: &[
+            ("engine:copper_bar", 9),
+            ("engine:copper_ore", 10),
+            ("engine:log", 2),
+        ],
+        seconds: 55.0,
+        floor: 18,
     },
     Recipe {
         label: "LIGHT COIL",
@@ -354,6 +381,36 @@ fn read_printer(path: &Path) -> std::io::Result<Option<Option<BlockPos>>> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_optics_climb_the_ladder_in_order() {
+        // The catalogue is easiest-first, and the three optic patterns sit at
+        // the floors the fiction says: the beam early, the visors on the way
+        // to the coil. A resort here renumbers journal recipes — that is a
+        // VERSION bump, which is what this test makes loud.
+        let labels: Vec<&str> = CATALOGUE.iter().map(|recipe| recipe.label).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "SLUGS X8",
+                "COPPER BAR",
+                "PLANKS X4",
+                "METAL WALL X2",
+                "HIGH BEAM LAMP",
+                "CHARGED CELL",
+                "NIGHT VISION VISOR",
+                "THERMAL VISOR",
+                "LIGHT COIL",
+                "KESTREL",
+                "GROUND DRONE",
+            ]
+        );
+        let mut floor = 0;
+        for recipe in CATALOGUE {
+            assert!(recipe.floor >= floor, "{} breaks the ladder", recipe.label);
+            floor = recipe.floor;
+        }
+    }
     use super::*;
 
     fn stocked() -> Stockpile {

@@ -16,10 +16,15 @@ struct Camera {
 
 // The sun, the sky and the light level. One value drives both the diffuse
 // term and the fog, so the horizon always agrees with the sky behind it.
+// `light.z` is the view mode: 0 plain, 1 night vision, 2 thermal.
+// The lamp is the player's hand lamp: `lamp_position.w` is its strength
+// (zero when off) and `lamp_direction.w` its reach in blocks.
 struct Sun {
     direction: vec4<f32>,
     sky: vec4<f32>,
     light: vec4<f32>,
+    lamp_position: vec4<f32>,
+    lamp_direction: vec4<f32>,
 };
 
 @group(2) @binding(0) var<uniform> sun: Sun;
@@ -58,6 +63,12 @@ struct VertexOutput {
     // into a fractional value between two layers.
     @location(2) @interpolate(flat) tile: u32,
     @location(3) world_position: vec3<f32>,
+    // Baked sky exposure, 0 buried .. 1 open sky. Interpolated so a lit quad
+    // meeting a dark one shades across the shared edge instead of stepping.
+    @location(4) light: f32,
+    // 0 terrain, 1 object — thermal renders warm bodies, and only objects
+    // are warm bodies.
+    @location(5) @interpolate(flat) source: u32,
 };
 
 @vertex
@@ -74,6 +85,7 @@ fn vs_main(quad: QuadInput, @builtin(vertex_index) vertex_index: u32) -> VertexO
     let w = f32(((low >> 31u) & 1u) | ((high & 0xffu) << 1u));
     let h = f32((high >> 8u) & 0x1ffu);
     let tile = (high >> 17u) & 0xffu;
+    let sky_exposure = f32((high >> 25u) & 0xfu) / 15.0;
 
     // Two triangles per quad: 0,1,2 and 0,2,3.
     var winding = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
@@ -175,6 +187,8 @@ fn vs_main(quad: QuadInput, @builtin(vertex_index) vertex_index: u32) -> VertexO
     out.uv = uvs[corner];
     out.tile = tile;
     out.world_position = world;
+    out.light = sky_exposure;
+    out.source = 0u;
     return out;
 }
 
@@ -194,6 +208,10 @@ struct InstanceInput {
     @location(9) normal_1: vec4<f32>,
     @location(10) normal_2: vec4<f32>,
     @location(11) tile: u32,
+    // Sky exposure at the object's position, computed on the CPU from the
+    // same column-depth rule the mesher bakes into terrain, so a machine
+    // in a cave darkens with the ground it stands on.
+    @location(12) light: f32,
 };
 
 // Objects deliberately emit the same VertexOutput as terrain and share fs_main
@@ -223,6 +241,8 @@ fn vs_object(in: VertexInput, instance: InstanceInput) -> VertexOutput {
     // inherited from sharing the terrain vertex layout.
     out.tile = instance.tile;
     out.world_position = world.xyz;
+    out.light = instance.light;
+    out.source = 1u;
     return out;
 }
 
@@ -243,15 +263,70 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // A small per-axis bias keeps the four side faces from reading as one flat
     // silhouette when the light is nearly overhead.
     let axis_bias = 0.06 * abs(normal.x) - 0.03 * abs(normal.z);
-    let lighting = sun.light.y + sun.light.x * diffuse + axis_bias;
+
+    // Daylight only reaches what the sky can see: the baked exposure scales
+    // the whole sun term, and a tiny floor keeps buried geometry from being
+    // mathematically invisible rather than dark.
+    let day = sun.light.y + sun.light.x * diffuse + axis_bias;
+    var lighting = day * in.light + 0.015;
+
+    // The hand lamp: a warm spot cone from wherever the player's eye is.
+    let lamp_strength = sun.lamp_position.w;
+    var lamp = 0.0;
+    if lamp_strength > 0.0 {
+        let to_fragment = in.world_position - sun.lamp_position.xyz;
+        let lamp_distance = length(to_fragment);
+        let reach = sun.lamp_direction.w;
+        if lamp_distance > 0.01 && lamp_distance < reach {
+            let along = to_fragment / lamp_distance;
+            let cone = smoothstep(0.78, 0.92, dot(along, normalize(sun.lamp_direction.xyz)));
+            var falloff = 1.0 - lamp_distance / reach;
+            falloff = falloff * falloff;
+            // Grazing surfaces still catch a little, so the cone reads as a
+            // pool of light rather than a hard stencil.
+            let facing = max(dot(normal, -along), 0.0) * 0.75 + 0.25;
+            lamp = lamp_strength * cone * falloff * facing;
+        }
+    }
+    lighting = lighting + lamp;
 
     var colour = albedo.rgb * clamp(lighting, 0.0, 1.4);
+    // The lamp is warm; sunlight is not. Tint only what the lamp added.
+    colour = colour + albedo.rgb * lamp * vec3<f32>(0.22, 0.14, 0.02);
 
     // Distance fog, so the far edge of the loaded world fades out instead of
-    // ending in a hard wall.
+    // ending in a hard wall. Scaled by exposure: underground there is no sky
+    // to fade into, and haze glowing in a black gallery would be a light
+    // source the world does not have.
     let distance = length(in.world_position - camera.position.xyz);
-    let fog = clamp((distance - 140.0) / 180.0, 0.0, 1.0);
+    let fog = clamp((distance - 140.0) / 180.0, 0.0, 1.0) * in.light;
     colour = mix(colour, sun.sky.xyz, fog);
+
+    // View modes, applied last: they transform what the eye receives.
+    let mode = sun.light.z;
+    if mode > 1.5 {
+        // Thermal: lighting is irrelevant — that is the whole point. Terrain
+        // is cold, graded faintly by its own tone; objects are warm bodies.
+        if in.source == 1u {
+            let heat = clamp(0.45 + 0.55 * diffuse, 0.0, 1.0);
+            colour = mix(vec3<f32>(0.85, 0.25, 0.05), vec3<f32>(1.0, 0.95, 0.55), heat);
+        } else {
+            let tone = dot(albedo.rgb, vec3<f32>(0.3, 0.55, 0.15));
+            colour = mix(vec3<f32>(0.02, 0.01, 0.08), vec3<f32>(0.3, 0.06, 0.38), tone);
+        }
+    } else if mode > 0.5 {
+        // Night vision: an intensifier, not a light. It amplifies what little
+        // reaches the eye plus a floor read off the surface itself, shaped by
+        // the face's orientation and dimming with distance — without those
+        // two, a pitch-black gallery amplifies into one flat green wash
+        // instead of resolving into geometry.
+        let received = dot(colour, vec3<f32>(0.35, 0.5, 0.15));
+        let surface = dot(albedo.rgb, vec3<f32>(0.3, 0.55, 0.15));
+        let form = 0.25 + 0.75 * diffuse + 0.35 * abs(normal.x) + 0.15 * abs(normal.z);
+        let range_fade = clamp(1.0 - distance / 70.0, 0.15, 1.0);
+        let amplified = clamp((received * 2.2 + surface * 0.55) * form * range_fade + 0.02, 0.0, 1.0);
+        colour = vec3<f32>(0.07, 1.0, 0.28) * amplified;
+    }
 
     return vec4<f32>(colour, albedo.a);
 }

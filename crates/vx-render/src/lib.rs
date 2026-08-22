@@ -43,8 +43,13 @@ pub struct SunUniform {
     /// Linear sky colour — the frame's clear colour and its fog, one value,
     /// so the horizon can never disagree with the sky.
     pub sky: [f32; 4],
-    /// `x` diffuse strength, `y` ambient floor, `zw` reserved.
+    /// `x` diffuse strength, `y` ambient floor, `z` the view mode (0 plain,
+    /// 1 night vision, 2 thermal), `w` reserved.
     pub light: [f32; 4],
+    /// The hand lamp's eye position; `w` is its strength, zero when off.
+    pub lamp_position: [f32; 4],
+    /// The hand lamp's aim (unit); `w` is its reach in blocks.
+    pub lamp_direction: [f32; 4],
 }
 
 impl Default for SunUniform {
@@ -55,6 +60,8 @@ impl Default for SunUniform {
             direction: [0.42, 0.86, 0.29, 0.0],
             sky: [0.62, 0.74, 0.88, 1.0],
             light: [0.58, 0.42, 0.0, 0.0],
+            lamp_position: [0.0; 4],
+            lamp_direction: [0.0, 0.0, -1.0, 0.0],
         }
     }
 }
