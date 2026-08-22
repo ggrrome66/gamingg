@@ -95,7 +95,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 17 | `1643f59` | Caves: the first true 3D carve — tunnel galleries and deep chambers, pure in the seed, mouths in hillsides, ore showing in the cut faces |
 | 18 | `8bbc730` | Lights in the dark: baked skylight makes the world below genuinely black, the suit's hand lamp cuts a warm cone through it, and the fabricator prints a high beam, night vision and thermal |
 | 19 | `94f1ed1` | Bunkers: sacred-geometry layouts on their own lattice — three proportion systems, golden BSP on a Fibonacci vocabulary, golden-angle bearings, a 400-hardness shell, and supply caches to strip |
-| 20 | _this_ | The fuel loop: the fleet burns oxyhydrogen, an electrolyser on a shore splits water into it, and HHO joins the trade network as the first shortage that can stop you |
+| 20 | `60b53e8` | The fuel loop: the fleet burns oxyhydrogen, an electrolyser on a shore splits water into it, and HHO joins the trade network as the first shortage that can stop you |
+| 21 | _this_ | Star forts and banks: bastioned traces per town tier with gates, ditches and deterministic breaches, and a strongroom in every town behind the first Tier Three lock ever stamped |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1000,28 +1001,66 @@ good, and splitting it would be a chemistry round rather than a fuel one.
 
 ---
 
-## Planned — star forts: walls with the receipts to justify them
+## Shipped — Stage 21: star forts, and somewhere to put your things
 
-A worldgen round, recorded from the design note whole. Towns grow bastioned
-traces — the star-fort geometry that exists because cannon exist: low, thick,
-angled walls with no dead ground, every face covered by another face's guns.
+**A bastioned trace is an argument, not a decoration.** Tall thin walls exist
+to stop ladders; once cannon exist they fall down, so the answer is low, thick
+and *angled* — every face of the wall covered by the guns of another face, and
+no dead ground where an attacker can stand unseen. The star is what falls out
+of "no re-entrant angle may go unwatched", and it belongs here because stage 13
+gave the frontier something to shoot with.
 
-- **The trace is a polygon, the wall is a signed distance.** A town's tier
-  picks a trace (none / palisade / four-point star / six-point with ravelins),
-  authored as a loop of points around the footprint; the wall, walk, parapet
-  and ditch are bands of signed distance from that loop, so generation stays
-  pure in (seed, position) like every terrain feature.
-- **Tiered like everything else.** Hamlets stay open; the county seat earns
-  the full six-point trace with ravelins covering its gates. Gates sit where
-  the roads already run, and a gate is a claim with a lockbox like any other
-  door — the permits system needs nothing new.
-- **Some forts are ruins.** A deterministic ruin pass drops wall segments so
-  breaches exist to find, because a perfect wall is a worse story than a
-  broken one.
+**The trace is a polar radius, which makes the wall a signed distance.**
+`r(θ) = base + bastion · cos(points · θ + phase)`, so "how far is this column
+from the wall" is `hypot(dx, dz) - r(θ)`: one cheap expression, pure in
+`(seed, position)`, needing no cross-chunk context. Wall, walkway, parapet and
+ditch are bands of that one number — exactly the shape the design note asked
+for, and the reason a fort costs a chunk almost nothing.
 
-Sits after the fuel loop and before hostiles: the walls should exist — and
-have gaps — before anything arrives that makes them matter, and the arsenal
-(stage 13) is what makes a town honestly want them.
+**Tiered, gated, and sometimes ruined.** A hamlet stays open; middling towns
+get a palisade or a four-point trace; only the largest earn six points with
+re-entrant angles deep enough to read as ravelins. A refinery is likelier to
+be walled than a depot, for the obvious reason. Gates sit on the four cardinal
+axes because that is where the roads already ran, and each carries a lockbox —
+the permits system needed nothing new. A quarter of walled towns have let
+theirs go, and a deterministic segment pass drops the wall in places, because
+a breach is the thing a player actually remembers.
+
+**One geometry bug worth naming.** The first cut pinned the wall to the
+plaza's level and put the trace ten blocks past the core. Both were wrong for
+the same reason: a fort's curtain runs a long way out, and out there the
+town's plateau has already blended most of the way back to natural ground —
+so the wall hung in the air downhill and buried itself uphill. And at ten
+blocks the *re-entrant* angles of a six-point trace cut back inside the market
+square. The wall now rides each column's own ground, and the standoff is
+wider than a bastion plus the curtain's half-thickness. A test pins both:
+nothing is ever placed below the plateau, nothing is ever cut above it, and
+the inner face never crosses the core.
+
+**And the banks.** Every town now has one, carrying the **Tier Three lockbox**
+— the grade stage 11 built and left with a comment saying "endgame; nothing
+stamps one yet". It took a building worth robbing to give it a subject.
+Inside is a vault: a per-town strongroom, keyed by town centre exactly as the
+economy keys its markets, so a vault and a market can never disagree about
+which town they belong to.
+
+It answers two things at once. Staging a trade run stopped meaning "carry
+everything and sell it in one lump" — leave a load where you mean to sell it
+and come back when the price moves. And there is finally somewhere to put what
+you cannot afford to lose. Unlike nearly everything else in this world a
+vault's contents are **not derived**: they are exactly what somebody put
+there, which is what a bank is.
+
+`Command::Bank` records **the amount that actually moved**, not the amount
+asked for — a vault's capacity can bite mid-deposit, and a log saying "all of
+it" while the world took two thirds is a divergence waiting for the next
+replay. **Journal VERSION 14 → 15**: both kinds of change at once, since the
+ground now carries forts and bank buildings as well.
+
+**Deliberately not in 21:** anybody manning the walls, which waits for
+hostiles; rubble where a wall fell, or any state between whole and dropped;
+fees or interest on a deposit, so banking is convenience rather than a priced
+decision; and towns reacting to their own gates being locked or breached.
 
 ---
 
@@ -1118,12 +1157,11 @@ if the traffic it produces reads as dull.
 ## The arc beyond
 
 Renumbered again after the fabricator (16), caves (17), optics (18),
-bunkers (19) and the fuel loop (20) took their slots: the plans kept their
-order, the stages moved down to make room.
+bunkers (19), the fuel loop (20) and the forts (21) took their slots: the
+plans kept their order, the stages moved down to make room.
 
 | Stage | What | Why here |
 |---|---|---|
-| 21 | Star forts | Bastioned traces per town tier, gates on the roads, deterministic ruins. After the fuel loop and before hostiles: walls should exist — and have gaps — before anything arrives that makes them matter, and the arsenal is what makes a town want them |
 | 22 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
 | 23 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
 | 24 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
@@ -1135,7 +1173,7 @@ order, the stages moved down to make room.
 
 ## The feature map
 
-The whole game at a glance, as of stage 20.
+The whole game at a glance, as of stage 21.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1175,9 +1213,12 @@ bearings, a 400-hardness shell, an authored furnishing pool, and supply
 caches whose contents are derived from where they stand); the fuel loop (the
 fleet burns oxyhydrogen and stops when it runs out, an electrolyser splits
 water into it on any shore, and HHO trades on the network like any other
-good); a Steam Deck dist build every round.
+good); star forts (bastioned traces by town tier, gates on the road axes,
+ditches, and deterministic breaches) and town banks (a strongroom per town
+behind the first Tier Three lock, for staging trade or keeping what you
+cannot lose); a Steam Deck dist build every round.
 
-**Planned, in arc order:** star forts; terminal; crafting; wear and breakdowns; hostiles and health
+**Planned, in arc order:** terminal; crafting; wear and breakdowns; hostiles and health
 (and with them bunkers occupied);
 the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
 B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket

@@ -59,6 +59,11 @@ pub struct TerrainBlocks {
     /// The electrolyser: stand it beside water and it turns the lake into
     /// fuel, slowly, eating copper electrodes as it goes.
     pub electrolyser: BlockId,
+    /// A fort's revetted earth: what a bastioned wall is actually made of,
+    /// and why it is low and thick rather than tall and thin.
+    pub rampart: BlockId,
+    /// The deposit box inside a town's bank.
+    pub vault: BlockId,
     /// The watch box the sheriff's drone lives in — and, bought, the one on
     /// your own roof. Hard enough that a slug glances off it; a drill gets
     /// through eventually, which is the loud way to blind the town.
@@ -175,6 +180,14 @@ impl TerrainBlocks {
             electrolyser: register(
                 BlockDef::uniform("engine:electrolyser", 38).with_hardness(Some(1.5)),
             ),
+            // Thick, and meant to be: a rampart is slower to cut than the
+            // stone it is packed against, which is the entire military
+            // argument for building one.
+            rampart: register(BlockDef::uniform("engine:rampart", 39).with_hardness(Some(4.0))),
+            // Town furniture like the counter and the mailbox: the bank's
+            // box is not something a drill gets to carry off. What protects
+            // the *building* is the lockbox on its door.
+            vault: register(BlockDef::uniform("engine:vault", 40).with_hardness(None)),
         }
     }
 
@@ -213,6 +226,8 @@ impl TerrainBlocks {
             supply_cache: registry.id_of("engine:supply_cache")?,
             hho_cell: registry.id_of("engine:hho_cell")?,
             electrolyser: registry.id_of("engine:electrolyser")?,
+            rampart: registry.id_of("engine:rampart")?,
+            vault: registry.id_of("engine:vault")?,
         })
     }
 }
@@ -562,6 +577,14 @@ impl TerrainGenerator {
 
         // Each town's authored buildings, where this chunk overlaps them.
         crate::town::plan::stamp(&mut chunk, pos, &sites, &self.blocks);
+
+        // The walls a town has earned, raised on the blended ground the town
+        // itself levelled — outside the buildings, so the order against the
+        // town stamp does not matter, but after it for the same reason a real
+        // one is: the place existed before it was worth walling.
+        crate::fort::stamp(&mut chunk, pos, &sites, &self.blocks, &|x, z| {
+            self.height_with_sites(x, z, &sites)
+        });
 
         // And whatever is buried here. Last, because a bunker is cut *into*
         // finished ground: it writes air as well as blocks, and nothing that

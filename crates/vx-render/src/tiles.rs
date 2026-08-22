@@ -65,7 +65,12 @@ pub mod slot {
     /// The electrolyser: electrodes in a water bath.
     pub const ELECTROLYSER: u32 = 38;
 
-    pub const COUNT: u32 = 39;
+    /// A fort's revetted earth.
+    pub const RAMPART: u32 = 39;
+    /// The bank's deposit box.
+    pub const VAULT: u32 = 40;
+
+    pub const COUNT: u32 = 41;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -395,6 +400,43 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.22, 0.24, 0.28], noise * 0.06)
                     } else {
                         shade([0.17, 0.18, 0.22], noise * 0.06)
+                    }
+                }
+                slot::RAMPART => {
+                    // Packed earth behind a stone revetment: courses of block
+                    // work low down, spilling earth above. It should read as
+                    // something raised in a hurry and meant to stop shot.
+                    let course = y % 5 == 0;
+                    let joint = (x + (y / 5) * 7) % 11 == 0;
+                    let earth = ((x * 3 + y * 5) % 29) < 6;
+                    if course || joint {
+                        shade([0.34, 0.32, 0.29], noise * 0.05)
+                    } else if earth {
+                        shade([0.44, 0.36, 0.26], noise * 0.07)
+                    } else {
+                        shade([0.55, 0.50, 0.42], noise * 0.06)
+                    }
+                }
+                slot::VAULT => {
+                    // A strongbox door: a heavy plate, a ring of bolts and a
+                    // wheel in the middle. Unmistakable across a dark room,
+                    // which is the point of the one block in town that holds
+                    // everything a player owns.
+                    let cx = x as i32 - TILE_SIZE as i32 / 2;
+                    let cy = y as i32 - TILE_SIZE as i32 / 2;
+                    let radius = ((cx * cx + cy * cy) as f32).sqrt();
+                    let wheel = radius < 3.5;
+                    let spoke = radius < 6.0 && (cx.abs() < 1 || cy.abs() < 1);
+                    let bolts = (5.5..7.0).contains(&radius);
+                    let plate = radius < 11.0;
+                    if wheel || spoke {
+                        shade([0.78, 0.66, 0.26], noise * 0.04)
+                    } else if bolts {
+                        shade([0.62, 0.63, 0.66], noise * 0.05)
+                    } else if plate {
+                        shade([0.36, 0.38, 0.42], noise * 0.05)
+                    } else {
+                        shade([0.24, 0.25, 0.28], noise * 0.06)
                     }
                 }
                 slot::HHO_CELL => {

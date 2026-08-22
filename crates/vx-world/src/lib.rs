@@ -9,6 +9,7 @@ pub mod caves;
 pub mod chunk;
 pub mod edit;
 pub mod flora;
+pub mod fort;
 pub mod gen;
 pub mod hash;
 pub mod noise;

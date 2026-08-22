@@ -99,11 +99,15 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // holds works that were not there, so every hash a version-twelve journal
 // recorded was taken over terrain that no longer exists.
 //
+// Fifteen adds `Bank` — goods across a strongroom counter — and the star
+// forts and bank buildings that generated ground now carries. Both kinds of
+// change at once, like eight and nine before it.
+//
 // Fourteen adds `Electrolyse` — a format change, and one that reaches the
 // hash by a longer road than usual. The order itself only moves goods, but
 // the fleet burns those goods to dig, so a log replayed without it would
 // run the crew dry at a different tick and leave a different hole.
-const VERSION: u32 = 14;
+const VERSION: u32 = 15;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -165,6 +169,17 @@ pub enum Command {
     /// can be renamed by a mod. If the catalogue ever becomes moddable this
     /// becomes a name, and the version bump that brings it will say so.
     Print { recipe: u32 },
+    /// Goods moved across a bank's counter. Journalled for the same reason
+    /// `Print` and `Electrolyse` are: it moves the base pile, and the pile is
+    /// state `Rebuilt` carries — a replay that skipped a deposit would finish
+    /// holding ore the session had already banked, and the fleet would burn
+    /// through a different amount of fuel on the strength of it.
+    Bank {
+        town: (i32, i32),
+        good: String,
+        amount: u64,
+        deposit: bool,
+    },
     /// A run started on the electrolyser, by its index in the machine's
     /// list of runs. Like `Print`, and for the same reason: the electrodes
     /// come off the pile and the canisters go back onto it, and the pile is
@@ -414,6 +429,9 @@ pub struct Rebuilt {
     held: MoveCommand,
     /// Slugs in the air, stepped one integration per `Advance` tick.
     pub shots: Vec<crate::arsenal::Shot>,
+    /// Every town's strongroom. Carried because a deposit moves the pile,
+    /// and the pile is what half the log's arithmetic runs over.
+    pub banks: crate::bank::Bank,
 }
 
 /// Replay a log over a world.
@@ -431,6 +449,7 @@ impl Default for Rebuilt {
             movement: Movement::default(),
             held: MoveCommand::default(),
             shots: Vec::new(),
+            banks: crate::bank::Bank::default(),
         }
     }
 }
@@ -544,6 +563,24 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
         // An intrusion moves grants and claims, which live in their own file
         // outside the hash, so it draws the same line.
         Command::Scout(_) | Command::Intrude(_) => {}
+        Command::Bank {
+            town,
+            good,
+            amount,
+            deposit,
+        } => {
+            // The amount is what actually moved when the session did it, not
+            // what was asked for — a capacity that bit mid-deposit would put
+            // the log and the world at odds otherwise. So both sides move
+            // exactly this much and neither re-decides.
+            if let Some(base) = state.mining.fleet.base.as_mut() {
+                if *deposit {
+                    state.banks.deposit(*town, good, *amount, &mut base.stockpile);
+                } else {
+                    state.banks.withdraw(*town, good, *amount, &mut base.stockpile);
+                }
+            }
+        }
         Command::Electrolyse { run } => {
             // Electrodes off the pile, canisters back onto it. Both sides run
             // the same arithmetic over the same store, which is what lets the
@@ -728,6 +765,19 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
         Command::Electrolyse { run } => {
             file.write_all(&[17u8])?;
             file.write_all(&run.to_le_bytes())?;
+        }
+        Command::Bank {
+            town,
+            good,
+            amount,
+            deposit,
+        } => {
+            file.write_all(&[18u8])?;
+            file.write_all(&town.0.to_le_bytes())?;
+            file.write_all(&town.1.to_le_bytes())?;
+            write_name(file, good)?;
+            file.write_all(&amount.to_le_bytes())?;
+            file.write_all(&[u8::from(*deposit)])?;
         }
         Command::Intrude(order) => {
             file.write_all(&[14u8])?;
@@ -984,6 +1034,19 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
         17 => Command::Electrolyse {
             run: read_u32(file)?,
         },
+        18 => {
+            let town = (read_u32(file)? as i32, read_u32(file)? as i32);
+            let good = read_name(file)?;
+            let amount = read_u64(file)?;
+            let mut flag = [0u8; 1];
+            file.read_exact(&mut flag)?;
+            Command::Bank {
+                town,
+                good,
+                amount,
+                deposit: flag[0] != 0,
+            }
+        }
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
     Ok(Entry { tick, command })
@@ -1712,6 +1775,58 @@ mod fire_tests {
     /// Every scout order survives the wire, and a log full of them replays
     /// to the same ground as a log with none — the scout charts nothing and
     /// breaks nothing, so the oracle must not see it.
+    #[test]
+    fn a_bank_order_round_trips_with_the_amount_that_actually_moved() {
+        let directory =
+            std::env::temp_dir().join(format!("vx-journal-bank-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let orders = [
+            Command::Bank {
+                town: (0, 0),
+                good: "engine:copper_ore".into(),
+                amount: 240,
+                deposit: true,
+            },
+            Command::Bank {
+                town: (-512, 1_024),
+                good: "engine:hho_cell".into(),
+                amount: 7,
+                deposit: false,
+            },
+        ];
+        let mut journal = CommandLog::default();
+        for order in &orders {
+            journal.record(order.clone());
+        }
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let recovered: Vec<Command> = read_back
+            .entries()
+            .iter()
+            .map(|entry| entry.command.clone())
+            .collect();
+        assert_eq!(recovered, orders.to_vec(), "a bank order did not survive the wire");
+
+        // Negative town coordinates are the case a naive u32 round-trip eats,
+        // and towns west or north of the origin are half the world.
+        assert!(matches!(
+            recovered[1],
+            Command::Bank { town: (-512, 1_024), .. }
+        ));
+
+        // And the replay arm moves exactly the recorded amount, so a vault
+        // that filled up mid-deposit cannot make the two sides disagree.
+        let mut banks = crate::bank::Bank::default();
+        let mut pile = vx_agent::Stockpile::new();
+        pile.add("engine:copper_ore", 240);
+        banks.deposit((0, 0), "engine:copper_ore", 240, &mut pile);
+        assert_eq!(banks.stored((0, 0)), 240);
+        assert_eq!(pile.count("engine:copper_ore"), 0);
+    }
+
     #[test]
     fn an_electrolysis_run_round_trips_and_moves_the_pile_both_ways() {
         let directory =

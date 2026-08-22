@@ -41,6 +41,8 @@ pub enum Cell {
     Permit(Tier),
     /// The watch box on the office roof.
     Roost,
+    /// The bank's deposit box.
+    Vault,
 }
 
 /// How hard a lockbox is to get past.
@@ -97,6 +99,10 @@ pub enum Role {
     Civic,
     /// Paving. Town property, but nothing to lock.
     Paving,
+    /// The bank. The one building in town whose whole purpose is holding
+    /// other people's things, which is why it carries the heaviest lock the
+    /// game has — and the first Tier Three ever stamped anywhere.
+    Bank,
 }
 
 impl Role {
@@ -105,6 +111,7 @@ impl Role {
         match self {
             Role::Dwelling | Role::PlayerHouse => Some(Tier::One),
             Role::Shop | Role::Security | Role::Civic => Some(Tier::Two),
+            Role::Bank => Some(Tier::Three),
             Role::Paving => None,
         }
     }
@@ -208,6 +215,58 @@ const SUPPLY_SHED: Blueprint = Blueprint {
             "M.......X",
             "M.......M",
             "MXMMMXMMM",
+        ],
+        &[
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+        ],
+    ],
+};
+
+/// The bank: a lobby you walk into and a strongroom you do not.
+///
+/// The vault box sits behind an inner wall with one way through, and the
+/// building's lock is Tier Three — the grade that has existed since stage 11
+/// and has never had anything worth putting behind it until now. Breaking in
+/// is possible, slow, loud and expensive, which is exactly the shape the
+/// permits round was built for.
+///
+/// `M` metal, `X` rusted, `G` decking, `V` the vault box, `3` the lock.
+const BANK: Blueprint = Blueprint {
+    role: Role::Bank,
+    min: (7, -14),
+    layers: &[
+        &[
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+        ],
+        &[
+            "MMMXMMMMM",
+            "M...M...M",
+            "X...M.V.X",
+            "M.......M",
+            "X...M...X",
+            "M3..M...M",
+            "MMMMMMMXM",
+        ],
+        &[
+            "MMMMMMMMM",
+            "M...M...M",
+            "M...M...M",
+            "X.......X",
+            "M...M...M",
+            "M...M...M",
+            "MXMMMMMMM",
         ],
         &[
             "GGGGGGGGG",
@@ -382,6 +441,7 @@ const PATHS: Blueprint = Blueprint {
 /// The hometown, and the shape every depot follows.
 const DEPOT_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
+    BANK,
     SUPPLY_SHED,
     Blueprint {
         role: Role::Dwelling,
@@ -404,6 +464,7 @@ const DEPOT_TOWN: &[Blueprint] = &[
 /// A mining camp: fewer dwellings, stacked bunk containers, same tower.
 const MINE_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
+    BANK,
     SUPPLY_SHED,
     Blueprint {
         role: Role::Dwelling,
@@ -421,6 +482,7 @@ const MINE_TOWN: &[Blueprint] = &[
 /// A refinery: rusted tanks in place of half the housing.
 const REFINERY_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
+    BANK,
     SUPPLY_SHED,
     Blueprint {
         role: Role::Dwelling,
@@ -447,6 +509,7 @@ const REFINERY_TOWN: &[Blueprint] = &[
 /// rule someone has to remember.
 const HOME_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
+    BANK,
     SUPPLY_SHED,
     Blueprint {
         role: Role::Dwelling,
@@ -549,6 +612,7 @@ pub fn cell_at(site: &TownSite, x: i32, y: i32, z: i32) -> Option<Cell> {
             Some(b'2') => return Some(Cell::Permit(Tier::Two)),
             Some(b'3') => return Some(Cell::Permit(Tier::Three)),
             Some(b'R') => return Some(Cell::Roost),
+            Some(b'V') => return Some(Cell::Vault),
             _ => continue,
         }
     }
@@ -675,6 +739,7 @@ pub fn stamp(chunk: &mut Chunk, position: ChunkPos, sites: &[TownSite], blocks: 
                         Cell::Permit(Tier::Two) => blocks.permit_box_ii,
                         Cell::Permit(Tier::Three) => blocks.permit_box_iii,
                         Cell::Roost => blocks.roost,
+                        Cell::Vault => blocks.vault,
                     };
                     if let Some(local) = LocalPos::new(local_x, world_y, local_z) {
                         chunk.set(local, block);

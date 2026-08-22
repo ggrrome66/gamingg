@@ -175,6 +175,11 @@ build in it, and it survives quitting — skills included.
 
 ### Known rough edges
 
+- A town's vault charges no fee and pays no interest, so banking is pure
+  convenience rather than a decision with a price on it.
+- Forts are raised whole or dropped in segments; nothing between, and no
+  rubble where a wall fell. Nobody defends them either — that waits for
+  hostiles.
 - Fuel is one number for the whole fleet rather than a tank per machine, so a
   drone cannot be stranded far from base with the rest still working. Machines
   also refuel from the pile at any distance: there is no tanker run yet.
@@ -819,6 +824,45 @@ geometry, and a **thermal visor** that ignores light entirely and paints
 warm machinery and warm bodies against cold rock. One key cycles the dial
 through what you own; the HUD names what you are looking through.
 
+### Walls, and what they are for
+
+Towns build what they can justify. A hamlet stays open; a middling town raises
+a plain ring; the big ones earn a **bastioned trace** — the star-fort geometry
+that exists because cannon exist. Low, thick, angled walls with no dead
+ground: every face covered by the guns of another face, which is what the star
+shape *is*. Four bastions on a working fort, six with deep re-entrant angles
+on a county seat.
+
+The trace is a radius that varies with angle, so "how far is this column from
+the wall" is one cheap subtraction — and wall, walkway, parapet and ditch are
+just bands of that one number. Gates sit on the four cardinal axes because
+that is where the roads already ran, and each gate carries a lockbox like any
+other door. About a quarter of walled towns have let theirs go: a deterministic
+pass drops whole segments, so breaches exist to find. A perfect wall is a worse
+story than a broken one.
+
+The wall rides the terrain rather than sitting at the plaza's level — out at
+the trace the town's plateau has already blended most of the way back to
+natural ground, and a wall pinned to the square would hang in the air on the
+downhill side.
+
+### The bank, and the vault
+
+Every town has a bank now, and it carries the heaviest lock in the game — the
+Tier Three lockbox that has existed since stage 11 and never had anything
+worth putting behind it. Inside is a **vault**: a strongroom that holds goods
+for you, town by town.
+
+Two things that solves. A trade run used to mean carrying everything and
+selling it in one lump; now you can leave a load in the town you mean to sell
+it in and come back when the price is right. And anything you cannot afford to
+lose can sit somewhere with a door on it instead of in a container in a field.
+
+Each town's books are separate — goods left in Stonehaven are in Stonehaven —
+and the vault holds six thousand units. Unlike almost everything else in this
+world its contents are not derived from anything: they are exactly what
+somebody put there, which is the whole point of a bank.
+
 ### The fuel loop
 
 Machines used to run forever on nothing, which made every cost in the game a
@@ -945,6 +989,12 @@ cargo run --release -p vx-app -- --screenshot town.ppm --at 0,22 --dawn
 
 # from inside the roomiest cave pocket near a spot, facing down the gallery
 cargo run --release -p vx-app -- --screenshot cave.ppm --at -244,-14 --cave
+
+# the nearest walled town, from above its own trace
+cargo run --release -p vx-app -- --screenshot fort.ppm --at 1258,-148 --fort
+
+# a town's vault, ledger open
+cargo run --release -p vx-app -- --screenshot vault.ppm --at 0,0 --vault
 
 # an electrolyser on the nearest shore, panel open mid-run
 cargo run --release -p vx-app -- --screenshot hho.ppm --at 200,200 --hho

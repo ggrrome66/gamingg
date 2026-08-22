@@ -11,6 +11,7 @@
 mod arsenal;
 mod audio;
 mod awareness;
+mod bank;
 mod beacon;
 mod board;
 mod clock;
@@ -73,6 +74,8 @@ const GOLD_SLOT: usize = 9;
 const PRINT_SLOT: usize = 10;
 /// The electrolyser's panel.
 const FUEL_SLOT: usize = 11;
+/// The bank's ledger.
+const VAULT_SLOT: usize = 12;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -179,6 +182,10 @@ struct Options {
     bunker: bool,
     /// Stand an electrolyser on the nearest shore and open its panel.
     hho: bool,
+    /// Frame the nearest walled town from above its trace.
+    fort: bool,
+    /// Stand at a town's vault box with the ledger open.
+    vault: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -209,6 +216,8 @@ fn parse_args() -> Result<Options, String> {
         optic: None,
         bunker: false,
         hho: false,
+        fort: false,
+        vault: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -278,6 +287,8 @@ fn parse_args() -> Result<Options, String> {
             "--optic" => options.optic = Some(value()?),
             "--bunker" => options.bunker = true,
             "--hho" => options.hho = true,
+            "--fort" => options.fort = true,
+            "--vault" => options.vault = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -696,6 +707,77 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         println!(
             "cave capture from {:?}, facing ({}, {}) with {} blocks of gallery",
             spot, heading.0, heading.1, heading.2
+        );
+    }
+
+    if options.fort {
+        // The nearest town that actually built something, framed from above
+        // its own trace: a bastioned wall only reads as bastioned from a
+        // height, which is the honest reason forts are drawn on maps.
+        let site = world
+            .generator()
+            .towns_near(options.at, 4_000)
+            .into_iter()
+            .find(|site| vx_world::fort::fort_for(site).stands())
+            .ok_or("no walled town within four kilometres of --at")?;
+        let fort = vx_world::fort::fort_for(&site);
+        println!(
+            "fort: {} at {:?}, {} trace, radius {:.0}, ruined {}",
+            site.name.head(),
+            site.centre,
+            fort.trace.name(),
+            fort.radius,
+            fort.ruined
+        );
+        let centre = vx_core::BlockPos::new(site.centre.0, 0, site.centre.1).chunk();
+        world.load_around(centre, 7);
+        remesh_all(&context, &mut renderer, &mut world);
+
+        let look = glam::Vec3::new(site.centre.0 as f32, site.ground as f32, site.centre.1 as f32);
+        camera.position = look + glam::Vec3::new(0.0, fort.radius * 1.5, fort.radius * 1.45);
+        look_at(&mut camera, look);
+    }
+
+    if options.vault {
+        // The bank's box, found by looking for it rather than by arithmetic:
+        // if the blueprint moves, the capture follows it.
+        let site = world
+            .generator()
+            .towns_near(options.at, 2_000)
+            .into_iter()
+            .next()
+            .ok_or("no town within two kilometres of --at")?;
+        let centre = vx_core::BlockPos::new(site.centre.0, 0, site.centre.1).chunk();
+        world.load_around(centre, 4);
+        remesh_all(&context, &mut renderer, &mut world);
+
+        let vault_block = world
+            .registry()
+            .id_of("engine:vault")
+            .ok_or("no vault block registered")?;
+        let mut found = None;
+        'search: for dx in -40..40 {
+            for dz in -40..40 {
+                for dy in 0..6 {
+                    let at = vx_core::BlockPos::new(
+                        site.centre.0 + dx,
+                        site.ground + dy,
+                        site.centre.1 + dz,
+                    );
+                    if world.block(at) == vault_block {
+                        found = Some(at);
+                        break 'search;
+                    }
+                }
+            }
+        }
+        let at = found.ok_or("this town has no vault")?;
+        println!("vault at {at:?} in {}", site.name.head());
+        camera.position =
+            glam::Vec3::new(at.x as f32 + 0.5, at.y as f32 + 1.3, at.z as f32 + 3.4);
+        look_at(
+            &mut camera,
+            glam::Vec3::new(at.x as f32 + 0.5, at.y as f32 + 0.6, at.z as f32 + 0.5),
         );
     }
 
@@ -1199,6 +1281,38 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         );
     }
 
+    if options.vault {
+        let mut pile = vx_agent::Stockpile::new();
+        pile.add("engine:copper_ore", 143);
+        pile.add("engine:hho_cell", 9);
+        pile.add("engine:copper_bar", 4);
+        let mut vaults = bank::Bank::default();
+        let mut deposited = vx_agent::Stockpile::new();
+        deposited.add("engine:copper_bar", 260);
+        deposited.add("engine:stone", 1_400);
+        vaults.deposit((0, 0), "engine:copper_bar", 260, &mut deposited);
+        vaults.deposit((0, 0), "engine:stone", 1_400, &mut deposited);
+        vaults.open_at(vx_core::BlockPos::new(0, 0, 0), (0, 0));
+        vaults.cursor = 1;
+        vaults.feedback = Some("BANKED 260 COPPER BAR".into());
+        let pixels = bank::render_vault(&vaults, (0, 0), "STONEHAVEN VAULT", Some(&pile));
+        let panel_width = bank::VAULT_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = bank::VAULT_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            VAULT_SLOT,
+            &context.device,
+            &context.queue,
+            (bank::VAULT_WIDTH, bank::VAULT_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     if options.hho && !options.close {
         let mut pile = vx_agent::Stockpile::new();
         pile.add("engine:copper_bar", 7);
@@ -1644,6 +1758,8 @@ struct Active {
     optics: optics::Optics,
     /// The machine that turns a lake into fuel.
     electrolyser: electrolysis::Electrolyser,
+    /// Every town's strongroom.
+    banks: bank::Bank,
 }
 
 struct App {
@@ -2403,6 +2519,7 @@ impl App {
         self.refresh_permit();
         self.refresh_printer();
         self.refresh_electrolyser();
+        self.refresh_vault();
         #[cfg(feature = "gold")]
         self.refresh_gold();
         self.refresh_intro();
@@ -2700,6 +2817,57 @@ impl App {
             }
             Err(reason) => active.printer.feedback = Some(reason),
         }
+    }
+
+    /// Move the selected good across the bank's counter.
+    ///
+    /// The journal records what actually moved rather than what was asked
+    /// for: a vault's capacity can bite mid-deposit, and a log saying "all of
+    /// it" while the world took two thirds is a divergence waiting for the
+    /// next replay.
+    fn move_at_the_bank(&mut self, deposit: bool) {
+        let Some(active) = &mut self.active else { return };
+        let Some(town) = active.banks.town else { return };
+        let Some(base) = active.mining.fleet.base.as_mut() else {
+            active.banks.feedback = Some("NO BASE PILE TO MOVE".into());
+            return;
+        };
+        let rows = active.banks.rows(town, Some(&base.stockpile));
+        let Some(good) = rows.get(active.banks.cursor).cloned() else {
+            active.banks.feedback = Some("NOTHING TO BANK".into());
+            return;
+        };
+        let wanted = if deposit {
+            base.stockpile.count(&good)
+        } else {
+            active.banks.vault(town).map_or(0, |vault| vault.count(&good))
+        };
+        let moved = if deposit {
+            active.banks.deposit(town, &good, wanted, &mut base.stockpile)
+        } else {
+            active.banks.withdraw(town, &good, wanted, &mut base.stockpile)
+        };
+        if moved == 0 {
+            active.banks.feedback = Some(
+                if deposit && active.banks.room(town) == 0 {
+                    "THE VAULT IS FULL".into()
+                } else {
+                    "NOTHING TO MOVE".into()
+                },
+            );
+            return;
+        }
+        active.journal.record(Command::Bank {
+            town,
+            good: good.clone(),
+            amount: moved,
+            deposit,
+        });
+        active.banks.feedback = Some(format!(
+            "{} {moved} {}",
+            if deposit { "BANKED" } else { "DREW" },
+            shop::display_name(&good)
+        ));
     }
 
     /// Start a run on the electrolyser.
@@ -3592,6 +3760,31 @@ impl App {
             return;
         }
 
+        // The bank's ledger: two columns, one cursor, deposit and draw.
+        if self.active.as_ref().is_some_and(|active| active.banks.open) {
+            match code {
+                KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                    let Some(active) = &mut self.active else { return };
+                    let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
+                    let town = active.banks.town.unwrap_or_default();
+                    let rows = active
+                        .banks
+                        .rows(town, active.mining.fleet.base.as_ref().map(|base| &base.stockpile))
+                        .len();
+                    active.banks.move_cursor(delta, rows);
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => self.move_at_the_bank(true),
+                KeyCode::Backspace | KeyCode::Delete => self.move_at_the_bank(false),
+                KeyCode::KeyE | KeyCode::Escape => {
+                    let Some(active) = &mut self.active else { return };
+                    active.banks.close();
+                    active.renderer.clear_overlay(VAULT_SLOT);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // The electrolyser's panel, on the fabricator's pattern.
         if self
             .active
@@ -4174,6 +4367,25 @@ impl App {
             }
             "engine:electrolyser" => {
                 active.electrolyser.open_at(hit.block);
+            }
+            "engine:vault" => {
+                // Which town's strongroom this is comes from where it stands,
+                // exactly as the counter derives its market — a vault and a
+                // market in the same town must never disagree about which
+                // town that is.
+                match active
+                    .world
+                    .generator()
+                    .towns_near((hit.block.x, hit.block.z), vx_world::town::REACH)
+                    .into_iter()
+                    .next()
+                {
+                    Some(site) => active.banks.open_at(hit.block, site.centre),
+                    None => {
+                        active.greeting =
+                            Some(("THIS VAULT BELONGS TO NO TOWN".into(), Instant::now()))
+                    }
+                }
             }
             "engine:supply_cache" => {
                 // Whatever the crate holds goes straight onto the pile — the
@@ -5224,6 +5436,48 @@ impl App {
         );
     }
 
+    /// Draw the bank's ledger when it is open.
+    fn refresh_vault(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.banks.open {
+            return;
+        }
+        let Some(town) = active.banks.town else { return };
+        let name = active
+            .world
+            .generator()
+            .towns_near(town, 4)
+            .into_iter()
+            .next()
+            .map_or_else(
+                || "VAULT".to_string(),
+                |site| format!("{}{} VAULT", site.name.head(), site.name.tail()),
+            );
+        let pile = active
+            .mining
+            .fleet
+            .base
+            .as_ref()
+            .map(|base| &base.stockpile);
+        let pixels = bank::render_vault(&active.banks, town, &name, pile);
+        let (width, height) = active.renderer.size();
+        let panel_width = bank::VAULT_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = bank::VAULT_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            VAULT_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (bank::VAULT_WIDTH, bank::VAULT_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     /// Draw the electrolyser's panel when it is open.
     fn refresh_electrolyser(&mut self) {
         let Some(active) = &mut self.active else { return };
@@ -5505,6 +5759,9 @@ impl App {
         if let Err(error) = active.mining.tank.save(save.root()) {
             log::error!("could not save the fleet's tank: {error}");
         }
+        if let Err(error) = active.banks.save(save.root()) {
+            log::error!("could not save the town vaults: {error}");
+        }
         match active.economy.save(save.root()) {
             Ok(()) => log::info!("saved {} town markets", active.economy.tracked()),
             Err(error) => log::error!("could not save the town books: {error}"),
@@ -5688,6 +5945,7 @@ impl ApplicationHandler for App {
         let mut eyes = optics::Optics::default();
         let mut bath = electrolysis::Electrolyser::default();
         let mut tank = fuel::Tank::default();
+        let mut vaults = bank::Bank::default();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -5709,6 +5967,7 @@ impl ApplicationHandler for App {
             // an empty one would run dry at a different tick than its own
             // journal says it did.
             tank.load(save.root());
+            vaults.load(save.root());
         }
         if self.sheriff {
             town_permits.take_office(permits::Office::Sheriff);
@@ -5811,6 +6070,7 @@ impl ApplicationHandler for App {
             printer: press,
             optics: eyes,
             electrolyser: bath,
+            banks: vaults,
             roost: {
                 // The box stands on the hometown security office roof; the
                 // roost is its tenant. Derived from the office's claim so
