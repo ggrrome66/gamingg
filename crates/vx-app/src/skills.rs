@@ -34,6 +34,9 @@ pub const LOGISTICS: &str = "logistics";
 /// Picking locks. Levelled by doing it, which means the only way to get good
 /// at bypassing a door is to bypass easier ones first.
 pub const SECURITY: &str = "security";
+/// Working the fabricator: what you have printed teaches you to print
+/// faster, and unlocks the patterns a novice cannot hold in tolerance.
+pub const FABRICATION: &str = "fabrication";
 
 /// The level cap.
 pub const MAX_LEVEL: u32 = 99;

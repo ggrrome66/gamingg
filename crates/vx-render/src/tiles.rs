@@ -51,8 +51,10 @@ pub mod slot {
     pub const PERMIT_III: u32 = 32;
     /// The law's watch box, and the one you can buy for your own roof.
     pub const ROOST: u32 = 33;
+    /// The fabricator: raw stock in, anything out.
+    pub const PRINTER: u32 = 34;
     /// Total generated tiles.
-    pub const COUNT: u32 = 34;
+    pub const COUNT: u32 = 35;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -382,6 +384,27 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.22, 0.24, 0.28], noise * 0.06)
                     } else {
                         shade([0.17, 0.18, 0.22], noise * 0.06)
+                    }
+                }
+                slot::PRINTER => {
+                    // A fabricator: a lit build chamber behind a frame, with
+                    // a gantry rail across the top. The window is the tell —
+                    // it should look like something is being made in there,
+                    // because that is the whole promise of the machine.
+                    let frame = !(2..TILE_SIZE - 2).contains(&x)
+                        || !(2..TILE_SIZE - 2).contains(&y);
+                    let rail = (3..5).contains(&y) && (2..TILE_SIZE - 2).contains(&x);
+                    let bed = y >= TILE_SIZE - 5 && (4..TILE_SIZE - 4).contains(&x);
+                    if frame {
+                        shade([0.30, 0.32, 0.36], noise * 0.06)
+                    } else if rail {
+                        shade([0.55, 0.57, 0.60], noise * 0.05)
+                    } else if bed {
+                        shade([0.75, 0.78, 0.82], noise * 0.05)
+                    } else {
+                        // The chamber glow: warm, because something in there
+                        // is hot.
+                        shade([0.20, 0.17, 0.12], noise * 0.05)
                     }
                 }
                 // Unknown slots get magenta, the universal "missing texture".

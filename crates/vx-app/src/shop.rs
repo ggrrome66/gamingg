@@ -152,7 +152,10 @@ impl Shop {
         // player who has just sold their first load should see one. The
         // kestrel leaves the shelf once owned — one per person.
         for kind in garage::KINDS {
-            if kind == garage::KESTREL && shed.owned(garage::KESTREL) > 0 {
+            // The one-per-person machines leave the shelf once owned.
+            if matches!(kind, garage::KESTREL | garage::WATCHBOX | garage::PRINTER)
+                && shed.owned(kind) > 0
+            {
                 continue;
             }
             rows.push(Row::BuyMachine(kind));
@@ -591,6 +594,7 @@ mod tests {
                 Row::BuyMachine(garage::FLIER),
                 Row::BuyMachine(garage::KESTREL),
                 Row::BuyMachine(garage::WATCHBOX),
+                Row::BuyMachine(garage::PRINTER),
                 Row::BuyLauncher,
                 Row::Buy(wallet::DRILL),
                 Row::Buy(wallet::CARGO),

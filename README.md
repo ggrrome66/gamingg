@@ -675,6 +675,7 @@ Controls:
 | Hold left button | Run the drill — harder rock takes longer |
 | Right click | Place the selected block |
 | `1`–`6` | Choose stone, dirt, grass, sand, the base container or your chest |
+| `8` | Choose the fabricator, to place it (buy one at the counter first) |
 | `7` | Take out or sling the slug launcher (once you own one) |
 | Hold left button | (launcher out) Fire — slow, heavy rounds on a visible arc |
 | `C` | Toggle first person and over-the-shoulder |
@@ -743,6 +744,25 @@ while it recharges the town is blind), or shot down — which is property
 damage in front of the best witness in town. Cover now works in two
 directions: walls hide you from people, roofs and canopy hide you from the
 sky, and both are plain geometry.
+
+### The fabricator
+
+Everything you break is stock now. Every block yields itself onto the fleet's
+base pile — the same pile the flier ferries into and the shop sells out of —
+so the drill finally produces something, and a hillside is raw material.
+
+Buy a fabricator at the counter, place it wherever you like (`8` on the belt,
+broken to move it), and press `E` at it. It takes raw goods off the pile and
+turns them into whatever the catalogue has a row for: slugs for the launcher,
+copper bars, planks, metal wall panels, a charged cell that puts the kestrel
+back in the air immediately, a spoofer coil, and — at the top of the ladder —
+a kestrel or a ground drone. Buying a machine with credits and printing one
+out of copper are two routes to the same machine: the counter is for people
+with money, the fabricator is for people with a mine.
+
+Materials come off the pile the moment you start, so a print is a decision
+rather than a queue, and the Fabrication skill buys speed and unlocks the
+harder patterns. Nothing here costs credits.
 
 ### Hacking through machines
 

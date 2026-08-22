@@ -90,7 +90,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 12 | `bbe6756` | The gold panel: journaled admin orders, live tuning, the operator's console compiled out of shipped builds |
 | 13 | `4f22cd4` | The arsenal: the slug launcher, synthesized sound, recoil and shake, town warnings, witnessed property bounty, panic, caravan interception |
 | 14 | `6b56c46` | The kestrel and the roost: a pack scout with standing orders and decaying contact marks, and the town's own watcher on the security office roof |
-| 15 | _this_ | Hacking through machines: spoofer coils, drone-borne intrusion on a leash, the watch box blinded, silenced or tapped, the impound, and a watch box for your own roof |
+| 15 | `7e8d4f1` | Hacking through machines: spoofer coils, drone-borne intrusion on a leash, the watch box blinded, silenced or tapped, the impound, and a watch box for your own roof |
+| 16 | _this_ | The fabricator: every block is stock, and a printer that turns raw material into ammunition, cells, building goods, modules and whole machines |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -678,6 +679,70 @@ deliberately left unwritten. Unmarked chassis: every machine traces to its
 owner, and stolen serials wait for a market to sell them in. And the Security
 milestones still gate cleanly while teaching nothing; the skill line needs
 its manuals.
+
+---
+
+## Shipped — Stage 16: the fabricator
+
+**Why a printer and not a crafting table.** A grid of shaped recipes is a
+memory game about where to put the sticks. This codebase already has a better
+vocabulary for the same idea: everything it owns is a name-keyed row — blocks,
+skills, upgrade lines, machines, goods. So the fabricator takes named goods
+off a pile and puts named things back, and "it can make anything" means
+exactly "adding a thing is adding a row". That is a promise the code can keep,
+and the round is the proof: ammunition, a charged cell, planks, wall panels, a
+spoofer coil and two whole machines are all one table.
+
+**Every block is stock.** The player's drill used to be the only tool in the
+game that produced nothing — you cut a block and it vanished. Now every block
+yields *itself*, by name, onto the fleet's base pile: the same pile the flier
+ferries into and the shop sells out of. One pile, three doors, and no
+transfer minigame, because there is still no player-carried inventory and this
+round deliberately did not invent one. It also means a town is feedstock if
+you are willing to be that sort of person, and the permits gate is what has an
+opinion about it.
+
+**Materials and time, never credits.** Buying a drone with money and printing
+one out of copper are two routes to the same machine, which is the point: the
+counter is for people with money, the fabricator is for people with a mine.
+Materials leave the pile *at the start* — queue three drones on one bar and
+the pile would be lying — so a cancelled print costs you, and starting one is
+a decision. The Fabrication skill buys speed and unlocks the harder patterns
+through the same hard floors every other gate in this game uses; it never buys
+certainty, because there are no rolls anywhere in this game.
+
+**The ladder.** Slugs and copper bars at the bottom, so a fabricator pays for
+itself the day you place it — and the ammunition loop finally closes, since
+slugs were credits-only. Planks and wall panels next, which is the first time
+the frontier's own building materials have been makeable. A charged cell in
+the middle: swap it in and the kestrel flies *now* rather than after its
+recharge. Then a spoofer coil, then the kestrel and the ground drone
+themselves.
+
+**It is a machine, so you buy one and place it.** Bought once at the counter,
+placed from the belt wherever you want it, moved by breaking it — the chest's
+own rule. Placing one you have not bought is refused, or the palette would
+quietly hand out free drone factories. And while fixing the belt, slot six
+turned out to have been unreachable since the chest was added, which had
+quietly made the chest unplaceable; the belt now runs blocks on one to six,
+the launcher on seven and the fabricator on eight.
+
+**The oracle keeps up.** `Command::Print` is the first order since `Advance`
+that is *not* a replay no-op: a print eats the base pile, and the pile is
+something `Rebuilt` carries, so replay spends the same materials at the same
+tick and finishes holding the same stock. Only the outputs that live outside
+the pile — slugs, cells, machines, modules — are the honest no-ops, the same
+line `Give` and `SpawnMachine` draw. VERSION 9 → 10.
+
+### What is deliberately not in 16
+
+Fuel: printing costs time and materials, and when the fuel loop lands it
+plugs in as a cost on the *time* rather than a change to what a recipe means
+(logs stand in for smelting fuel meanwhile). A print queue longer than one.
+Recipes as moddable content — the catalogue is code, which is why the journal
+records a print by index rather than by name, and the version bump that makes
+it content will say so. And still no player inventory: the pile remains the
+only place goods live.
 
 ---
 

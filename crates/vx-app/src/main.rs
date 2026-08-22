@@ -29,6 +29,7 @@ mod map;
 mod mining;
 mod permits;
 mod movement;
+mod printer;
 mod rig;
 mod roost;
 mod scout;
@@ -65,6 +66,7 @@ const INTRO_SLOT: usize = 7;
 const PERMIT_SLOT: usize = 8;
 #[cfg(feature = "gold")]
 const GOLD_SLOT: usize = 9;
+const PRINT_SLOT: usize = 10;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -1312,6 +1314,8 @@ struct Active {
     roost: Option<roost::Roost>,
     /// The spoofer kit: what it is working on, and what the pound is owed.
     intrusion: intrusion::Intrusions,
+    /// The fabricator: where it stands, and what is on its bed.
+    printer: printer::Printer,
 }
 
 struct App {
@@ -1419,6 +1423,7 @@ impl App {
             || active.device.open
             || active.home_panel.open
             || active.permit_panel.open
+            || active.printer.open
             || gold_open(active)
             || active.intro.open
             || feed.is_some();
@@ -1738,6 +1743,7 @@ impl App {
         Self::advance_gunfire(active, active.mining.last_ticks());
         Self::collect_crashes(active);
         Self::advance_scouts(active, active.mining.last_ticks());
+        Self::advance_printing(active, active.mining.last_ticks());
 
         // The fleet's work becomes the player's experience.
         if report.sectors_completed > 0 || report.pings_found > 0 {
@@ -2041,6 +2047,7 @@ impl App {
         self.refresh_shop();
         self.refresh_home();
         self.refresh_permit();
+        self.refresh_printer();
         #[cfg(feature = "gold")]
         self.refresh_gold();
         self.refresh_intro();
@@ -2303,6 +2310,83 @@ impl App {
                 ));
             }
         }
+    }
+
+    /// Enter on the fabricator: put the highlighted pattern on the bed.
+    ///
+    /// The materials leave the pile here, and the order goes in the log —
+    /// which is what lets a replay spend the same materials at the same
+    /// tick and finish holding the same pile.
+    fn start_print(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let level = active.skills.level(skills::FABRICATION);
+        let index = active.printer.cursor;
+        let Some(base) = active.mining.fleet.base.as_mut() else {
+            active.printer.feedback = Some("NO BASE PILE TO DRAW ON".into());
+            return;
+        };
+        match active.printer.begin(index, &mut base.stockpile, level) {
+            Ok(()) => {
+                active.journal.record(Command::Print {
+                    recipe: index as u32,
+                });
+                let label = printer::recipe(index).map_or("", |recipe| recipe.label);
+                active.printer.feedback = Some(format!("PRINTING {label}"));
+            }
+            Err(reason) => active.printer.feedback = Some(reason),
+        }
+    }
+
+    /// Run whatever is on the fabricator's bed, on the journal's clock.
+    ///
+    /// Distance is deliberately not a condition: once a pattern is started
+    /// the materials are spent and the machine is working, so walking away
+    /// is fine. It is a factory, not a lockpick.
+    fn advance_printing(active: &mut Active, ticks: u32) {
+        if ticks == 0 || active.printer.job.is_none() {
+            return;
+        }
+        let dt = ticks as f32 / crate::mining::TICK_RATE as f32;
+        let Some(printer::Progress::Done { output, xp }) = active.printer.work(dt) else {
+            return;
+        };
+        if let Some(level) = active.skills.add_xp(skills::FABRICATION, xp) {
+            active.level_up = Some((skills::FABRICATION.to_string(), level, Instant::now()));
+        }
+        let line = match output {
+            printer::Output::Good { name, count } => {
+                if let Some(base) = active.mining.fleet.base.as_mut() {
+                    base.stockpile.add(name, count);
+                }
+                format!("PRINTED {count} {}", shop::display_name(name))
+            }
+            printer::Output::Slugs(count) => {
+                active.arsenal.ammo += count;
+                format!("PRINTED {count} SLUGS")
+            }
+            printer::Output::Cell => {
+                // A charged cell is the point of printing one: the scout
+                // flies now rather than after its recharge.
+                match &mut active.mining.kestrel {
+                    Some(kestrel) => {
+                        kestrel.endurance = vx_agent::kestrel::ENDURANCE;
+                        kestrel.cooldown = 0;
+                        "CELL SWAPPED. THE KESTREL IS FRESH".to_string()
+                    }
+                    None => "CELL PRINTED. NO KESTREL TO PUT IT IN".to_string(),
+                }
+            }
+            printer::Output::Machine(kind) => {
+                active.garage.grant(kind, 1);
+                format!("PRINTED A {}", garage::display_name(kind))
+            }
+            printer::Output::Module(module) => {
+                active.garage.grant(module, 1);
+                format!("PRINTED A {}", module.to_uppercase())
+            }
+        };
+        active.printer.feedback = Some(line.clone());
+        active.greeting = Some((line, Instant::now()));
     }
 
     /// Step the kestrel and the roost `ticks` journal ticks, and let both
@@ -2740,6 +2824,16 @@ impl App {
             }
             Ok(_) => {
                 active.journal.record(Command::Break { at: hit.block });
+                // Everything you break is stock. Every block yields itself by
+                // name onto the same pile the drones haul into and the shop
+                // sells out of — one pile, no transfer minigame, and the
+                // fabricator's whole catalogue is fed by it. A hand-cut block
+                // used to simply vanish, which made the drill the one tool
+                // in the game that produced nothing.
+                if let Some(base) = active.mining.fleet.base.as_mut() {
+                    base.stockpile
+                        .add_block(active.world.registry(), hit.id, 1);
+                }
                 let xp = (hardness * skills::MINING_XP_PER_HARDNESS) as u64;
                 if let Some(level) = active.skills.add_xp(skills::MINING, xp) {
                     active.level_up = Some((skills::MINING.to_string(), level, Instant::now()));
@@ -2823,6 +2917,14 @@ impl App {
                 // Breaking the chest packs it up: the block is forgotten, the
                 // contents stay in the homestead — they were never in the
                 // world to begin with.
+                if active.printer.at == Some(hit.block) {
+                    active.printer.at = None;
+                    active.printer.close();
+                    active.greeting = Some((
+                        "FABRICATOR PACKED UP. PLACE IT WHERE YOU LIKE".into(),
+                        Instant::now(),
+                    ));
+                }
                 if active.homestead.chest_at == Some(hit.block) {
                     active.homestead.chest_at = None;
                     active.greeting = Some((
@@ -2861,6 +2963,27 @@ impl App {
             return;
         }
 
+        // A fabricator is a machine, not a building block: you may place the
+        // one you bought, and only the one you bought. Otherwise the palette
+        // would quietly hand out free drone factories.
+        let press = active.world.registry().id_of("engine:printer");
+        if press == Some(block) {
+            if active.garage.owned(garage::PRINTER) == 0 {
+                active.greeting = Some((
+                    "BUY A FABRICATOR AT THE SHOP COUNTER FIRST".into(),
+                    Instant::now(),
+                ));
+                return;
+            }
+            if active.printer.at.is_some() {
+                active.greeting = Some((
+                    "YOU HAVE A FABRICATOR ALREADY. BREAK IT TO MOVE IT".into(),
+                    Instant::now(),
+                ));
+                return;
+            }
+        }
+
         // The player's own box must not be built into, or you seal yourself in.
         let body = active.player.aabb();
         let result = place_block(
@@ -2879,6 +3002,9 @@ impl App {
             });
             if chest == Some(block) {
                 active.homestead.chest_at = Some(position);
+            }
+            if press == Some(block) {
+                active.printer.at = Some(position);
             }
             let container = active.world.registry().id_of("engine:container");
             if container == Some(block) {
@@ -2946,6 +3072,26 @@ impl App {
                     let Some(active) = &mut self.active else { return };
                     active.device.close();
                     active.renderer.clear_overlay(DEVICE_SLOT);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // The fabricator panel, while open, owns the keyboard the same way
+        // the shop does.
+        if self.active.as_ref().is_some_and(|active| active.printer.open) {
+            match code {
+                KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                    let Some(active) = &mut self.active else { return };
+                    let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
+                    active.printer.move_cursor(delta);
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => self.start_print(),
+                KeyCode::KeyE | KeyCode::Escape => {
+                    let Some(active) = &mut self.active else { return };
+                    active.printer.close();
+                    active.renderer.clear_overlay(PRINT_SLOT);
                 }
                 _ => {}
             }
@@ -3260,18 +3406,25 @@ impl App {
                 }
             }
             // Number keys pick a block to build with.
+            // The belt: blocks on one to six, then the equipment — the
+            // launcher on seven, the fabricator on eight. Six used to be
+            // unreachable, which quietly made the chest unplaceable.
             KeyCode::Digit1
             | KeyCode::Digit2
             | KeyCode::Digit3
             | KeyCode::Digit4
-            | KeyCode::Digit5 => {
+            | KeyCode::Digit5
+            | KeyCode::Digit6
+            | KeyCode::Digit8 => {
                 if let Some(active) = &mut self.active {
                     let slot = match code {
                         KeyCode::Digit1 => 0,
                         KeyCode::Digit2 => 1,
                         KeyCode::Digit3 => 2,
                         KeyCode::Digit4 => 3,
-                        _ => 4,
+                        KeyCode::Digit5 => 4,
+                        KeyCode::Digit6 => 5,
+                        _ => 6,
                     };
                     if slot < active.palette.len() {
                         active.selected = slot;
@@ -3488,6 +3641,9 @@ impl App {
                     Some(claim) => active.permit_panel.open_at(hit.block, claim),
                     None => log::warn!("a lockbox at {:?} with no claim behind it", hit.block),
                 }
+            }
+            "engine:printer" => {
+                active.printer.open_at(hit.block);
             }
             "engine:chest" => {
                 active.home_panel.open_at_chest();
@@ -4508,6 +4664,38 @@ impl App {
         );
     }
 
+    /// Draw the fabricator panel when it is open.
+    fn refresh_printer(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.printer.open {
+            return;
+        }
+        let level = active.skills.level(skills::FABRICATION);
+        let pile = active
+            .mining
+            .fleet
+            .base
+            .as_ref()
+            .map(|base| &base.stockpile);
+        let pixels = printer::render_printer(&active.printer, pile, level);
+        let (width, height) = active.renderer.size();
+        let panel_width = printer::PRINT_WIDTH as f32 * printer::PRINT_SCALE;
+        let panel_height = printer::PRINT_HEIGHT as f32 * printer::PRINT_SCALE;
+        active.renderer.set_overlay(
+            PRINT_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (printer::PRINT_WIDTH, printer::PRINT_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     /// Rebuild and upload the minimap overlay, on the redraw throttle.
     fn refresh_minimap(&mut self) {
         let Some(active) = &mut self.active else { return };
@@ -4708,6 +4896,9 @@ impl App {
         if let Err(error) = active.intrusion.save(save.root()) {
             log::error!("could not save the intrusion kit: {error}");
         }
+        if let Err(error) = active.printer.save(save.root()) {
+            log::error!("could not save the fabricator: {error}");
+        }
         match active.economy.save(save.root()) {
             Ok(()) => log::info!("saved {} town markets", active.economy.tracked()),
             Err(error) => log::error!("could not save the town books: {error}"),
@@ -4819,6 +5010,7 @@ impl ApplicationHandler for App {
             "engine:sand",
             "engine:container",
             "engine:chest",
+            "engine:printer",
         ]
         .iter()
         .filter_map(|name| world.registry().id_of(name))
@@ -4885,6 +5077,7 @@ impl ApplicationHandler for App {
         let mut town_permits = permits::Permits::new();
         let mut rack = arsenal::Arsenal::default();
         let mut kit = intrusion::Intrusions::default();
+        let mut press = printer::Printer::default();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -4898,6 +5091,7 @@ impl ApplicationHandler for App {
             town_permits.load(save.root());
             rack.load(save.root());
             kit.load(save.root());
+            press.load(save.root());
         }
         if self.sheriff {
             town_permits.take_office(permits::Office::Sheriff);
@@ -4996,6 +5190,7 @@ impl ApplicationHandler for App {
             shake_phase: 0.0,
             marks: scout::Marks::default(),
             intrusion: kit,
+            printer: press,
             roost: {
                 // The box stands on the hometown security office roof; the
                 // roost is its tenant. Derived from the office's claim so

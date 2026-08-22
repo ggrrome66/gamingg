@@ -75,7 +75,13 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // change) and intrusion orders joined the log (a format change). An
 // intrusion moves claims and grants, never ground, so it replays as a
 // no-op like the scout's orders.
-const VERSION: u32 = 9;
+//
+// Ten is both again: the fabricator became a block, and `Print` joined the
+// log. Unlike the scout and the coil, a print is *not* a no-op — it eats
+// the base pile, and the pile is something `Rebuilt` carries. So replay
+// spends the materials exactly as the live game did, and only the outputs
+// that live outside the pile are the honest no-ops.
+const VERSION: u32 = 10;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -130,6 +136,13 @@ pub enum Command {
     /// else on purpose: a journal with cheats in it still replays to a hash,
     /// which is what makes the panel a scenario editor rather than a taint.
     Admin(Admin),
+    /// A pattern put on the fabricator, by its index in the catalogue.
+    ///
+    /// Recorded by index rather than by name because the catalogue is code,
+    /// not content: a row cannot be renamed by a save file the way a block
+    /// can be renamed by a mod. If the catalogue ever becomes moddable this
+    /// becomes a name, and the version bump that brings it will say so.
+    Print { recipe: u32 },
     /// A machine sent to work a lock or the town's watch box. Journalled
     /// for the record; replayed as a no-op, because what an intrusion moves
     /// is claims and grants — permits state, kept in its own file — and not
@@ -497,6 +510,25 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
         // An intrusion moves grants and claims, which live in their own file
         // outside the hash, so it draws the same line.
         Command::Scout(_) | Command::Intrude(_) => {}
+        Command::Print { recipe } => {
+            // The materials come off the pile on both sides: the pile is
+            // state `Rebuilt` carries, so a replay that skipped this would
+            // finish holding ore the live game had already melted. What the
+            // print *becomes* is another matter — a good goes back on the
+            // pile, and slugs, cells, machines and modules are live-only,
+            // the same honest line `Give` and `SpawnMachine` draw.
+            if let (Some(base), Some(recipe)) = (
+                state.mining.fleet.base.as_mut(),
+                crate::printer::recipe(*recipe as usize),
+            ) {
+                for (name, needed) in recipe.inputs {
+                    base.stockpile.take(name, *needed);
+                }
+                if let crate::printer::Output::Good { name, count } = recipe.output {
+                    base.stockpile.add(name, count);
+                }
+            }
+        }
         Command::Fire {
             muzzle,
             yaw_q,
@@ -624,6 +656,10 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             }
             file.write_all(&yaw_q.to_le_bytes())?;
             file.write_all(&pitch_q.to_le_bytes())?;
+        }
+        Command::Print { recipe } => {
+            file.write_all(&[15u8])?;
+            file.write_all(&recipe.to_le_bytes())?;
         }
         Command::Intrude(order) => {
             file.write_all(&[14u8])?;
@@ -871,6 +907,9 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
             };
             Command::Intrude(order)
         }
+        15 => Command::Print {
+            recipe: read_u32(file)?,
+        },
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
     Ok(Entry { tick, command })

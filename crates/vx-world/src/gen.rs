@@ -43,6 +43,9 @@ pub struct TerrainBlocks {
     pub leaves: BlockId,
     pub tall_grass: BlockId,
     pub metal_wall: BlockId,
+    /// The fabricator: place one, feed it the pile, print what you want.
+    /// Soft enough to pick up and move again, like the chest.
+    pub printer: BlockId,
     /// The watch box the sheriff's drone lives in — and, bought, the one on
     /// your own roof. Hard enough that a slug glances off it; a drill gets
     /// through eventually, which is the loud way to blind the town.
@@ -147,6 +150,7 @@ impl TerrainBlocks {
                 BlockDef::uniform("engine:permit_box_iii", 32).with_hardness(Some(400.0)),
             ),
             roost: register(BlockDef::uniform("engine:roost", 33).with_hardness(Some(6.0))),
+            printer: register(BlockDef::uniform("engine:printer", 34).with_hardness(Some(1.5))),
         }
     }
 
@@ -180,6 +184,7 @@ impl TerrainBlocks {
             permit_box_ii: registry.id_of("engine:permit_box_ii")?,
             permit_box_iii: registry.id_of("engine:permit_box_iii")?,
             roost: registry.id_of("engine:roost")?,
+            printer: registry.id_of("engine:printer")?,
         })
     }
 }
