@@ -36,6 +36,9 @@ env_logger = "0.11"
 # Playback only: every sound the game makes is synthesized, so the decoder
 # features (flac/mp3/vorbis/...) stay off.
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
+# Gamepads. The Linux backend enumerates pads over libudev and reads them
+# off evdev, which is exactly what a Steam Deck presents.
+gilrs = "0.11"
 
 [profile.release]
 opt-level = 3

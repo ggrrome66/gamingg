@@ -98,7 +98,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 20 | `60b53e8` | The fuel loop: the fleet burns oxyhydrogen, an electrolyser on a shore splits water into it, and HHO joins the trade network as the first shortage that can stop you |
 | 21 | `38024dc` | Star forts and banks: bastioned traces per town tier with gates, ditches and deterministic breaches, a strongroom in every town behind the first Tier Three lock ever stamped, and foundations under everything |
 | 22 | `9148a77` | The terminal: the font's third user — typed commands, a caret and history, and four hundred lines of scrollback the toasts also land in |
-| 23 | _this_ | The townsfolk: names, trades and temperaments per person, pure schedules with market days, a friendship ledger with gift tables and tier unlocks, and speech templated over the live simulation |
+| 23 | `58bc6ac` | The townsfolk: names, trades and temperaments per person, pure schedules with market days, a friendship ledger with gift tables and tier unlocks, and speech templated over the live simulation |
+| 24 | _this_ | The controller: native gamepad play synthesized into the keyboard and mouse seams, a SELECT-key control scheme overlay, and a one-command Steam Deck installer |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1196,6 +1197,55 @@ plans grow more dwellings).
 
 ---
 
+## Shipped — Stage 24: the controller, and the Deck package
+
+**Synthesis, not a second input system.** The game has exactly one
+implementation of every rule input can reach: keys route through
+`handle_press` and `InputState`, the mouse feeds a look accumulator and two
+buttons. The pad plugs into those seams and nothing else — buttons resolve
+to the `KeyCode` the same action is already bound to and go down the very
+same dispatch, the left stick merges into the same movement axes the keys
+drive (summed, then capped, so pad and keyboard cannot fight), the right
+stick fills the same accumulator the mouse fills in the mouse's own units,
+and the triggers mirror the mouse buttons. Every panel, the shop, the map,
+the handheld and the terminal's scrollback gained pad support without one
+of them changing, which was the entire design argument.
+
+**Context is one bit.** A pad has fewer buttons than a keyboard has keys,
+so the face buttons follow the console convention when a panel owns the
+screen: south confirms, east backs out, the d-pad becomes the arrows. The
+mapping asks a single question — is any panel open — and everything finer
+stays downstream, where the keyboard already routes it. Releases look up
+what the button meant *at press time*, so a panel closing mid-hold can
+never leak a stuck key.
+
+**Honest analog.** A radial deadzone with rescale: rest drift dies at the
+threshold, and the live range re-spans from zero so a barely-tilted stick
+is a genuine creep rather than a dead spot followed by a lurch. Tested
+monotonic. Disconnecting a pad mid-stride releases everything it held.
+
+**SELECT is the manual.** The control scheme renders on the bitmap font as
+a panel in the game, from the same table the tests hold drawable — not a
+wiki page. A pad connecting says so in a toast and points at it.
+
+**The Deck package.** `dist/install-steamdeck.sh` verifies the binary
+against `SHA256SUMS`, installs to `~/.local/share/gamingg/` (no root,
+nothing system-wide — SteamOS's root filesystem is read-only and stays
+untouched), writes a desktop launcher, and prints the *Add a Non-Steam
+Game* steps that put it in Game Mode's library. `--uninstall` reverses it
+and keeps saves. The pad backend links `libudev.so.1` at runtime (shipped
+everywhere, SteamOS included); building from source now wants `libudev-dev`.
+
+**Deliberately not in 24:** rumble; gyro aim (Steam Input can lend it as
+mouse input, which the game already reads); remappable bindings (one good
+layout first, a settings file when someone actually wants a second); pad
+text entry for the terminal (an on-screen keyboard is its own round);
+journal changes of any kind — input synthesis happens above the seams the
+journal records, so a pad session records the same orders a keyboard one
+does.
+
+---
+
 ## Planned — the civic layer: permits, offices, elections
 
 The town-law arc, in three rounds. The user's design, recorded whole so none of
@@ -1288,22 +1338,23 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-Renumbered again after the townsfolk (23) took their slot: the plans kept
-their order, the stages moved down to make room.
+Renumbered again after the townsfolk (23) and the controller round (24)
+took their slots: the plans kept their order, the stages moved down to make
+room.
 
 | Stage | What | Why here |
 |---|---|---|
-| 24 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
-| 25 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
-| 26 | Hostiles and health | The half of combat stage 13 leaves out — and the people note's combat half lands here: policies emitting `MoveCommand` through the player integrator, composure driven off the `nerve` stage 23 already derived, modes from Fight down to Surrender, cover as occlusion sampled at three eye heights |
-| 27 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 26 brings. Squads bounded on purpose: pairs move alternately, a pair that loses its partner takes the ally-down composure hit — suppression and command layers explicitly out of scope. Surrender feeds the arrest verb, the jailhouse and capture contracts |
-| 28 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
-| 29 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
-| 30 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 25 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
+| 26 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
+| 27 | Hostiles and health | The half of combat stage 13 leaves out — and the people note's combat half lands here: policies emitting `MoveCommand` through the player integrator, composure driven off the `nerve` stage 23 already derived, modes from Fight down to Surrender, cover as occlusion sampled at three eye heights |
+| 28 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 27 brings. Squads bounded on purpose: pairs move alternately, a pair that loses its partner takes the ally-down composure hit — suppression and command layers explicitly out of scope. Surrender feeds the arrest verb, the jailhouse and capture contracts |
+| 29 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
+| 30 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
+| 31 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 23.
+The whole game at a glance, as of stage 24.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1353,6 +1404,9 @@ schedules with per-town market days and ±20-minute personal jitter, a
 friendship ledger with gift tables, weekly caps, birthdays and crime
 spillover, tier unlocks up to bunker intel and a door key, and speech
 templated over live prices, bounty and fuel state);
+native gamepad play (buttons synthesized into the keyboard seams,
+context-sensitive face buttons, analog sticks with a rescaled deadzone, a
+SELECT control-scheme overlay) and a one-command Steam Deck installer;
 a Steam Deck dist build every round.
 
 **Planned, in arc order:** crafting; wear and breakdowns; hostiles and health
@@ -1364,8 +1418,8 @@ arcade.
 
 **Outstanding engineering:** floating-origin rebase; journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the
-weapon table; gamepad input for the gold panel and the game; the kestrel's
-cell state surviving a reload; anything that hacks *you* (the hardened link
+weapon table; the kestrel's
+cell state surviving a reload; pad text entry for the terminal; anything that hacks *you* (the hardened link
 has no adversary until factions).
 
 ## Known rough edges

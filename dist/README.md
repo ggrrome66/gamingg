@@ -6,6 +6,7 @@ Linux desktop.
 ```
 gamingg-linux-x86_64    the game, stripped, ~10 MB
 SHA256SUMS              so you can tell one build from the next
+install-steamdeck.sh    one-command install: verify, ~/.local, launcher
 ```
 
 There is one binary here and it is overwritten each round rather than
@@ -39,24 +40,31 @@ gets done next round.
 ```bash
 # Deck, Desktop Mode, in Konsole:
 git clone <this repo> && cd gamingg
-./dist/gamingg-linux-x86_64
+./dist/gamingg-linux-x86_64          # run in place, or:
+cd dist && ./install-steamdeck.sh    # install + menu launcher + Steam notes
 ```
+
+The installer checks the binary against `SHA256SUMS`, installs to
+`~/.local/share/gamingg/`, drops a launcher in the applications menu, and
+prints the *Add a Non-Steam Game* steps that make it appear in Gaming
+Mode's library. `--uninstall` reverses it; saves stay.
 
 `git` preserves the executable bit, so a clone needs no `chmod`. A file
 downloaded through a browser does: `chmod +x gamingg-linux-x86_64`.
 
-To play it in Gaming Mode, add it as a Non-Steam Game.
-
-**It is keyboard-and-mouse.** The Deck's built-in sticks, pads and triggers will
-not drive it without a Steam Input keyboard layout, so the first run wants a USB
-or Bluetooth keyboard in Desktop Mode. Gamepad bindings are not built yet.
+**The Deck's own controls drive it now.** The game reads pads natively
+(left stick moves, right stick looks, `RT` drills, `SELECT` shows the whole
+scheme in game), and Steam Input's default Gamepad layout is exactly what
+it expects. A keyboard is only needed for *typing* into the terminal —
+everything else, panels included, answers to the pad.
 
 ## What it needs from the system
 
 Almost nothing. Both shaders are compiled into the binary and there is no asset
 directory, so this one file is the whole game — every sound is synthesized at
 runtime, so there are no audio files either. It links `libc`, `libm`,
-`libgcc_s` and (since the arsenal round) `libasound.so.2` for sound, which
+`libgcc_s`, (since the arsenal round) `libasound.so.2` for sound, and (since
+the gamepad round) `libudev.so.1` to enumerate controllers — all of which
 SteamOS and every desktop distribution ship; X11, Wayland and Vulkan are all
 opened at runtime, so it uses whatever the machine has. A machine with no
 audio device just plays silently. The Deck's AMD GPU runs the RADV Vulkan
@@ -84,7 +92,12 @@ expects to write to.
 
 ## Controls
 
-`WASD` move, `Space` jump, `Left Shift` crouch, `Left Ctrl` sprint,
+Pad: left stick moves (click sprints), right stick looks (click for optics),
+`RT` drill/fire, `LT` place, `A` jump/confirm, `B` crouch/back, `X` use,
+`Y` handheld, `LB` camera, `RB` page/method, d-pad mark/minimap/scan/fly,
+`Start` confirm, `SELECT` the scheme on screen.
+
+Keyboard: `WASD` move, `Space` jump, `Left Shift` crouch, `Left Ctrl` sprint,
 `Left Ctrl`+`Left Shift` slide, `Z` prone, `C` first/third person, `E` interact,
 `V` handheld, `M` mark ore, `Tab` cycle mining method, `7` the slug launcher
 once the shop has sold you one. Waist-high ledges are vaulted automatically —

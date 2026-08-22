@@ -17,6 +17,11 @@ pub struct InputState {
     mouse_delta: (f32, f32),
     /// Whether the mouse is captured for looking around.
     pub mouse_captured: bool,
+    /// Analog movement from a gamepad's stick, in the same camera-local
+    /// axes as [`InputState::movement_axes`]: `x` right, `z` forward.
+    /// Summed with the keys, so pad and keyboard cannot fight — whoever
+    /// pushes, the player moves.
+    pad_axes: Vec3,
 }
 
 impl InputState {
@@ -42,6 +47,13 @@ impl InputState {
         self.pressed.clear();
     }
 
+    /// The pad's stick, written once per frame by whoever polls the pad.
+    /// Zero when no pad is tilted, which restores keyboard-only behaviour
+    /// exactly.
+    pub fn set_pad_axes(&mut self, axes: Vec3) {
+        self.pad_axes = axes;
+    }
+
     pub fn add_mouse_delta(&mut self, dx: f32, dy: f32) {
         self.mouse_delta.0 += dx;
         self.mouse_delta.1 += dy;
@@ -65,7 +77,7 @@ impl InputState {
             axis(KeyCode::KeyA, KeyCode::KeyD),
             axis(KeyCode::ShiftLeft, KeyCode::Space),
             axis(KeyCode::KeyS, KeyCode::KeyW),
-        );
+        ) + self.pad_axes;
 
         if raw.length_squared() > 1.0 {
             raw.normalize()
@@ -82,6 +94,22 @@ impl InputState {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn pad_axes_merge_with_keys_and_cap_at_full_speed() {
+        use super::*;
+        let mut input = InputState::new();
+        // Stick alone: half tilt is half speed.
+        input.set_pad_axes(Vec3::new(0.0, 0.0, 0.5));
+        assert_eq!(input.movement_axes(), Vec3::new(0.0, 0.0, 0.5));
+        // Stick and key together never outrun a full press.
+        input.press(KeyCode::KeyW);
+        assert!((input.movement_axes().length() - 1.0).abs() < 1.0e-5);
+        // Stick released: keyboard-only behaviour is restored exactly.
+        input.set_pad_axes(Vec3::ZERO);
+        assert_eq!(input.movement_axes(), Vec3::new(0.0, 0.0, 1.0));
+    }
+
     use super::*;
 
     #[test]

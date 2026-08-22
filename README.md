@@ -677,13 +677,56 @@ resident permanently; `--view-distance <n>` (4–16) picks the streaming radius.
 ### A build you can just run
 
 `dist/` holds a stripped release binary for x86-64 Linux, for testing on a Steam
-Deck without a toolchain. One file, no assets, no installer — the shaders are
+Deck without a toolchain. One file, no assets — the shaders are
 compiled in. It needs **glibc 2.39 or newer** (SteamOS 3.7+ is fine, 3.6 is not);
 `dist/README.md` has the check and the rest of the Deck notes.
 
 ```sh
 ./dist/gamingg-linux-x86_64
 ```
+
+### Steam Deck: install once, play in Game Mode
+
+Copy the `dist/` folder onto the Deck (Desktop Mode), then:
+
+```sh
+cd dist && ./install-steamdeck.sh
+```
+
+The installer verifies the binary against `SHA256SUMS`, installs it for the
+current user (no root, nothing system-wide), and puts a launcher in the
+applications menu. It ends by printing the two-step *Add a Non-Steam Game*
+instructions — that registration is what makes the game appear in Game
+Mode's library. `./install-steamdeck.sh --uninstall` removes it again;
+saves stay.
+
+**The controller works out of the box.** Steam Input's default Gamepad
+layout presents the Deck as an ordinary pad, and the game reads pads
+natively: left stick moves (analog — tilt gently to creep), right stick
+looks, and press `SELECT` any time for the full scheme on screen. Buttons
+drive the very same bindings as the keyboard — one implementation of every
+rule, so every panel, the shop, the map and the handheld all answer to the
+pad. The terminal still wants a keyboard for *typing*, but scrolls and
+closes from the pad.
+
+| Pad | Action |
+|---|---|
+| Left stick | Move; click it to sprint |
+| Right stick | Look; click it to turn the optics dial |
+| `RT` | Drill / fire (hold) |
+| `LT` | Place the selected block |
+| `A` | Jump — with a panel open, confirm |
+| `B` | Crouch / descend — with a panel open, back out |
+| `X` | Use: trade, read, talk |
+| `Y` | The handheld uplink |
+| `LB` | First or third person |
+| `RB` | Turn the page / cycle the mining method |
+| D-pad | Mark ore, minimap, scan the sector, walk-or-fly — with a panel open, the arrows |
+| `Start` | Confirm / dispatch / hold to pick a lock |
+| `Select` | The control scheme overlay |
+
+Building from source on Linux needs `libudev` headers for the pad backend
+(`libudev-dev` on Debian/Ubuntu, `systemd-devel` on Fedora).
 
 Controls:
 

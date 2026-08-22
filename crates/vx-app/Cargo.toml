@@ -33,3 +33,4 @@ pollster.workspace = true
 log.workspace = true
 env_logger.workspace = true
 rodio.workspace = true
+gilrs.workspace = true
