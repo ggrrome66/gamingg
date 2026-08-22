@@ -1057,6 +1057,27 @@ it" while the world took two thirds is a divergence waiting for the next
 replay. **Journal VERSION 14 → 15**: both kinds of change at once, since the
 ground now carries forts and bank buildings as well.
 
+**And everything got foundations.** Buildings had been sitting on dirt, which
+made every lock in the game decoration: the way past a Tier Three vault door
+was a hole in the floor. They are founded now the way real ones are — a deep
+strip under each load-bearing wall, a shallow slab under the floor between,
+depth set by what the building protects rather than how tall it is (a shed
+runs two courses, the tower four, the bank's strongroom five). Paving runs
+none: a plaza is a surface, not a structure, and four hundred hardness under
+the market square would wall the town's own ground off from anybody who ever
+wanted a cellar.
+
+The footing shares one `FORTIFIED_HARDNESS` constant with the bunker shell
+and the heaviest lockbox, because all three are making the same promise —
+`Some(400.0)`, never `None`, so it is a cost rather than a wall. A test holds
+them to it. Building claims now reach the bottom of their own footing, so
+undermining is a permit crime as well as a long afternoon. Fort curtains are
+founded along their whole circuit including the gateways *and* the fallen
+segments, so a ruin leaves its foundation in the ground where the wall used to
+be — which reads right and also means a breach is a gap you walk through
+rather than a hole you dig under. **Journal VERSION 15 → 16**, since all of
+that is generated ground.
+
 **Deliberately not in 21:** anybody manning the walls, which waits for
 hostiles; rubble where a wall fell, or any state between whole and dropped;
 fees or interest on a deposit, so banking is convenience rather than a priced

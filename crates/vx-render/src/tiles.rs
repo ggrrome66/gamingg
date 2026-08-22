@@ -70,7 +70,10 @@ pub mod slot {
     /// The bank's deposit box.
     pub const VAULT: u32 = 40;
 
-    pub const COUNT: u32 = 41;
+    /// A building's foundation.
+    pub const FOOTING: u32 = 41;
+
+    pub const COUNT: u32 = 42;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -400,6 +403,25 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.22, 0.24, 0.28], noise * 0.06)
                     } else {
                         shade([0.17, 0.18, 0.22], noise * 0.06)
+                    }
+                }
+                slot::FOOTING => {
+                    // Poured footing: coarse aggregate, a shuttering seam and
+                    // the odd tie rod. Darker and heavier than the rampart
+                    // above it, which is what a foundation looks like when
+                    // you find one — you are meant to know you have hit
+                    // something you should not have started.
+                    let seam = y % 9 == 0;
+                    let aggregate = ((x * 11 + y * 7) % 23) < 5;
+                    let tie = (x % 13 == 0) && (4..12).contains(&y);
+                    if tie {
+                        shade([0.40, 0.30, 0.22], noise * 0.05)
+                    } else if seam {
+                        shade([0.22, 0.22, 0.24], noise * 0.04)
+                    } else if aggregate {
+                        shade([0.40, 0.40, 0.42], noise * 0.07)
+                    } else {
+                        shade([0.30, 0.30, 0.32], noise * 0.06)
                     }
                 }
                 slot::RAMPART => {

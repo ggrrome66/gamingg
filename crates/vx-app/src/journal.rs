@@ -99,6 +99,9 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // holds works that were not there, so every hash a version-twelve journal
 // recorded was taken over terrain that no longer exists.
 //
+// Sixteen founds every building and every fort wall on footings, which is
+// generated ground that was not there before.
+//
 // Fifteen adds `Bank` — goods across a strongroom counter — and the star
 // forts and bank buildings that generated ground now carries. Both kinds of
 // change at once, like eight and nine before it.
@@ -107,7 +110,7 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // hash by a longer road than usual. The order itself only moves goods, but
 // the fleet burns those goods to dig, so a log replayed without it would
 // run the crew dry at a different tick and leave a different hole.
-const VERSION: u32 = 15;
+const VERSION: u32 = 16;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///

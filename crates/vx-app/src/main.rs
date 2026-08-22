@@ -186,6 +186,8 @@ struct Options {
     fort: bool,
     /// Stand at a town's vault box with the ledger open.
     vault: bool,
+    /// Cut the ground away beside a building to show its footing in section.
+    footing: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -218,6 +220,7 @@ fn parse_args() -> Result<Options, String> {
         hho: false,
         fort: false,
         vault: false,
+        footing: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -289,6 +292,7 @@ fn parse_args() -> Result<Options, String> {
             "--hho" => options.hho = true,
             "--fort" => options.fort = true,
             "--vault" => options.vault = true,
+            "--footing" => options.footing = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -708,6 +712,51 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             "cave capture from {:?}, facing ({}, {}) with {} blocks of gallery",
             spot, heading.0, heading.1, heading.2
         );
+    }
+
+    if options.footing {
+        // An excavation beside the bank, so the foundation reads in section:
+        // the strip under the strongroom wall, the slab under the floor, and
+        // how far both run below the plaza. Cut here rather than drawn,
+        // because the point is what generation actually put in the ground.
+        let site = world
+            .generator()
+            .towns_near(options.at, 2_000)
+            .into_iter()
+            .next()
+            .ok_or("no town within two kilometres of --at")?;
+        let centre = vx_core::BlockPos::new(site.centre.0, 0, site.centre.1).chunk();
+        world.load_around(centre, 4);
+
+        let bank = vx_world::town::plan::buildings(&site)
+            .into_iter()
+            .find(|building| building.role == vx_world::town::plan::Role::Bank)
+            .ok_or("this town has no bank")?;
+        // Take the ground away in front of the bank's south wall, down past
+        // the bottom of its strip.
+        let floor = site.ground - 8;
+        for x in bank.min.x - 3..=bank.max.x + 3 {
+            for z in bank.max.z + 1..=bank.max.z + 9 {
+                for y in floor..=site.ground + 1 {
+                    let at = vx_core::BlockPos::new(x, y, z);
+                    if world.block(at) != vx_core::BlockId::AIR {
+                        world.set_block(at, vx_core::BlockId::AIR);
+                    }
+                }
+            }
+        }
+        remesh_all(&context, &mut renderer, &mut world);
+        println!(
+            "footing section at the bank, {:?} to {:?}",
+            bank.min, bank.max
+        );
+        let look = glam::Vec3::new(
+            (bank.min.x + bank.max.x) as f32 / 2.0,
+            site.ground as f32 - 2.5,
+            bank.max.z as f32 + 1.0,
+        );
+        camera.position = look + glam::Vec3::new(-1.5, 1.0, 6.5);
+        look_at(&mut camera, look);
     }
 
     if options.fort {

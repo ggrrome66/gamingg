@@ -17,6 +17,16 @@ use crate::town::TownSite;
 /// Sea level. Terrain below this floods.
 pub const SEA_LEVEL: i32 = 62;
 
+/// The hardness a *fortified* block carries: a bunker's shell, a heavy
+/// lockbox, and every building's foundation.
+///
+/// Four hundred times stone. Not a wall — `Some`, never `None`, so a
+/// determined player with a good drill can always get through — but the
+/// arithmetic says an afternoon per block, which is the honest way to say
+/// "yes, and you will regret it". One constant rather than three literals
+/// because these three things are making the same promise.
+pub const FORTIFIED_HARDNESS: f32 = 400.0;
+
 /// Per-field seed offsets. Each noise field must be decorrelated from the
 /// others, or "erosion" and "peaks" would be the same landscape twice and the
 /// three-field split would buy nothing.
@@ -64,6 +74,10 @@ pub struct TerrainBlocks {
     pub rampart: BlockId,
     /// The deposit box inside a town's bank.
     pub vault: BlockId,
+    /// What a building stands on. Footings are the reason a locked door
+    /// means anything: without them the way into a strongroom is a hole in
+    /// the floor, and every lock in this game is decoration.
+    pub footing: BlockId,
     /// The watch box the sheriff's drone lives in — and, bought, the one on
     /// your own roof. Hard enough that a slug glances off it; a drill gets
     /// through eventually, which is the loud way to blind the town.
@@ -165,12 +179,14 @@ impl TerrainBlocks {
                 BlockDef::uniform("engine:permit_box_ii", 31).with_hardness(Some(150.0)),
             ),
             permit_box_iii: register(
-                BlockDef::uniform("engine:permit_box_iii", 32).with_hardness(Some(400.0)),
+                BlockDef::uniform("engine:permit_box_iii", 32)
+                    .with_hardness(Some(FORTIFIED_HARDNESS)),
             ),
             roost: register(BlockDef::uniform("engine:roost", 33).with_hardness(Some(6.0))),
             printer: register(BlockDef::uniform("engine:printer", 34).with_hardness(Some(1.5))),
             bunker_shell: register(
-                BlockDef::uniform("engine:bunker_shell", 35).with_hardness(Some(400.0)),
+                BlockDef::uniform("engine:bunker_shell", 35)
+                    .with_hardness(Some(FORTIFIED_HARDNESS)),
             ),
             supply_cache: register(
                 BlockDef::uniform("engine:supply_cache", 36).with_hardness(Some(2.0)),
@@ -188,6 +204,10 @@ impl TerrainBlocks {
             // box is not something a drill gets to carry off. What protects
             // the *building* is the lockbox on its door.
             vault: register(BlockDef::uniform("engine:vault", 40).with_hardness(None)),
+            footing: register(
+                BlockDef::uniform("engine:footing", 41)
+                    .with_hardness(Some(FORTIFIED_HARDNESS)),
+            ),
         }
     }
 
@@ -228,6 +248,7 @@ impl TerrainBlocks {
             electrolyser: registry.id_of("engine:electrolyser")?,
             rampart: registry.id_of("engine:rampart")?,
             vault: registry.id_of("engine:vault")?,
+            footing: registry.id_of("engine:footing")?,
         })
     }
 }
@@ -718,6 +739,36 @@ mod tests {
         let mut registry = BlockRegistry::new();
         let blocks = TerrainBlocks::register_builtins(&mut registry);
         (registry, TerrainGenerator::new(seed, blocks))
+    }
+
+    #[test]
+    fn everything_fortified_shares_one_hardness() {
+        // A footing, a bunker's shell and the heaviest lockbox are all making
+        // the same promise — possible, and almost never worth it. Three
+        // literals would let them drift apart silently.
+        let (registry, _) = generator(1);
+        for name in [
+            "engine:footing",
+            "engine:bunker_shell",
+            "engine:permit_box_iii",
+        ] {
+            let id = registry.id_of(name).unwrap();
+            let hardness = registry.get(id).unwrap().hardness;
+            assert_eq!(
+                hardness,
+                Some(FORTIFIED_HARDNESS),
+                "{name} is not fortified"
+            );
+            assert!(
+                hardness.is_some(),
+                "{name} is unbreakable, which is a wall rather than a cost"
+            );
+        }
+        // And a footing is far harder than what it is poured into, or there
+        // would be no point pouring it.
+        let stone = registry.id_of("engine:stone").unwrap();
+        let stone_hardness = registry.get(stone).unwrap().hardness.unwrap();
+        assert!(FORTIFIED_HARDNESS > stone_hardness * 100.0);
     }
 
     #[test]

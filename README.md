@@ -175,6 +175,8 @@ build in it, and it survives quitting — skills included.
 
 ### Known rough edges
 
+- Footings are poured flat under a town's levelled plateau; a building on a
+  slope would want stepped footings, and no building stands on a slope yet.
 - A town's vault charges no fee and pays no interest, so banking is pure
   convenience rather than a decision with a price on it.
 - Forts are raised whole or dropped in segments; nothing between, and no
@@ -846,6 +848,27 @@ the trace the town's plateau has already blended most of the way back to
 natural ground, and a wall pinned to the square would hang in the air on the
 downhill side.
 
+### Foundations
+
+Buildings are founded now, the way real ones are: a **deep strip** under
+every load-bearing wall and a **shallow slab** under the floor between. What
+sets the depth is not how tall the building is but what it is protecting — a
+shed runs two courses, the radio tower four, the bank's strongroom five. The
+open plaza runs none, because paving is a surface rather than a structure.
+
+Footings are poured in the same fortified stuff a bunker's shell is made of:
+four hundred times the hardness of stone. That is not a wall — the number is
+finite on purpose, so a determined player with a good drill can always get
+through — but it prices undermining honestly, at about an afternoon a block.
+
+This is the thing that makes every lock in the game mean something. Before it,
+the way past a Tier Three vault door was a hole in the floor. A building's
+claim now reaches the bottom of its own foundation too, so digging under one
+is a permit crime as well as a long day. Star-fort curtains are founded the
+same way, along their whole circuit — including under the gateways and under
+the segments that have fallen down, so a ruin leaves its foundation in the
+ground where the wall used to be.
+
 ### The bank, and the vault
 
 Every town has a bank now, and it carries the heaviest lock in the game — the
@@ -992,6 +1015,9 @@ cargo run --release -p vx-app -- --screenshot cave.ppm --at -244,-14 --cave
 
 # the nearest walled town, from above its own trace
 cargo run --release -p vx-app -- --screenshot fort.ppm --at 1258,-148 --fort
+
+# an excavation beside the bank, its footing in section
+cargo run --release -p vx-app -- --screenshot footing.ppm --at 0,0 --footing
 
 # a town's vault, ledger open
 cargo run --release -p vx-app -- --screenshot vault.ppm --at 0,0 --vault

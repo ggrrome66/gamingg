@@ -117,6 +117,70 @@ impl Role {
     }
 }
 
+/// How deep a building's *strip* footing runs under its load-bearing walls.
+///
+/// Buildings are founded the way real ones are: a deep strip under whatever
+/// carries load, and a shallow slab under the floor between. What sets the
+/// depth is not the height of the building but what it is protecting — a
+/// bank's strongroom is founded far deeper than a shed, because the strip is
+/// the only thing standing between a shovel and everything on deposit.
+///
+/// Paving gets none. A plaza is a surface, not a structure, and putting four
+/// hundred hardness under the whole market square would wall the town's own
+/// ground off from anyone who ever wanted to dig a cellar.
+pub fn strip_depth(role: Role) -> i32 {
+    match role {
+        Role::Paving => 0,
+        Role::Dwelling | Role::PlayerHouse => 2,
+        Role::Shop | Role::Security => 3,
+        Role::Civic => 4,
+        Role::Bank => 5,
+    }
+}
+
+/// How deep the slab runs under a floor that carries nothing.
+const SLAB_DEPTH: i32 = 1;
+
+/// How deep this column's footing runs below the town's grade, if at all.
+///
+/// A column is founded on a strip when the layer above the floor holds
+/// something — a wall, a lockbox, the mast's leg — and on a slab when it is
+/// merely floor. Overlapping blueprints take the deeper answer, which is what
+/// a builder would do.
+pub fn footing_at(site: &TownSite, x: i32, z: i32) -> Option<i32> {
+    let (local_x, local_z) = (x - site.centre.0, z - site.centre.1);
+    let mut deepest = 0;
+    for blueprint in plan_for(site) {
+        let (width, depth) = blueprint.extent();
+        let col = local_x - blueprint.min.0;
+        let row = local_z - blueprint.min.1;
+        if col < 0 || row < 0 || col >= width || row >= depth {
+            continue;
+        }
+        let strip = strip_depth(blueprint.role);
+        if strip == 0 {
+            continue;
+        }
+        let filled = |layer: usize| -> bool {
+            blueprint
+                .layers
+                .get(layer)
+                .and_then(|rows| rows.get(row as usize))
+                .and_then(|line| line.as_bytes().get(col as usize))
+                .is_some_and(|glyph| *glyph != b'.')
+        };
+        let here = if filled(1) {
+            strip
+        } else if filled(0) {
+            SLAB_DEPTH
+        } else {
+            0
+        };
+        deepest = deepest.max(here);
+    }
+    (deepest > 0).then_some(deepest)
+}
+
 /// One building at a site, with the ground it claims.
 ///
 /// Bounds run one below the floor and one above the roof, so nobody tunnels
@@ -643,11 +707,13 @@ pub fn buildings(site: &TownSite) -> Vec<Building> {
             let (width, depth) = blueprint.extent();
             Building {
                 role: blueprint.role,
-                // One below the floor and one above the roof: a claim you can
-                // tunnel under is not a claim.
+                // Down to the bottom of the footing and one above the roof:
+                // a claim you can tunnel under is not a claim, and now that
+                // there is something real down there to cut, the claim has
+                // to reach it.
                 min: BlockPos::new(
                     site.centre.0 + blueprint.min.0,
-                    site.ground - 1,
+                    site.ground - strip_depth(blueprint.role).max(1),
                     site.centre.1 + blueprint.min.1,
                 ),
                 max: BlockPos::new(
@@ -720,6 +786,17 @@ pub fn stamp(chunk: &mut Chunk, position: ChunkPos, sites: &[TownSite], blocks: 
             for local_x in 0..CHUNK_SIZE {
                 let world_x = origin.x + local_x;
                 let world_z = origin.z + local_z;
+
+                // Footings first, below grade: everything above is built on
+                // top of them, and a wall poured after its own foundation is
+                // the wrong way round in a stamp as well as on a site.
+                if let Some(depth) = footing_at(site, world_x, world_z) {
+                    for step in 1..=depth {
+                        if let Some(cell) = LocalPos::new(local_x, site.ground - step, local_z) {
+                            chunk.set(cell, blocks.footing);
+                        }
+                    }
+                }
                 for layer in 0..layers {
                     let world_y = site.ground + layer;
                     let Some(cell) = cell_at(site, world_x, world_y, world_z) else {
@@ -754,6 +831,135 @@ pub fn stamp(chunk: &mut Chunk, position: ChunkPos, sites: &[TownSite], blocks: 
 mod tests {
     use super::*;
     use crate::town::{self, HOME_GROUND_Y};
+
+    #[test]
+    fn every_wall_stands_on_a_strip_and_every_floor_on_a_slab() {
+        // A building founded on dirt is a building you get into with a
+        // shovel. Every load-bearing column runs a deep strip; the floor
+        // between runs a slab; the plaza runs neither.
+        let site = town::home_site();
+        for blueprint in plan_for(&site) {
+            let (width, depth) = blueprint.extent();
+            let strip = strip_depth(blueprint.role);
+            for row in 0..depth {
+                for col in 0..width {
+                    let x = site.centre.0 + blueprint.min.0 + col;
+                    let z = site.centre.1 + blueprint.min.1 + row;
+                    let bearing = cell_at(&site, x, HOME_GROUND_Y + 1, z).is_some();
+                    let found = footing_at(&site, x, z);
+                    if strip == 0 {
+                        continue;
+                    }
+                    if bearing {
+                        assert!(
+                            found.is_some_and(|deep| deep >= strip),
+                            "{:?} carries a wall at ({x}, {z}) on {found:?}",
+                            blueprint.role
+                        );
+                    } else if cell_at(&site, x, HOME_GROUND_Y, z).is_some() {
+                        assert!(
+                            found.is_some(),
+                            "{:?} has unfounded floor at ({x}, {z})",
+                            blueprint.role
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_plaza_is_not_founded() {
+        // Paving is a surface, not a structure. Four hundred hardness under
+        // the whole market square would wall the town's own ground off from
+        // anybody who ever wanted a cellar — so a paved column that no
+        // building also stands on carries nothing below it.
+        assert_eq!(strip_depth(Role::Paving), 0);
+        let site = town::home_site();
+        let mut checked = 0;
+        for blueprint in plan_for(&site) {
+            if blueprint.role != Role::Paving {
+                continue;
+            }
+            let (width, depth) = blueprint.extent();
+            for row in 0..depth {
+                for col in 0..width {
+                    let x = site.centre.0 + blueprint.min.0 + col;
+                    let z = site.centre.1 + blueprint.min.1 + row;
+                    // Skip anywhere a real building also stands: that column
+                    // is founded by the building, and rightly.
+                    let built_on = plan_for(&site).iter().any(|other| {
+                        if other.role == Role::Paving {
+                            return false;
+                        }
+                        let (ow, od) = other.extent();
+                        let ocol = x - site.centre.0 - other.min.0;
+                        let orow = z - site.centre.1 - other.min.1;
+                        (0..ow).contains(&ocol) && (0..od).contains(&orow)
+                    });
+                    if built_on {
+                        continue;
+                    }
+                    assert_eq!(
+                        footing_at(&site, x, z),
+                        None,
+                        "the open plaza is founded at ({x}, {z})"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 50, "only {checked} open paved columns checked");
+    }
+
+    #[test]
+    fn the_vault_cannot_be_reached_from_underneath() {
+        // The whole reason footings exist. Before them the way past a Tier
+        // Three lock was a hole in the floor, which would have made every
+        // lock in this game decoration.
+        let site = town::home_site();
+        let vault = (0..4)
+            .flat_map(|dy| {
+                (-40..40).flat_map(move |dx| {
+                    (-40..40).map(move |dz| (dx, dy, dz))
+                })
+            })
+            .map(|(dx, dy, dz)| {
+                (
+                    site.centre.0 + dx,
+                    HOME_GROUND_Y + dy,
+                    site.centre.1 + dz,
+                )
+            })
+            .find(|(x, y, z)| cell_at(&site, *x, *y, *z) == Some(Cell::Vault))
+            .expect("the hometown has a bank");
+
+        // The box itself, and every column around it at floor level, is
+        // founded on the bank's own deep strip.
+        for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let found = footing_at(&site, vault.0 + dx, vault.2 + dz);
+            assert!(
+                found.is_some(),
+                "the ground under the vault at ({dx}, {dz}) is bare dirt"
+            );
+        }
+        let under = footing_at(&site, vault.0, vault.2).unwrap();
+        assert!(
+            under >= SLAB_DEPTH,
+            "the vault stands on nothing but a scrape"
+        );
+
+        // And the claim reaches the bottom of that footing, so undermining it
+        // is a crime as well as a long afternoon.
+        let bank = buildings(&site)
+            .into_iter()
+            .find(|building| building.role == Role::Bank)
+            .expect("the bank is a building");
+        assert!(
+            bank.min.y <= HOME_GROUND_Y - strip_depth(Role::Bank),
+            "the bank's claim stops above its own foundation"
+        );
+    }
 
     #[test]
     fn the_counter_stands_inside_the_shop() {

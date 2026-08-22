@@ -91,6 +91,13 @@ pub const WALL_HEIGHT: i32 = 5;
 /// How deep the ditch outside it is cut.
 const DITCH_DEPTH: i32 = 3;
 
+/// How deep the curtain's footing runs below grade.
+///
+/// Deeper than the ditch beside it, or the ditch would undercut the very
+/// wall it exists to protect — which is exactly the mistake that makes a real
+/// counterscarp collapse into its own ditch.
+const FOOTING_DEPTH: i32 = 4;
+
 /// How wide the ditch runs, beyond the wall's outer face.
 const DITCH_WIDTH: f32 = 5.0;
 
@@ -197,6 +204,13 @@ pub enum Part {
     Ditch,
     /// The lockbox beside a gateway.
     GateLock,
+    /// The footing the curtain stands on, below grade.
+    ///
+    /// Poured under the whole trace including the gateways and the fallen
+    /// segments: a wall that came down leaves its foundation in the ground,
+    /// which is how ruins actually read on a site — and which means a breach
+    /// is a gap you walk through rather than a hole you dig under.
+    Footing,
 }
 
 impl Fort {
@@ -280,6 +294,12 @@ impl Fort {
         let gateway = self.in_gateway(angle, distance);
 
         if signed.abs() <= WALL_HALF {
+            // Below grade comes first, and it does not care about breaches or
+            // gateways: the trace was founded along its whole circuit before
+            // any of it fell down or was left open for a road.
+            if y < ground {
+                return (y >= ground - FOOTING_DEPTH).then_some(Part::Footing);
+            }
             if self.breached(angle) {
                 return None;
             }
@@ -363,11 +383,12 @@ pub fn stamp(
             for local_x in 0..vx_core::CHUNK_SIZE {
                 let (world_x, world_z) = (origin.x + local_x, origin.z + local_z);
                 let ground = height(world_x, world_z);
-                for y in (ground - DITCH_DEPTH + 1)..=(ground + WALL_HEIGHT) {
+                for y in (ground - FOOTING_DEPTH.max(DITCH_DEPTH))..=(ground + WALL_HEIGHT) {
                     let Some(part) = fort.part_at(world_x, y, world_z, ground) else {
                         continue;
                     };
                     let block = match part {
+                        Part::Footing => blocks.footing,
                         Part::Rampart => blocks.rampart,
                         Part::Walk => blocks.catwalk,
                         Part::Parapet => blocks.metal_wall,
@@ -496,6 +517,38 @@ mod tests {
     }
 
     #[test]
+    fn a_fallen_wall_leaves_its_footing() {
+        // Two claims at once: nothing along the trace can be tunnelled under,
+        // and a ruin reads as a ruin — the foundation is still there in the
+        // ground where the curtain used to be.
+        let site = town::home_site();
+        let fort = Fort {
+            trace: Trace::SixPoint,
+            ruined: true,
+            ..fort_for(&site)
+        };
+        let steps = 240;
+        let mut breaches = 0;
+        for step in 0..steps {
+            let angle = std::f32::consts::TAU * step as f32 / steps as f32;
+            let radius = fort.radius_at(angle);
+            let x = site.centre.0 + (angle.cos() * radius).round() as i32;
+            let z = site.centre.1 + (angle.sin() * radius).round() as i32;
+            assert_eq!(
+                fort.part_at(x, site.ground - 1, z, site.ground),
+                Some(Part::Footing),
+                "the trace is unfounded at {angle}"
+            );
+            if fort.part_at(x, site.ground + 1, z, site.ground).is_none()
+                && !fort.in_gateway(angle, radius)
+            {
+                breaches += 1;
+            }
+        }
+        assert!(breaches > 0, "a ruined fort with no breach to find");
+    }
+
+    #[test]
     fn ruins_have_breaches_and_whole_forts_do_not() {
         let sites = sample();
         let mut ruins = 0;
@@ -544,6 +597,9 @@ mod tests {
                 for y in site.ground - 8..site.ground + 12 {
                     match fort.part_at(x, y, z, site.ground) {
                         Some(Part::Ditch) => assert!(y <= site.ground),
+                        // A footing is the one built thing below grade, and
+                        // it never rises above it.
+                        Some(Part::Footing) => assert!(y < site.ground),
                         Some(_) => assert!(y >= site.ground),
                         None => {}
                     }
