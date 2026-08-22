@@ -724,7 +724,8 @@ Controls:
 | `N` | Toggle the minimap |
 | `[` / `]` | Zoom the minimap out / in |
 | `9` | The electrolyser, to place on a shore |
-| `T` | The terminal — type `help` |
+| `E` | A word with the nearest townsperson when nothing solid is in reach — their line lands as a toast and in the terminal's transcript |
+| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
 | `F5` | Save |
@@ -845,6 +846,36 @@ Nothing it does is new. An order typed at the prompt goes out through the very
 same call the keys use, so the journal only ever sees one kind of dispatch —
 a console that recorded its own orders would be a second implementation of
 every rule in this game, and the first one to drift.
+
+### The townsfolk
+
+Every town's three villagers have names now, and lives to go with them. WRENA
+THE ASSAYER is at her workplace through working hours, on the square from ten
+to four on the town's own market day, home before eight — and always with her
+own clock, twenty minutes fast or slow of the town's, so nobody moves in
+lockstep. Where a person stands at any hour is a pure function of who they
+are and what day it is: no simulation runs until you look, and a stakeout
+tonight tells you where the sheriff will be tomorrow.
+
+Walk up and press `E` (or type `talk`) and they say something *true*: the ore
+price in their line is the market's live price, the bounty they warn you
+about is the board's real number, and "the fleet is dry" is your tank's own
+flag. `who` lists the roster — name, temperament, how well they know you, and
+where they are right now.
+
+Friendship is a ledger. Gifts score by their tables — two loved goods and one
+hated per person, derived from their trade, authored for the hometown trio —
+with two gifts a week counted, birthdays tripled, and a first chat each day
+worth a little. Get witnessed breaching a lock and everyone in that town
+holds it against you, scaled off the same bill the sheriff charged. The tiers
+open things that already exist: market talk at Acquainted, a bearing to a
+bunker at Trusted (stage 19's loot loop, fed by talking), and at Close a key
+to that person's own door — granted through the permit system, not around it.
+
+`Talk` is journalled and replays as a no-op, because what talking moves lives
+in its own file, like permits grants. `gift <good>` is not: the good comes
+off the base pile on both sides of the oracle, and only what it *earned*
+stays outside the hash.
 
 ### Walls, and what they are for
 

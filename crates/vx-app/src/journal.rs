@@ -110,7 +110,11 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // hash by a longer road than usual. The order itself only moves goods, but
 // the fleet burns those goods to dig, so a log replayed without it would
 // run the crew dry at a different tick and leave a different hole.
-const VERSION: u32 = 16;
+//
+// Seventeen adds `Talk` and `Gift` — the townsfolk got names. Talk replays
+// as a no-op like `Scout`; `Gift` takes a good off the base pile, which is
+// state `Rebuilt` carries, so the format change is also a meaning change.
+const VERSION: u32 = 17;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -218,6 +222,22 @@ pub enum Command {
         muzzle: [f32; 3],
         yaw_q: i16,
         pitch_q: i16,
+    },
+    /// A word with a townsperson: which town's roster, which person on it.
+    /// Journalled because the log is the complete record of what the player
+    /// did; replayed as a no-op, because what talking moves is disposition —
+    /// a ledger kept in its own file, like permits grants — and never one
+    /// block of the ground the hash covers.
+    Talk { town: (i32, i32), person: u8 },
+    /// A present handed over. *Not* a no-op like `Talk`: the good comes off
+    /// the base pile, and the pile is state `Rebuilt` carries — a replay
+    /// that skipped the gift would finish holding a bar the live session had
+    /// already wrapped. What the gift *earns* is disposition, outside the
+    /// hash, and the ledger scores it from its own entries.
+    Gift {
+        town: (i32, i32),
+        person: u8,
+        good: String,
     },
 }
 
@@ -564,8 +584,16 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
         // reach the world hash, so replay only needs to decode the order and
         // move on — the same honest line run_replay draws for the economy.
         // An intrusion moves grants and claims, which live in their own file
-        // outside the hash, so it draws the same line.
-        Command::Scout(_) | Command::Intrude(_) => {}
+        // outside the hash, so it draws the same line — and so does a word
+        // with a neighbour: talk moves disposition, kept in its own ledger.
+        Command::Scout(_) | Command::Intrude(_) | Command::Talk { .. } => {}
+        Command::Gift { good, .. } => {
+            // One good, off the pile, both sides. What it earned is in the
+            // disposition ledger, outside the hash.
+            if let Some(base) = state.mining.fleet.base.as_mut() {
+                base.stockpile.take(good, 1);
+            }
+        }
         Command::Bank {
             town,
             good,
@@ -781,6 +809,19 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             write_name(file, good)?;
             file.write_all(&amount.to_le_bytes())?;
             file.write_all(&[u8::from(*deposit)])?;
+        }
+        Command::Talk { town, person } => {
+            file.write_all(&[19u8])?;
+            file.write_all(&town.0.to_le_bytes())?;
+            file.write_all(&town.1.to_le_bytes())?;
+            file.write_all(&[*person])?;
+        }
+        Command::Gift { town, person, good } => {
+            file.write_all(&[20u8])?;
+            file.write_all(&town.0.to_le_bytes())?;
+            file.write_all(&town.1.to_le_bytes())?;
+            file.write_all(&[*person])?;
+            write_name(file, good)?;
         }
         Command::Intrude(order) => {
             file.write_all(&[14u8])?;
@@ -1048,6 +1089,26 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
                 good,
                 amount,
                 deposit: flag[0] != 0,
+            }
+        }
+        19 => {
+            let town = (read_u32(file)? as i32, read_u32(file)? as i32);
+            let mut person = [0u8; 1];
+            file.read_exact(&mut person)?;
+            Command::Talk {
+                town,
+                person: person[0],
+            }
+        }
+        20 => {
+            let town = (read_u32(file)? as i32, read_u32(file)? as i32);
+            let mut person = [0u8; 1];
+            file.read_exact(&mut person)?;
+            let good = read_name(file)?;
+            Command::Gift {
+                town,
+                person: person[0],
+                good,
             }
         }
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
@@ -1828,6 +1889,47 @@ mod fire_tests {
         banks.deposit((0, 0), "engine:copper_ore", 240, &mut pile);
         assert_eq!(banks.stored((0, 0)), 240);
         assert_eq!(pile.count("engine:copper_ore"), 0);
+    }
+
+    #[test]
+    fn talk_and_gift_round_trip_with_negative_towns() {
+        let directory =
+            std::env::temp_dir().join(format!("vx-journal-folk-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let orders = [
+            Command::Talk {
+                town: (0, 0),
+                person: 2,
+            },
+            Command::Talk {
+                town: (-1_536, 768),
+                person: 0,
+            },
+            Command::Gift {
+                town: (768, -768),
+                person: 1,
+                good: "engine:copper_bar".into(),
+            },
+        ];
+        let mut journal = CommandLog::default();
+        for order in &orders {
+            journal.record(order.clone());
+        }
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let recovered: Vec<Command> = read_back
+            .entries()
+            .iter()
+            .map(|entry| entry.command.clone())
+            .collect();
+        assert_eq!(recovered, orders.to_vec(), "a word did not survive the wire");
+        assert!(matches!(
+            recovered[1],
+            Command::Talk { town: (-1_536, 768), .. }
+        ));
     }
 
     #[test]

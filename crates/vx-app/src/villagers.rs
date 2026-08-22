@@ -18,6 +18,7 @@ use vx_world::World;
 
 use crate::awareness::{self, Perception, Sighting, Surroundings, TargetKind};
 use crate::clock::TimeOfDay;
+use crate::schedule::{self, Place};
 
 use crate::rig::{self, Rig};
 
@@ -171,7 +172,11 @@ struct Villager {
     /// Where the last frame left them, for deriving facing.
     previous: Vec3,
     yaw: f32,
+    /// The rectangle they are wandering *right now* — swapped by the
+    /// schedule as the day moves them between work, market and leisure.
     patch: Patch,
+    /// Their authored leisure rectangle, the one the roster gave them.
+    home_patch: Patch,
     route: HomeRoute,
     phase: Phase,
     greeting: &'static str,
@@ -208,6 +213,7 @@ impl Villager {
             previous: start,
             yaw: 0.0,
             patch,
+            home_patch: patch,
             route,
             phase: Phase::Roaming,
             greeting,
@@ -232,12 +238,32 @@ impl Villager {
         )
     }
 
+    /// Swap the wander rectangle when the schedule moves this person on —
+    /// market stall, workplace, evening square. The wander machinery itself
+    /// is untouched; a place is just a different patch for it to idle in.
+    fn repatch(&mut self, index: usize, place: Place, site: &TownSite) {
+        let patch = schedule::patch_for(index, place, self.home_patch);
+        if patch == self.patch {
+            return;
+        }
+        self.patch = patch;
+        if self.phase == Phase::Roaming {
+            // Set off for the new spot now rather than finishing the old
+            // stroll leg first: work starts when work starts.
+            self.leg += 1;
+            self.waypoint = waypoint_in(index, self.leg + 1, patch, site);
+            self.pause = 0.0;
+        }
+    }
+
     /// Point them at wherever the hour says they should be.
     ///
     /// Only ever *starts* a journey; the walking itself is the same code that
     /// handles a stroll, so there is one movement path rather than two.
-    fn retarget(&mut self, index: usize, daylight: bool, site: &TownSite) {
-        match (daylight, self.phase) {
+    /// `out` is the schedule's verdict: false means the rule stack said
+    /// *home*, true means the street in one of its flavours.
+    fn retarget(&mut self, index: usize, out: bool, site: &TownSite) {
+        match (out, self.phase) {
             // Dusk: set off for the doorstep.
             (false, Phase::Roaming) => {
                 self.phase = Phase::HeadingHome(0);
@@ -379,6 +405,9 @@ pub struct Villagers {
     office: Option<Vec3>,
     /// Alarms that reached the office since the last collection.
     reports: u32,
+    /// Which calendar day it is, set by the caller from the journal clock.
+    /// An input like the hour, not saved state: the schedule derives from it.
+    day: u32,
 }
 
 impl Default for Villagers {
@@ -410,6 +439,7 @@ impl Villagers {
             tick: 0,
             office,
             reports: 0,
+            day: 0,
             folk: ROSTER
                 .iter()
                 .enumerate()
@@ -423,6 +453,13 @@ impl Villagers {
     /// Which town these people belong to.
     pub fn site(&self) -> &TownSite {
         &self.site
+    }
+
+    /// Tell the town what day it is. The caller derives it from the journal
+    /// clock ([`schedule::TICKS_PER_DAY`]); the schedule needs it for market
+    /// days and everything else weekly.
+    pub fn set_day(&mut self, day: u32) {
+        self.day = day;
     }
 
     /// The rigs the roster wears, in variant order for [`Villagers::objects`].
@@ -442,7 +479,7 @@ impl Villagers {
     /// it feeds the replay oracle.
     pub fn update(&mut self, dt: f32, time: TimeOfDay, around: &Surroundings) {
         let site = self.site;
-        let daylight = time.is_daylight();
+        let day = self.day;
 
         let office = self.office;
         let mut fresh_reports = 0;
@@ -450,16 +487,19 @@ impl Villagers {
             villager.previous = villager.position;
 
             // Fear overrides the clock. A running villager neither strolls
-            // nor keeps town hours until the panic burns off.
+            // nor keeps town hours until the panic burns off — panic *is*
+            // the schedule's rule one, implemented rather than looked up.
             if villager.panic.is_some() {
                 fresh_reports += Villager::run_for_it(villager, dt, &site, office);
                 villager.perception.forget(dt);
                 continue;
             }
 
-            // The hour decides where they are heading; the walking below is
-            // the same walking as ever.
-            villager.retarget(index, daylight, &site);
+            // The schedule decides where they are heading; the walking below
+            // is the same walking as ever.
+            let place = schedule::where_is(&site, index, day, time, false);
+            villager.repatch(index, place, &site);
+            villager.retarget(index, place != Place::Home, &site);
 
             // Standing and watching counts as standing: a villager who has
             // stopped to look at you should not slide across the plaza. But
@@ -698,8 +738,15 @@ impl Villagers {
             if let Some(yaw) = rig::yaw_towards(to.x, to.z) {
                 villager.yaw = yaw;
             }
-            // And stop to look, if it is close and actually in view.
-            if villager.perception.visible.is_some() && watched.distance < GREET_RANGE * 2.0 {
+            // And stop to look, if it is close, actually in view, and worth
+            // gawking at — a neighbour is not. Townsfolk stopping for each
+            // other deadlocks the moment two schedules cross paths: both
+            // stand refreshing the other's attention forever, six feet
+            // apart, and nobody makes it to work.
+            if villager.perception.visible.is_some()
+                && watched.distance < GREET_RANGE * 2.0
+                && watched.kind != TargetKind::Villager
+            {
                 villager.attention = villager.attention.max(0.35);
             }
         }
@@ -766,12 +813,13 @@ mod tests {
         for _ in 0..4000 {
             town.update(1.0 / 60.0, TimeOfDay::NOON, &Surroundings::empty());
         }
-        for villager in &town.folk {
+        for (index, villager) in town.folk.iter().enumerate() {
             let (x0, z0, x1, z1) = villager.patch;
             let at = villager.position;
             assert!(
                 at.x >= x0 - 0.01 && at.x <= x1 + 0.01 && at.z >= z0 - 0.01 && at.z <= z1 + 0.01,
-                "a villager wandered off their patch: {at:?}"
+                "villager {index} wandered off their patch {:?}: at {at:?} phase {:?} waypoint {:?} pause {} attention {}",
+                villager.patch, villager.phase, villager.waypoint, villager.pause, villager.attention
             );
             assert_eq!(at.y, walk_height(&town::home_site()), "a villager left the ground");
             assert!(
@@ -1059,6 +1107,40 @@ mod tests {
             town.positions()
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn the_schedule_moves_the_town_through_its_day() {
+        // Noon on a plain day is work; noon on market day is the square. The
+        // schedule module says so in the abstract — this pins that the
+        // walking machinery actually takes people there.
+        let site = town::home_site();
+        let alone = Surroundings::empty();
+
+        let mut town = Villagers::new();
+        town.set_day(schedule::market_weekday(&site) + 1);
+        for _ in 0..6000 {
+            town.update(1.0 / 60.0, TimeOfDay::NOON, &alone);
+        }
+        for (index, villager) in town.folk.iter().enumerate() {
+            assert_eq!(
+                villager.patch,
+                schedule::patch_for(index, Place::Workplace, villager.home_patch),
+                "villager {index} is not on their workplace patch at noon"
+            );
+        }
+
+        town.set_day(schedule::market_weekday(&site));
+        for _ in 0..6000 {
+            town.update(1.0 / 60.0, TimeOfDay::NOON, &alone);
+        }
+        for (index, villager) in town.folk.iter().enumerate() {
+            assert_eq!(
+                villager.patch,
+                schedule::patch_for(index, Place::Plaza, villager.home_patch),
+                "villager {index} skipped the market"
+            );
+        }
     }
 
     #[test]

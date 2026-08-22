@@ -97,7 +97,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 19 | `94f1ed1` | Bunkers: sacred-geometry layouts on their own lattice — three proportion systems, golden BSP on a Fibonacci vocabulary, golden-angle bearings, a 400-hardness shell, and supply caches to strip |
 | 20 | `60b53e8` | The fuel loop: the fleet burns oxyhydrogen, an electrolyser on a shore splits water into it, and HHO joins the trade network as the first shortage that can stop you |
 | 21 | `38024dc` | Star forts and banks: bastioned traces per town tier with gates, ditches and deterministic breaches, a strongroom in every town behind the first Tier Three lock ever stamped, and foundations under everything |
-| 22 | _this_ | The terminal: the font's third user — typed commands, a caret and history, and four hundred lines of scrollback the toasts also land in |
+| 22 | `9148a77` | The terminal: the font's third user — typed commands, a caret and history, and four hundred lines of scrollback the toasts also land in |
+| 23 | _this_ | The townsfolk: names, trades and temperaments per person, pure schedules with market days, a friendship ledger with gift tables and tier unlocks, and speech templated over the live simulation |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1133,6 +1134,68 @@ which wants a wider panel than the font is comfortable in.
 
 ---
 
+## Shipped — Stage 23: the townsfolk
+
+**One agent, two policies — this round builds the first.** The people design
+note describes a population whose civic half lives in the Stardew Valley and
+Animal Crossing tradition and whose combat half (nerve, cover, surrender)
+lands with the hostiles rounds. Both halves spend the same derivation: a
+`Temperament` — archetype, nerve, warmth, voice — rolled once per person from
+the site hash. The archetype that makes a clerk chatty at the counter is the
+archetype that will make her slow to panic in a fight; nerve is derived now
+and read two stages from now, so nothing about a person ever re-rolls.
+
+**Identity is derived; the hometown is authored.** Every town seats three
+named people — one per dwelling, the same beds the permits round mapped — with
+trades in the town's speciality (a mine keeps a foreman, a powderman and an
+assayer), two loved goods biased by trade, one hated good never loved, and a
+birthday in a 28-day year. The hometown trio are people, not arithmetic: THE
+MAYOR (proud, loves bars), THE SHERIFF (steady, loves fuel), and OLD PRAT
+(chatty, loves logs, hates being handed bars).
+
+**A schedule is worldgen for people.** `where_is(site, person, day, hour)` is
+a pure rule stack — alarm, night, market day, work hours, an evening shaped
+by archetype, a dawn stroll — with every boundary jittered ±20 minutes by the
+person's own hash so the town never moves in lockstep. The villagers' wander
+machinery is untouched: a schedule swaps the *patch* it wanders and drives
+the same home routes the day/night cycle used to. Each town holds market one
+weekday of its own; at noon that day the square fills, and a stakeout, the
+kestrel and the roost all observe the same consistent lives.
+
+**Friendship is a ledger, like loot.** What was given and said is remembered
+as entries; the number is derived. Loved +60, liked +30, neutral +8, hated
+−50; two gifts a week count and a third is taken politely and scored zero;
+birthday gifts triple; a first conversation each day is +2; witnessed crimes
+against a town push a negative entry to everyone who lives there, scaled off
+the same bill the bounty board charged — law and disposition linked but
+distinct. Tiers open things that already exist: prices talk at Acquainted,
+bunker intel at Trusted (a bearing into stage 19's loot loop, earned by
+talking), and at Close a key — an authenticate-rung grant to that person's
+own door through the permit system, not around it.
+
+**Gossip is telemetry wearing a coat.** Speech pools key on archetype and
+context, and templates fill from live systems: the ore price is the market's
+real price, the bounty line quotes the board, "the fleet is dry" is the
+tank's own flag. The terminal (stage 22, and this is why it shipped first)
+gives it all a surface: `who` lists the roster with tier and current
+whereabouts, `talk` has a word with whoever is nearest, `gift <good>` hands
+over one good off the base pile — and E with nothing solid in reach talks to
+the neighbour in front of you.
+
+**The oracle's line, drawn again.** `Talk` is journalled and replays as a
+no-op — disposition lives in its own file (`friends.dat`, VXDS), like permits
+grants. `Gift` is *not* a no-op: the good comes off the base pile, which is
+state replay carries, so both sides run the same take. Journal VERSION 17.
+
+**Deliberately not in 23:** the rain rule from the note's schedule stack
+(this world has no weather to look up); person-policies emitting
+`MoveCommand` through the player integrator, composure, cover scoring and
+surrender — the note's combat half, recorded whole below for the hostiles
+rounds; roster sizes that grow with the books (three per town until the
+plans grow more dwellings).
+
+---
+
 ## Planned — the civic layer: permits, offices, elections
 
 The town-law arc, in three rounds. The user's design, recorded whole so none of
@@ -1225,23 +1288,22 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-Renumbered again after the fabricator (16), caves (17), optics (18),
-bunkers (19), the fuel loop (20) and the forts (21) took their slots: the
-plans kept their order, the stages moved down to make room.
+Renumbered again after the townsfolk (23) took their slot: the plans kept
+their order, the stages moved down to make room.
 
 | Stage | What | Why here |
 |---|---|---|
-| 23 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
-| 24 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
-| 25 | Hostiles and health | The half of combat stage 13 leaves out. `Perception` (stage 7) is already the shape a hostile needs, and stage 13's bounty contracts are already something for one to take |
-| 26 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 25 brings |
-| 27 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
-| 28 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
-| 29 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 24 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
+| 25 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
+| 26 | Hostiles and health | The half of combat stage 13 leaves out — and the people note's combat half lands here: policies emitting `MoveCommand` through the player integrator, composure driven off the `nerve` stage 23 already derived, modes from Fight down to Surrender, cover as occlusion sampled at three eye heights |
+| 27 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 26 brings. Squads bounded on purpose: pairs move alternately, a pair that loses its partner takes the ally-down composure hit — suppression and command layers explicitly out of scope. Surrender feeds the arrest verb, the jailhouse and capture contracts |
+| 28 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
+| 29 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
+| 30 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 22.
+The whole game at a glance, as of stage 23.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1286,10 +1348,16 @@ ditches, and deterministic breaches) and town banks (a strongroom per town
 behind the first Tier Three lock, for staging trade or keeping what you
 cannot lose); foundations under every building and fort wall; the terminal
 (typed commands, a caret and history, and a scrollback the toasts land in);
+the townsfolk (names, trades and temperaments derived once per person, pure
+schedules with per-town market days and ±20-minute personal jitter, a
+friendship ledger with gift tables, weekly caps, birthdays and crime
+spillover, tier unlocks up to bunker intel and a door key, and speech
+templated over live prices, bounty and fuel state);
 a Steam Deck dist build every round.
 
 **Planned, in arc order:** crafting; wear and breakdowns; hostiles and health
-(and with them bunkers occupied);
+(and with them bunkers occupied, and the people note's combat half — nerve,
+cover, surrender and the arrest verb);
 the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
 B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket
 arcade.
