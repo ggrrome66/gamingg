@@ -60,7 +60,12 @@ pub mod slot {
     /// A supply cache, sealed until somebody opens it.
     pub const SUPPLY_CACHE: u32 = 36;
 
-    pub const COUNT: u32 = 37;
+    /// A canister of oxyhydrogen.
+    pub const HHO_CELL: u32 = 37;
+    /// The electrolyser: electrodes in a water bath.
+    pub const ELECTROLYSER: u32 = 38;
+
+    pub const COUNT: u32 = 39;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -390,6 +395,43 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.22, 0.24, 0.28], noise * 0.06)
                     } else {
                         shade([0.17, 0.18, 0.22], noise * 0.06)
+                    }
+                }
+                slot::HHO_CELL => {
+                    // A pressure canister: pale steel, a bright banded collar
+                    // at the neck and a sight glass showing the gas. It has to
+                    // read as "full of something that wants out".
+                    let neck = (2..5).contains(&y) && (5..11).contains(&x);
+                    let glass = (7..12).contains(&y) && (6..10).contains(&x);
+                    let body = (1..TILE_SIZE - 1).contains(&x) && y >= 5;
+                    if glass {
+                        shade([0.55, 0.78, 0.92], noise * 0.05)
+                    } else if neck {
+                        shade([0.82, 0.66, 0.20], noise * 0.05)
+                    } else if body {
+                        shade([0.62, 0.64, 0.68], noise * 0.06)
+                    } else {
+                        shade([0.28, 0.29, 0.32], noise * 0.05)
+                    }
+                }
+                slot::ELECTROLYSER => {
+                    // A bath with two plates in it and bubbles coming off
+                    // them: the picture of the thing it does, which is the
+                    // only tutorial a block gets.
+                    let frame = !(1..TILE_SIZE - 1).contains(&x) || !(1..TILE_SIZE - 1).contains(&y);
+                    let plate = (4..6).contains(&x) || (TILE_SIZE - 6..TILE_SIZE - 4).contains(&x);
+                    let bath = y >= 6;
+                    let bubble = bath && ((x * 5 + y * 11) % 37) < 3;
+                    if frame {
+                        shade([0.30, 0.31, 0.34], noise * 0.05)
+                    } else if bubble {
+                        shade([0.86, 0.92, 0.98], noise * 0.04)
+                    } else if plate && bath {
+                        shade([0.72, 0.48, 0.22], noise * 0.05)
+                    } else if bath {
+                        shade([0.20, 0.42, 0.52], noise * 0.06)
+                    } else {
+                        shade([0.42, 0.44, 0.47], noise * 0.06)
                     }
                 }
                 slot::BUNKER_SHELL => {

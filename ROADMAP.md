@@ -94,7 +94,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 16 | `75bbb1b` | The fabricator: every block is stock, and a printer that turns raw material into ammunition, cells, building goods, modules and whole machines |
 | 17 | `1643f59` | Caves: the first true 3D carve — tunnel galleries and deep chambers, pure in the seed, mouths in hillsides, ore showing in the cut faces |
 | 18 | `8bbc730` | Lights in the dark: baked skylight makes the world below genuinely black, the suit's hand lamp cuts a warm cone through it, and the fabricator prints a high beam, night vision and thermal |
-| 19 | _this_ | Bunkers: sacred-geometry layouts on their own lattice — three proportion systems, golden BSP on a Fibonacci vocabulary, golden-angle bearings, a 400-hardness shell, and supply caches to strip |
+| 19 | `94f1ed1` | Bunkers: sacred-geometry layouts on their own lattice — three proportion systems, golden BSP on a Fibonacci vocabulary, golden-angle bearings, a 400-hardness shell, and supply caches to strip |
+| 20 | _this_ | The fuel loop: the fleet burns oxyhydrogen, an electrolyser on a shore splits water into it, and HHO joins the trade network as the first shortage that can stop you |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -938,6 +939,67 @@ rasterisation pass of their own.
 
 ---
 
+## Shipped — Stage 20: the fuel loop, and what it is made of
+
+**Machines stop being perpetual.** Every cost in this game had been a one-off:
+buy the machine and it works free forever. A running cost is what turns a
+stockpile into a supply line — the difference between "can I afford this" and
+"can I keep this going" — and this round adds the first one.
+
+**The fuel is oxyhydrogen**, water split back into the two gases it is made of
+and burned back into water in the cutting gear. Which means the feedstock is
+something the world has an ocean of, so the cost had to move somewhere honest:
+to the **electrodes** (copper, dissolved into the bath), the **time** (real
+minutes of a machine running), and the **place** — an electrolyser only works
+within two blocks of water. That last one is the first machine in this game
+whose *position* decides whether it works at all, and it is the reason a lake
+shore is now somewhere worth building. The refusal is at placement, not at the
+panel, because a machine that looks built and quietly does nothing is the
+worse lie.
+
+**How the burn stays inside the oracle.** Fuel decides how much ground gets
+dug, and ground is what the world hash covers, so a tank that behaved
+differently on replay would be a divergence with the fleet's name on it. The
+tank therefore lives on `Mining` — which replay carries — and is drawn and
+burned inside `Mining::advance`, which is the very call `Command::Advance`
+replays. That is the whole trick: **no fuelling order exists at all**, because
+both sides run the same code over the same pile for the same number of ticks
+and arrive at the same tank. The only new order is `Electrolyse`, which moves
+goods exactly the way `Print` does. The tank is persisted, and has to be:
+replay re-derives it from tick zero, so a session that reloaded with an empty
+one would run dry at a different tick than its own journal says it did, and
+the ground would differ by exactly the digging that bought.
+
+**Measured in machine-ticks, not canisters.** A crew of six burns six times as
+fast as a lone drone, and counting whole cells would make that unrepresentable
+without fractions — which are precisely what a determinism argument does not
+want. One canister is 2,400 machine-ticks: five minutes of one machine, or
+seventy-five seconds of a crew of four. The kestrel is not among the burners;
+it runs on a charged cell and a cooldown, which was the point of that design,
+and charging for the same wing twice would be a tax rather than a mechanic.
+
+**HHO is a traded good, not a private resource.** It joins the goods table
+with a price, and the specialities take sides: a depot banks and sells it, a
+mine and a refinery burn through it. So the network hauls fuel the way it
+hauls ore, prices move when somebody floods a market with it, and a mining
+camp is now a town that stops when the fuel does. Adding a fifth good is a
+format change to a market's books — an old file's four numbers cannot be read
+as five without inventing the missing one — so the economy save bumps to
+version three and re-derives a town's books from its site instead of guessing.
+
+**Journal VERSION 13 → 14.** `Electrolyse` reaches the hash by a longer road
+than most orders: it only moves goods, but the fleet burns those goods to dig,
+so a log replayed without it would run the crew dry at a different tick and
+leave a different hole.
+
+**Deliberately not in 20:** a tank per machine, so a drone cannot yet be
+stranded far from base with the rest still working; tanker runs, since
+machines refuel from the pile at any distance; fuel for the player or the
+kestrel; and the oxygen half doing anything of its own — the mix burns as one
+good, and splitting it would be a chemistry round rather than a fuel one.
+
+---
+
 ## Planned — star forts: walls with the receipts to justify them
 
 A worldgen round, recorded from the design note whole. Towns grow bastioned
@@ -1055,13 +1117,12 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-Renumbered again after the fabricator (16), caves (17), optics (18) and
-bunkers (19) took their slots: the plans kept their order, the stages moved
-down to make room.
+Renumbered again after the fabricator (16), caves (17), optics (18),
+bunkers (19) and the fuel loop (20) took their slots: the plans kept their
+order, the stages moved down to make room.
 
 | Stage | What | Why here |
 |---|---|---|
-| 20 | Fuel loop | Machines stop being perpetual. Markets price goods and the network hauls them, so a fuel is one more good on an economy that already knows how to make shortages — and a fuel shortage is the first one that can stop you |
 | 21 | Star forts | Bastioned traces per town tier, gates on the roads, deterministic ruins. After the fuel loop and before hostiles: walls should exist — and have gaps — before anything arrives that makes them matter, and the arsenal is what makes a town want them |
 | 22 | Text + terminal | The font exists; the terminal is its third user after the HUD and the panels |
 | 23 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
@@ -1074,7 +1135,7 @@ down to make room.
 
 ## The feature map
 
-The whole game at a glance, as of stage 19.
+The whole game at a glance, as of stage 20.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1111,11 +1172,12 @@ a genuinely black underground, the suit's hand lamp, and printed optics —
 high beam, night vision, thermal); bunkers (a lattice of their own, three
 proportion systems, golden BSP on a Fibonacci vocabulary, golden-angle
 bearings, a 400-hardness shell, an authored furnishing pool, and supply
-caches whose contents are derived from where they stand); a Steam Deck dist
-build every round.
+caches whose contents are derived from where they stand); the fuel loop (the
+fleet burns oxyhydrogen and stops when it runs out, an electrolyser splits
+water into it on any shore, and HHO trades on the network like any other
+good); a Steam Deck dist build every round.
 
-**Planned, in arc order:** fuel loop;
-star forts; terminal; crafting; wear and breakdowns; hostiles and health
+**Planned, in arc order:** star forts; terminal; crafting; wear and breakdowns; hostiles and health
 (and with them bunkers occupied);
 the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
 B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket

@@ -47,24 +47,33 @@ const MAGIC: &[u8; 4] = b"VXEC";
 // simply never contains the new owner byte — so both versions are accepted on
 // read and nothing is discarded on upgrade. An older build refuses a v2 file
 // cleanly, which is the tolerant-loader contract doing its job.
-const VERSION: u32 = 2;
+/// Three adds oxyhydrogen to the goods table. A market's books are a fixed
+/// array of stocks, so a fifth good is a format change: an old file's four
+/// numbers cannot be read as five without inventing the missing one, and a
+/// town's books are better re-derived from its site than guessed at.
+const VERSION: u32 = 3;
 
 /// What the network moves.
 ///
 /// Three raw goods that come out of the ground and one that is made. Ordered,
 /// because a market's books are an array indexed by this — names are for disk
 /// and for the player, indices are for the arithmetic.
-pub const GOODS: [&str; 4] = [
+pub const GOODS: [&str; 5] = [
     "engine:copper_ore",
     "engine:log",
     "engine:stone",
     "engine:copper_bar",
+    "engine:hho_cell",
 ];
 
 pub const ORE: usize = 0;
 pub const LOG: usize = 1;
 pub const STONE: usize = 2;
 pub const BAR: usize = 3;
+/// Oxyhydrogen. Unlike everything above it, nobody digs this out of
+/// anything: it is water and electrodes and patience, which is exactly why
+/// a town can run *out* of it in a way it can never run out of stone.
+pub const HHO: usize = 4;
 
 /// Ticks per catch-up step. Thirty seconds of game time at eight ticks a
 /// second, so a full day of neglect is forty steps.
@@ -77,7 +86,7 @@ const TARGET: f32 = 400.0;
 const CAPACITY: f32 = 1_200.0;
 
 /// What each good is worth to a town holding exactly [`TARGET`] of it.
-const BASE_PRICE: [f32; GOODS.len()] = [10.0, 4.0, 3.0, 60.0];
+const BASE_PRICE: [f32; GOODS.len()] = [10.0, 4.0, 3.0, 60.0, 34.0];
 
 /// How far price may swing from its reference. A glutted market still pays
 /// something and a desperate one is still affordable — a shock should be
@@ -143,10 +152,10 @@ impl Market {
 fn extraction(speciality: Speciality) -> [f32; GOODS.len()] {
     match speciality {
         // A camp built around a hole: ore and the spoil that comes with it.
-        Speciality::Mine => [0.030, 0.0, 0.020, 0.0],
+        Speciality::Mine => [0.030, 0.0, 0.020, 0.0, 0.0],
         // Timber from the country around it.
-        Speciality::Depot => [0.0, 0.018, 0.0, 0.0],
-        Speciality::Refinery => [0.0, 0.004, 0.006, 0.0],
+        Speciality::Depot => [0.0, 0.018, 0.0, 0.0, 0.0],
+        Speciality::Refinery => [0.0, 0.004, 0.006, 0.0, 0.0],
     }
 }
 
@@ -154,7 +163,12 @@ fn extraction(speciality: Speciality) -> [f32; GOODS.len()] {
 fn conversion(speciality: Speciality) -> Option<([f32; GOODS.len()], usize, f32)> {
     match speciality {
         // Ore and stone in, bars out. The reason a refinery is worth visiting.
-        Speciality::Refinery => Some(([0.030, 0.0, 0.012, 0.0], BAR, 0.010)),
+        Speciality::Refinery => Some(([0.030, 0.0, 0.012, 0.0, 0.0], BAR, 0.010)),
+        // A depot runs the cell bank: bars in — electrodes wear out the same
+        // for a town as for a player — and fuel out. So the one place that
+        // *makes* fuel is not the one place that burns most of it, which is
+        // what gives the network something to haul.
+        Speciality::Depot => Some(([0.0, 0.0, 0.0, 0.004, 0.0], HHO, 0.014)),
         _ => None,
     }
 }
@@ -162,11 +176,13 @@ fn conversion(speciality: Speciality) -> Option<([f32; GOODS.len()], usize, f32)
 /// What a town simply uses up, per tick.
 fn consumption(speciality: Speciality) -> [f32; GOODS.len()] {
     match speciality {
-        // Props and fires.
-        Speciality::Mine => [0.0, 0.012, 0.0, 0.0],
+        // Props and fires — and the cutting gear, which is the point of the
+        // whole loop: a mine is the town that stops when the fuel does.
+        Speciality::Mine => [0.0, 0.012, 0.0, 0.0, 0.016],
         // A depot's whole business is moving finished goods onward.
-        Speciality::Depot => [0.004, 0.006, 0.002, 0.012],
-        Speciality::Refinery => [0.0, 0.008, 0.0, 0.002],
+        Speciality::Depot => [0.004, 0.006, 0.002, 0.012, 0.004],
+        // Furnaces run hot on it.
+        Speciality::Refinery => [0.0, 0.008, 0.0, 0.002, 0.010],
     }
 }
 
@@ -189,6 +205,8 @@ pub fn opening_books(site: &TownSite) -> Market {
             (Speciality::Refinery, ORE) => 0.5,
             (Speciality::Depot, LOG) => 1.4,
             (Speciality::Depot, BAR) => 0.5,
+            (Speciality::Depot, HHO) => 1.5,
+            (Speciality::Mine, HHO) | (Speciality::Refinery, HHO) => 0.45,
             _ => 1.0,
         };
         *slot = (TARGET * spread * bias).min(CAPACITY);

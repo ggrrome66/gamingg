@@ -153,7 +153,10 @@ impl Shop {
         // kestrel leaves the shelf once owned — one per person.
         for kind in garage::KINDS {
             // The one-per-person machines leave the shelf once owned.
-            if matches!(kind, garage::KESTREL | garage::WATCHBOX | garage::PRINTER)
+            if matches!(
+                kind,
+                garage::KESTREL | garage::WATCHBOX | garage::PRINTER | garage::ELECTROLYSER
+            )
                 && shed.owned(kind) > 0
             {
                 continue;
@@ -595,6 +598,7 @@ mod tests {
                 Row::BuyMachine(garage::KESTREL),
                 Row::BuyMachine(garage::WATCHBOX),
                 Row::BuyMachine(garage::PRINTER),
+                Row::BuyMachine(garage::ELECTROLYSER),
                 Row::BuyLauncher,
                 Row::Buy(wallet::DRILL),
                 Row::Buy(wallet::CARGO),

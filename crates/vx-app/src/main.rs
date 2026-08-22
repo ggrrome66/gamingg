@@ -28,6 +28,8 @@ mod journal;
 mod map;
 mod mining;
 mod permits;
+mod electrolysis;
+mod fuel;
 mod movement;
 mod optics;
 mod printer;
@@ -69,6 +71,8 @@ const PERMIT_SLOT: usize = 8;
 #[cfg(feature = "gold")]
 const GOLD_SLOT: usize = 9;
 const PRINT_SLOT: usize = 10;
+/// The electrolyser's panel.
+const FUEL_SLOT: usize = 11;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -173,6 +177,8 @@ struct Options {
     /// Frame the capture on the nearest bunker to `--at`: its hatch by
     /// default, a named room inside it with `--close`.
     bunker: bool,
+    /// Stand an electrolyser on the nearest shore and open its panel.
+    hho: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -202,6 +208,7 @@ fn parse_args() -> Result<Options, String> {
         cave: false,
         optic: None,
         bunker: false,
+        hho: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -270,6 +277,7 @@ fn parse_args() -> Result<Options, String> {
             "--cave" => options.cave = true,
             "--optic" => options.optic = Some(value()?),
             "--bunker" => options.bunker = true,
+            "--hho" => options.hho = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -691,6 +699,57 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         );
     }
 
+    if options.hho {
+        // Find water near the capture spot, stand the machine on the shore
+        // and frame it: the siting rule is the feature, so the picture has to
+        // show a machine that is actually beside a lake.
+        let water = world.registry().id_of("engine:water");
+        let mut shore: Option<vx_core::BlockPos> = None;
+        let Some(water) = water else {
+            return Err("this world has no water block registered".into());
+        };
+        'hunt: for radius in 1..90i32 {
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    if dx.abs() != radius && dz.abs() != radius {
+                        continue;
+                    }
+                    let (x, z) = (options.at.0 + dx, options.at.1 + dz);
+                    let Some(stand) = world.surface_y(x, z) else { continue };
+                    // Dry footing only: the machine stands at the shore, not
+                    // in the lake.
+                    if world.block(vx_core::BlockPos::new(x, stand - 1, z)) == water {
+                        continue;
+                    }
+                    let wet = (-2..=2).any(|ox| {
+                        (-2..=2).any(|oz| {
+                            world.block(vx_core::BlockPos::new(x + ox, stand - 1, z + oz)) == water
+                        })
+                    });
+                    if wet {
+                        shore = Some(vx_core::BlockPos::new(x, stand, z));
+                        break 'hunt;
+                    }
+                }
+            }
+        }
+        let stand = shore.ok_or("no shoreline within ninety blocks of --at")?;
+        if let Some(id) = world.registry().id_of("engine:electrolyser") {
+            world.set_block(stand, id);
+            remesh_all(&context, &mut renderer, &mut world);
+        }
+        println!("electrolyser stood at {stand:?}");
+        camera.position = glam::Vec3::new(
+            stand.x as f32 + 3.4,
+            stand.y as f32 + 2.4,
+            stand.z as f32 + 4.2,
+        );
+        look_at(
+            &mut camera,
+            glam::Vec3::new(stand.x as f32 + 0.5, stand.y as f32 + 0.4, stand.z as f32 + 0.5),
+        );
+    }
+
     if options.fab {
         // A fabricator standing on the ground ahead of the camera, offset
         // left so the panel drawn over the frame's centre does not hide the
@@ -862,6 +921,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             ammo: options.launcher.then_some(8),
             panicking: 0,
             kestrel: None,
+            fuel: options.hho.then(|| "HHO 12".to_string()),
             optic: options.optic.as_deref().and_then(|choice| match choice {
                 "lamp" => Some("LAMP"),
                 "nvg" => Some("NIGHT VISION"),
@@ -1129,6 +1189,38 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             &context.device,
             &context.queue,
             (intro::INTRO_WIDTH, intro::INTRO_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
+    if options.hho && !options.close {
+        let mut pile = vx_agent::Stockpile::new();
+        pile.add("engine:copper_bar", 7);
+        pile.add(fuel::CELL, 12);
+        let machine = electrolysis::Electrolyser {
+            open: true,
+            cursor: 1,
+            job: Some(electrolysis::Job {
+                run: 1,
+                done: 21.0,
+                total: electrolysis::duration(&electrolysis::RUNS[1], 6),
+            }),
+            ..electrolysis::Electrolyser::default()
+        };
+        let pixels = electrolysis::render_electrolyser(&machine, Some(&pile), 6, false);
+        let panel_width = electrolysis::FUEL_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = electrolysis::FUEL_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            FUEL_SLOT,
+            &context.device,
+            &context.queue,
+            (electrolysis::FUEL_WIDTH, electrolysis::FUEL_HEIGHT),
             &pixels,
             vx_render::OverlayRect {
                 x: (width as f32 - panel_width) / 2.0,
@@ -1550,6 +1642,8 @@ struct Active {
     printer: printer::Printer,
     /// The lamp and the visors: how the player sees the dark.
     optics: optics::Optics,
+    /// The machine that turns a lake into fuel.
+    electrolyser: electrolysis::Electrolyser,
 }
 
 struct App {
@@ -1978,6 +2072,7 @@ impl App {
         Self::collect_crashes(active);
         Self::advance_scouts(active, active.mining.last_ticks());
         Self::advance_printing(active, active.mining.last_ticks());
+        Self::advance_electrolysis(active, active.mining.last_ticks());
 
         // The fleet's work becomes the player's experience.
         if report.sectors_completed > 0 || report.pings_found > 0 {
@@ -2307,6 +2402,7 @@ impl App {
         self.refresh_home();
         self.refresh_permit();
         self.refresh_printer();
+        self.refresh_electrolyser();
         #[cfg(feature = "gold")]
         self.refresh_gold();
         self.refresh_intro();
@@ -2604,6 +2700,53 @@ impl App {
             }
             Err(reason) => active.printer.feedback = Some(reason),
         }
+    }
+
+    /// Start a run on the electrolyser.
+    fn start_run(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let level = active.skills.level(skills::FABRICATION);
+        let index = active.electrolyser.cursor;
+        let dry_shore = active
+            .electrolyser
+            .at
+            .is_none_or(|at| !electrolysis::water_near(&active.world, at));
+        let Some(base) = active.mining.fleet.base.as_mut() else {
+            active.electrolyser.feedback = Some("NO BASE PILE TO DRAW ON".into());
+            return;
+        };
+        match active
+            .electrolyser
+            .begin(index, &mut base.stockpile, level, dry_shore)
+        {
+            Ok(()) => {
+                active.journal.record(Command::Electrolyse {
+                    run: index as u32,
+                });
+                active.electrolyser.feedback = Some("RUNNING".into());
+            }
+            Err(reason) => active.electrolyser.feedback = Some(reason),
+        }
+    }
+
+    /// Run the bath on the journal's clock, like the fabricator's bed.
+    fn advance_electrolysis(active: &mut Active, ticks: u32) {
+        if ticks == 0 || active.electrolyser.job.is_none() {
+            return;
+        }
+        let dt = ticks as f32 / crate::mining::TICK_RATE as f32;
+        let Some(electrolysis::Progress::Done { cells, xp }) = active.electrolyser.work(dt) else {
+            return;
+        };
+        if let Some(base) = active.mining.fleet.base.as_mut() {
+            base.stockpile.add(fuel::CELL, u64::from(cells));
+        }
+        if let Some(level) = active.skills.add_xp(skills::FABRICATION, xp) {
+            active.level_up = Some((skills::FABRICATION.to_string(), level, Instant::now()));
+        }
+        let line = format!("BANKED {cells} HHO");
+        active.electrolyser.feedback = Some(line.clone());
+        active.greeting = Some((line, Instant::now()));
     }
 
     /// Run whatever is on the fabricator's bed, on the journal's clock.
@@ -3237,6 +3380,15 @@ impl App {
                         Instant::now(),
                     ));
                 }
+                if active.electrolyser.at == Some(hit.block) {
+                    active.electrolyser.at = None;
+                    active.electrolyser.job = None;
+                    active.electrolyser.close();
+                    active.greeting = Some((
+                        "ELECTROLYSER PACKED UP. FIND ANOTHER SHORE".into(),
+                        Instant::now(),
+                    ));
+                }
                 if active.homestead.chest_at == Some(hit.block) {
                     active.homestead.chest_at = None;
                     active.greeting = Some((
@@ -3296,6 +3448,33 @@ impl App {
             }
         }
 
+        // The same rule for the electrolyser, plus the one that makes it
+        // interesting: it has to stand where there is water. The refusal is
+        // at placement rather than at the panel, because a machine that
+        // *looks* built and quietly does nothing is the worse lie.
+        let bath = active.world.registry().id_of("engine:electrolyser");
+        if bath == Some(block) {
+            if active.garage.owned(garage::ELECTROLYSER) == 0 {
+                active.greeting = Some((
+                    "BUY AN ELECTROLYSER AT THE SHOP COUNTER FIRST".into(),
+                    Instant::now(),
+                ));
+                return;
+            }
+            if active.electrolyser.at.is_some() {
+                active.greeting = Some((
+                    "YOU HAVE AN ELECTROLYSER ALREADY. BREAK IT TO MOVE IT".into(),
+                    Instant::now(),
+                ));
+                return;
+            }
+            if !electrolysis::water_near(&active.world, hit.block.offset(hit.face.offset())) {
+                active.greeting =
+                    Some(("IT NEEDS WATER WITHIN TWO BLOCKS".into(), Instant::now()));
+                return;
+            }
+        }
+
         // The player's own box must not be built into, or you seal yourself in.
         let body = active.player.aabb();
         let result = place_block(
@@ -3317,6 +3496,9 @@ impl App {
             }
             if press == Some(block) {
                 active.printer.at = Some(position);
+            }
+            if bath == Some(block) {
+                active.electrolyser.at = Some(position);
             }
             let container = active.world.registry().id_of("engine:container");
             if container == Some(block) {
@@ -3404,6 +3586,29 @@ impl App {
                     let Some(active) = &mut self.active else { return };
                     active.printer.close();
                     active.renderer.clear_overlay(PRINT_SLOT);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // The electrolyser's panel, on the fabricator's pattern.
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.electrolyser.open)
+        {
+            match code {
+                KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                    let Some(active) = &mut self.active else { return };
+                    let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
+                    active.electrolyser.move_cursor(delta);
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => self.start_run(),
+                KeyCode::KeyE | KeyCode::Escape => {
+                    let Some(active) = &mut self.active else { return };
+                    active.electrolyser.close();
+                    active.renderer.clear_overlay(FUEL_SLOT);
                 }
                 _ => {}
             }
@@ -3726,15 +3931,17 @@ impl App {
             }
             // Number keys pick a block to build with.
             // The belt: blocks on one to six, then the equipment — the
-            // launcher on seven, the fabricator on eight. Six used to be
-            // unreachable, which quietly made the chest unplaceable.
+            // launcher on seven, the fabricator on eight, the electrolyser on
+            // nine. Six used to be unreachable, which quietly made the chest
+            // unplaceable.
             KeyCode::Digit1
             | KeyCode::Digit2
             | KeyCode::Digit3
             | KeyCode::Digit4
             | KeyCode::Digit5
             | KeyCode::Digit6
-            | KeyCode::Digit8 => {
+            | KeyCode::Digit8
+            | KeyCode::Digit9 => {
                 if let Some(active) = &mut self.active {
                     let slot = match code {
                         KeyCode::Digit1 => 0,
@@ -3743,7 +3950,8 @@ impl App {
                         KeyCode::Digit4 => 3,
                         KeyCode::Digit5 => 4,
                         KeyCode::Digit6 => 5,
-                        _ => 6,
+                        KeyCode::Digit8 => 6,
+                        _ => 7,
                     };
                     if slot < active.palette.len() {
                         active.selected = slot;
@@ -3963,6 +4171,9 @@ impl App {
             }
             "engine:printer" => {
                 active.printer.open_at(hit.block);
+            }
+            "engine:electrolyser" => {
+                active.electrolyser.open_at(hit.block);
             }
             "engine:supply_cache" => {
                 // Whatever the crate holds goes straight onto the pile — the
@@ -4981,6 +5192,16 @@ impl App {
                 format!("KESTREL {} {}S", mining::kestrel_state(kestrel), seconds)
             }),
             optic: active.optics.label(),
+            fuel: {
+                let spare = active
+                    .mining
+                    .fleet
+                    .base
+                    .as_ref()
+                    .map_or(0, |base| base.stockpile.count(fuel::CELL));
+                let burners = active.mining.burners();
+                active.mining.tank.readout(burners, spare)
+            },
         };
         let pixels = hud::render_hud(&content);
 
@@ -4999,6 +5220,43 @@ impl App {
                 y: screen_height as f32 - height - margin,
                 width,
                 height,
+            },
+        );
+    }
+
+    /// Draw the electrolyser's panel when it is open.
+    fn refresh_electrolyser(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.electrolyser.open {
+            return;
+        }
+        let dry_shore = active
+            .electrolyser
+            .at
+            .is_none_or(|at| !electrolysis::water_near(&active.world, at));
+        let pile = active
+            .mining
+            .fleet
+            .base
+            .as_ref()
+            .map(|base| &base.stockpile);
+        let level = active.skills.level(skills::FABRICATION);
+        let pixels =
+            electrolysis::render_electrolyser(&active.electrolyser, pile, level, dry_shore);
+        let (width, height) = active.renderer.size();
+        let panel_width = electrolysis::FUEL_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = electrolysis::FUEL_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            FUEL_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (electrolysis::FUEL_WIDTH, electrolysis::FUEL_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
             },
         );
     }
@@ -5241,6 +5499,12 @@ impl App {
         if let Err(error) = active.optics.save(save.root()) {
             log::error!("could not save the optics kit: {error}");
         }
+        if let Err(error) = active.electrolyser.save(save.root()) {
+            log::error!("could not save the electrolyser: {error}");
+        }
+        if let Err(error) = active.mining.tank.save(save.root()) {
+            log::error!("could not save the fleet's tank: {error}");
+        }
         match active.economy.save(save.root()) {
             Ok(()) => log::info!("saved {} town markets", active.economy.tracked()),
             Err(error) => log::error!("could not save the town books: {error}"),
@@ -5353,6 +5617,7 @@ impl ApplicationHandler for App {
             "engine:container",
             "engine:chest",
             "engine:printer",
+            "engine:electrolyser",
         ]
         .iter()
         .filter_map(|name| world.registry().id_of(name))
@@ -5421,6 +5686,8 @@ impl ApplicationHandler for App {
         let mut kit = intrusion::Intrusions::default();
         let mut press = printer::Printer::default();
         let mut eyes = optics::Optics::default();
+        let mut bath = electrolysis::Electrolyser::default();
+        let mut tank = fuel::Tank::default();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -5436,6 +5703,12 @@ impl ApplicationHandler for App {
             kit.load(save.root());
             press.load(save.root());
             eyes.load(save.root());
+            bath.load(save.root());
+            // The tank travels with the world it was burned in: replay
+            // re-derives it from tick zero, so a session that reloaded with
+            // an empty one would run dry at a different tick than its own
+            // journal says it did.
+            tank.load(save.root());
         }
         if self.sheriff {
             town_permits.take_office(permits::Office::Sheriff);
@@ -5476,6 +5749,7 @@ impl ApplicationHandler for App {
             mining: {
                 let mut mining = Mining::default();
                 mining.ensure_flier(camera.position);
+                mining.tank = tank;
                 mining
             },
             map,
@@ -5536,6 +5810,7 @@ impl ApplicationHandler for App {
             intrusion: kit,
             printer: press,
             optics: eyes,
+            electrolyser: bath,
             roost: {
                 // The box stands on the hometown security office roof; the
                 // roost is its tenant. Derived from the office's claim so

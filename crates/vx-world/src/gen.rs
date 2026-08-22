@@ -52,6 +52,13 @@ pub struct TerrainBlocks {
     pub bunker_shell: BlockId,
     /// A supply cache: what a bunker is actually for.
     pub supply_cache: BlockId,
+    /// A canister of oxyhydrogen — water split back into the gases it was
+    /// made of, at a two-to-one mix that burns back into water. The first
+    /// good in this game that is *made* rather than dug.
+    pub hho_cell: BlockId,
+    /// The electrolyser: stand it beside water and it turns the lake into
+    /// fuel, slowly, eating copper electrodes as it goes.
+    pub electrolyser: BlockId,
     /// The watch box the sheriff's drone lives in — and, bought, the one on
     /// your own roof. Hard enough that a slug glances off it; a drill gets
     /// through eventually, which is the loud way to blind the town.
@@ -163,6 +170,11 @@ impl TerrainBlocks {
             supply_cache: register(
                 BlockDef::uniform("engine:supply_cache", 36).with_hardness(Some(2.0)),
             ),
+            // Soft: a canister is carried, not built into anything.
+            hho_cell: register(BlockDef::uniform("engine:hho_cell", 37).with_hardness(Some(0.8))),
+            electrolyser: register(
+                BlockDef::uniform("engine:electrolyser", 38).with_hardness(Some(1.5)),
+            ),
         }
     }
 
@@ -199,6 +211,8 @@ impl TerrainBlocks {
             printer: registry.id_of("engine:printer")?,
             bunker_shell: registry.id_of("engine:bunker_shell")?,
             supply_cache: registry.id_of("engine:supply_cache")?,
+            hho_cell: registry.id_of("engine:hho_cell")?,
+            electrolyser: registry.id_of("engine:electrolyser")?,
         })
     }
 }

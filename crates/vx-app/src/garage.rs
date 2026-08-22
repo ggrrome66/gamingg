@@ -49,7 +49,10 @@ pub const WATCHBOX: &str = "watch box";
 pub const PRINTER: &str = "fabricator";
 
 /// Every machine the shop sells, in the order it lists them.
-pub const KINDS: [&str; 5] = [DRONE, FLIER, KESTREL, WATCHBOX, PRINTER];
+/// The electrolyser: the machine that turns a lake into fuel.
+pub const ELECTROLYSER: &str = "electrolyser";
+
+pub const KINDS: [&str; 6] = [DRONE, FLIER, KESTREL, WATCHBOX, PRINTER, ELECTROLYSER];
 
 /// What the first one of each kind costs.
 ///
@@ -58,7 +61,7 @@ pub const KINDS: [&str; 5] = [DRONE, FLIER, KESTREL, WATCHBOX, PRINTER];
 /// more because you are given one for nothing to start with; buying a second is
 /// a real expansion rather than a first step. The kestrel sits between: it
 /// earns nothing, but what it sees is worth a drone.
-const FIRST_COST: [u64; KINDS.len()] = [250, 400, 300, 800, 500];
+const FIRST_COST: [u64; KINDS.len()] = [250, 400, 300, 800, 500, 450];
 
 /// How much dearer each machine is than the one before, in eighths.
 ///
@@ -118,7 +121,7 @@ impl Garage {
         }
         // One kestrel and one watch box per person, by design rather than
         // by price curve: the pack holds one scout, the house has one roof.
-        if matches!(kind, KESTREL | WATCHBOX | PRINTER) && self.owned(kind) > 0 {
+        if matches!(kind, KESTREL | WATCHBOX | PRINTER | ELECTROLYSER) && self.owned(kind) > 0 {
             return false;
         }
         if !wallet.spend(cost(kind, self.owned(kind))) {

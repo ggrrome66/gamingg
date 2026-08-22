@@ -175,6 +175,11 @@ build in it, and it survives quitting — skills included.
 
 ### Known rough edges
 
+- Fuel is one number for the whole fleet rather than a tank per machine, so a
+  drone cannot be stranded far from base with the rest still working. Machines
+  also refuel from the pile at any distance: there is no tanker run yet.
+- Nothing burns fuel except the mining fleet — not the kestrel, which runs on
+  its own cell and cooldown, and not the player.
 - A bunker's room pool is small, and it shows: after enough of them the
   furniture repeats even though the arrangements never do. That is content to
   author, not code to write.
@@ -711,6 +716,7 @@ Controls:
 | `G` | Send the flier to scan the sector you are standing in |
 | `N` | Toggle the minimap |
 | `[` / `]` | Zoom the minimap out / in |
+| `9` | The electrolyser, to place on a shore |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
 | `F5` | Save |
@@ -812,6 +818,28 @@ a **night vision visor** that amplifies what little light there is into green
 geometry, and a **thermal visor** that ignores light entirely and paints
 warm machinery and warm bodies against cold rock. One key cycles the dial
 through what you own; the HUD names what you are looking through.
+
+### The fuel loop
+
+Machines used to run forever on nothing, which made every cost in the game a
+one-off: buy the drone, and it digs until the sun burns out. Now the fleet
+burns **oxyhydrogen** — water taken apart into the two gases it is made of,
+two parts hydrogen to one of oxygen, burned back into water in the cutting
+gear. A canister runs one machine for five minutes; a crew of four gets
+through one in a minute and a quarter. When the pile is empty the crew stops
+where it stands and the HUD says so in red.
+
+You make it yourself. Buy an **electrolyser**, and then find somewhere to put
+it: it only works within two blocks of water, which is the first machine in
+this game whose *position* decides whether it works at all, and which turns a
+lake shore from scenery into somewhere worth building. Water is free. What is
+not free is the copper you feed it as electrodes, and the minutes it takes.
+Longer runs are cheaper by the canister.
+
+The towns are in the same business. A depot banks cells and sells them; a mine
+and a refinery burn through them; so oxyhydrogen is one more good on a network
+that already knows how to make shortages — and it is the first shortage that
+can stop you outright rather than just cost you money.
 
 ### The world below, and what is in it
 
@@ -917,6 +945,9 @@ cargo run --release -p vx-app -- --screenshot town.ppm --at 0,22 --dawn
 
 # from inside the roomiest cave pocket near a spot, facing down the gallery
 cargo run --release -p vx-app -- --screenshot cave.ppm --at -244,-14 --cave
+
+# an electrolyser on the nearest shore, panel open mid-run
+cargo run --release -p vx-app -- --screenshot hho.ppm --at 200,200 --hho
 
 # the nearest bunker to a spot: its hatch from outside, its works from within
 cargo run --release -p vx-app -- --screenshot hatch.ppm --at 2026,364 --bunker

@@ -98,7 +98,12 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // Thirteen is a world change alone, like eleven: bunkers. The ground now
 // holds works that were not there, so every hash a version-twelve journal
 // recorded was taken over terrain that no longer exists.
-const VERSION: u32 = 13;
+//
+// Fourteen adds `Electrolyse` — a format change, and one that reaches the
+// hash by a longer road than usual. The order itself only moves goods, but
+// the fleet burns those goods to dig, so a log replayed without it would
+// run the crew dry at a different tick and leave a different hole.
+const VERSION: u32 = 14;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -160,6 +165,13 @@ pub enum Command {
     /// can be renamed by a mod. If the catalogue ever becomes moddable this
     /// becomes a name, and the version bump that brings it will say so.
     Print { recipe: u32 },
+    /// A run started on the electrolyser, by its index in the machine's
+    /// list of runs. Like `Print`, and for the same reason: the electrodes
+    /// come off the pile and the canisters go back onto it, and the pile is
+    /// state `Rebuilt` carries — so a replay that skipped this would finish
+    /// holding copper the live game had already dissolved, and would run its
+    /// fleet dry at a different tick than the session did.
+    Electrolyse { run: u32 },
     /// A supply cache stripped. Not a no-op and not merely a break: it
     /// clears a block *and* pays out a haul, and both sides derive the haul
     /// from the same position, so a replay finishes holding exactly what the
@@ -532,6 +544,21 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
         // An intrusion moves grants and claims, which live in their own file
         // outside the hash, so it draws the same line.
         Command::Scout(_) | Command::Intrude(_) => {}
+        Command::Electrolyse { run } => {
+            // Electrodes off the pile, canisters back onto it. Both sides run
+            // the same arithmetic over the same store, which is what lets the
+            // fleet's tank — drawn from that store inside `Mining::advance` —
+            // reach the same level on both sides without a single order of
+            // its own.
+            if let (Some(base), Some(run)) = (
+                state.mining.fleet.base.as_mut(),
+                crate::electrolysis::run(*run as usize),
+            ) {
+                base.stockpile.take("engine:copper_bar", run.bars);
+                base.stockpile
+                    .add(crate::fuel::CELL, u64::from(run.cells));
+            }
+        }
         Command::Salvage { at } => {
             // The crate goes, and its haul lands on the pile. The contents
             // are a pure function of the position, so the two sides cannot
@@ -697,6 +724,10 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
         Command::Salvage { at } => {
             file.write_all(&[16u8])?;
             write_pos(file, *at)?;
+        }
+        Command::Electrolyse { run } => {
+            file.write_all(&[17u8])?;
+            file.write_all(&run.to_le_bytes())?;
         }
         Command::Intrude(order) => {
             file.write_all(&[14u8])?;
@@ -949,6 +980,9 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
         },
         16 => Command::Salvage {
             at: read_pos(file)?,
+        },
+        17 => Command::Electrolyse {
+            run: read_u32(file)?,
         },
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
@@ -1678,6 +1712,49 @@ mod fire_tests {
     /// Every scout order survives the wire, and a log full of them replays
     /// to the same ground as a log with none — the scout charts nothing and
     /// breaks nothing, so the oracle must not see it.
+    #[test]
+    fn an_electrolysis_run_round_trips_and_moves_the_pile_both_ways() {
+        let directory =
+            std::env::temp_dir().join(format!("vx-journal-hho-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let mut journal = CommandLog::default();
+        for run in 0..crate::electrolysis::RUNS.len() as u32 {
+            journal.record(Command::Electrolyse { run });
+            journal.record(Command::Advance { ticks: 400 });
+        }
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let orders: Vec<Command> = read_back
+            .entries()
+            .iter()
+            .map(|entry| entry.command.clone())
+            .filter(|command| matches!(command, Command::Electrolyse { .. }))
+            .collect();
+        assert_eq!(
+            orders,
+            (0..crate::electrolysis::RUNS.len() as u32)
+                .map(|run| Command::Electrolyse { run })
+                .collect::<Vec<_>>(),
+            "a run did not survive the wire"
+        );
+
+        // And the arithmetic both sides run is the run's own numbers: bars
+        // out, canisters in. The fleet's tank is drawn from that same pile
+        // inside `Mining::advance`, which is why no separate fuelling order
+        // is needed for a replay to burn identically.
+        for (index, run) in crate::electrolysis::RUNS.iter().enumerate() {
+            let mut pile = vx_agent::Stockpile::new();
+            pile.add("engine:copper_bar", 40);
+            pile.take("engine:copper_bar", run.bars);
+            pile.add(crate::fuel::CELL, u64::from(run.cells));
+            assert_eq!(pile.count("engine:copper_bar"), 40 - run.bars, "run {index}");
+            assert_eq!(pile.count(crate::fuel::CELL), u64::from(run.cells));
+        }
+    }
+
     #[test]
     fn salvage_round_trips_and_replays_to_the_same_haul() {
         let directory =

@@ -65,6 +65,10 @@ pub struct Mining {
     chosen: usize,
     /// The running excavation, once started.
     operation: Option<Operation>,
+    /// What the fleet burns. Lives here rather than in `main` because it
+    /// decides how much ground gets dug, and ground is what the hash covers:
+    /// replay carries this struct, so replay carries the tank.
+    pub tank: crate::fuel::Tank,
     /// Fractional ticks carried between frames, so the drone runs at a steady
     /// rate rather than at whatever the frame rate happens to be.
     pending: f64,
@@ -136,6 +140,7 @@ impl Default for Mining {
             plans: Vec::new(),
             chosen: 0,
             operation: None,
+            tank: crate::fuel::Tank::default(),
             pinned: Vec::new(),
             last_ticks: 0,
             pending: 0.0,
@@ -358,6 +363,9 @@ impl Mining {
         if self.operation.is_none() {
             // The fleet still flies with no dig running.
             for _ in 0..ticks {
+                if !self.fuelled() {
+                    break;
+                }
                 self.pilot_sub_tick(world, events);
                 let tick = self.fleet.tick(world, &mut []);
                 report.delivered += tick.delivered;
@@ -368,12 +376,20 @@ impl Mining {
             return report;
         }
 
+        // Fuel is spent per tick for the whole crew, then the crew runs. A
+        // dry tick is a tick nobody works: the machines are still there and
+        // still where they were, they simply have nothing to burn.
+        let mut worked = 0;
         for _ in 0..ticks {
+            if !self.fuelled() {
+                break;
+            }
+            worked += 1;
             self.pilot_sub_tick(world, events);
             let operation = self.operation.as_mut().expect("checked above");
             operation.tick(world, events);
         }
-        for _ in 0..ticks {
+        for _ in 0..worked {
             // The air side reads the world immutably and trades with the
             // mine's stockpile.
             let mines = self.operation.as_mut().map(std::slice::from_mut).unwrap_or(&mut []);
@@ -384,6 +400,30 @@ impl Mining {
         }
         self.remember_yaws();
         report
+    }
+
+    /// How many machines want fuel this tick.
+    ///
+    /// The kestrel is not among them: it runs on a charged cell and a
+    /// cooldown, which is its own budget and was the whole point of that
+    /// design. Counting it twice would be charging for the same wing twice.
+    pub fn burners(&self) -> u32 {
+        let diggers = self
+            .operation
+            .as_ref()
+            .map_or(0, |operation| operation.drones.len() as u32);
+        diggers + self.fleet.fliers.len() as u32
+    }
+
+    /// Spend one tick's fuel, drawing on the base pile. False when dry.
+    fn fuelled(&mut self) -> bool {
+        let machines = self.burners();
+        match self.fleet.base.as_mut() {
+            Some(base) => self.tank.burn(machines, &mut base.stockpile),
+            // No base means no pile to draw on — and a fleet with nowhere to
+            // deliver has bigger problems than fuel, so it is left alone.
+            None => true,
+        }
     }
 
     /// One simulation tick of the player's held controls.
@@ -881,6 +921,59 @@ mod tests {
         let mut mining = Mining::default();
         mining.ensure_flier(Vec3::new(0.5, ground as f32, 0.5));
         (world, mining)
+    }
+
+    #[test]
+    fn a_dry_fleet_stands_still_and_a_fuelled_one_flies() {
+        // The fuel loop's whole claim, at the seam that matters: a tick the
+        // fleet cannot pay for is a tick nobody works. Anything less and a
+        // shortage would be a HUD line rather than a consequence.
+        let (mut world, mut mining) = flying_world();
+        let events = vx_core::EventBus::new();
+        let ground = world.surface_y(0, 0).unwrap_or(80);
+        mining.fleet.set_base(BlockPos::new(0, ground, 0));
+
+        let before = mining.fleet.fliers[0].position;
+        mining.advance(&mut world, &events, 40);
+        assert!(mining.tank.dry, "an unfuelled fleet did not report itself dry");
+        assert_eq!(
+            mining.fleet.fliers[0].position, before,
+            "a dry flier moved anyway"
+        );
+
+        // One canister and the same forty ticks: now it flies, and the tank
+        // has paid for exactly the ticks it worked.
+        if let Some(base) = mining.fleet.base.as_mut() {
+            base.stockpile.add(crate::fuel::CELL, 1);
+        }
+        mining.advance(&mut world, &events, 40);
+        assert!(!mining.tank.dry);
+        assert_eq!(
+            mining.tank.charge,
+            crate::fuel::TICKS_PER_CELL - 40 * mining.burners(),
+            "the tank did not pay for the ticks it bought"
+        );
+    }
+
+    #[test]
+    fn an_idle_tank_is_never_drawn_on() {
+        // No fleet, no burn: a player who has sold every machine should not
+        // watch their fuel evaporate.
+        let (mut world, mut mining) = flying_world();
+        let events = vx_core::EventBus::new();
+        let ground = world.surface_y(0, 0).unwrap_or(80);
+        mining.fleet.set_base(BlockPos::new(0, ground, 0));
+        mining.fleet.fliers.clear();
+        if let Some(base) = mining.fleet.base.as_mut() {
+            base.stockpile.add(crate::fuel::CELL, 2);
+        }
+        mining.advance(&mut world, &events, 200);
+        assert_eq!(mining.burners(), 0);
+        assert_eq!(
+            mining.fleet.base.as_ref().unwrap().stockpile.count(crate::fuel::CELL),
+            2,
+            "an idle fleet burned fuel"
+        );
     }
 
     #[test]
