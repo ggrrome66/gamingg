@@ -61,17 +61,14 @@ pub struct ScoutReadout {
     pub endurance: u32,
     /// Recharge ticks left.
     pub cooldown: u32,
+    /// The order rows in cursor order. Context-sensitive: the standing
+    /// orders always, plus whatever the machine is close enough to work on.
+    /// Built by the caller, because what a lock *is* is fiction the handheld
+    /// has no business knowing.
+    pub rows: Vec<String>,
+    /// What the coil is doing right now, if anything.
+    pub job: Option<String>,
 }
-
-/// The kestrel page's order rows, in cursor order. Main maps the selected
-/// index onto a journalled `ScoutOrder`.
-pub const SCOUT_ORDERS: [&str; 5] = [
-    "ORBIT OVERHEAD",
-    "SORTIE WHERE I LOOK",
-    "PERCH HERE",
-    "FLY VANGUARD",
-    "DOCK",
-];
 
 /// The handheld's state.
 #[derive(Debug, Default)]
@@ -279,8 +276,13 @@ pub fn render_device(
                     format!("{} - {}S OF FLIGHT", scout.state, scout.endurance / 8)
                 };
                 font::draw_text(&mut pixels, DEVICE_WIDTH, margin, y, 1, TEXT, &line);
-                y += LINE_HEIGHT as i32 + 3;
-                for (index, order) in SCOUT_ORDERS.iter().enumerate() {
+                y += LINE_HEIGHT as i32;
+                if let Some(job) = &scout.job {
+                    font::draw_text(&mut pixels, DEVICE_WIDTH, margin, y, 1, LIVE, job);
+                    y += LINE_HEIGHT as i32;
+                }
+                y += 3;
+                for (index, order) in scout.rows.iter().enumerate() {
                     let selected = index == device.cursor;
                     if selected {
                         font::draw_text(&mut pixels, DEVICE_WIDTH, margin, y, 1, ACCENT, ">");
@@ -582,6 +584,8 @@ mod tests {
             state: "DOCKED",
             endurance: 360,
             cooldown: 0,
+            rows: vec!["ORBIT OVERHEAD".into(), "DOCK".into()],
+            job: None,
         };
         let with = render_device(&device, &[], None, Some(&readout));
         let without = render_device(&device, &[], None, None);
@@ -592,7 +596,7 @@ mod tests {
         moved.open_list();
         moved.turn_page();
         moved.turn_page();
-        moved.move_cursor(2, SCOUT_ORDERS.len());
+        moved.move_cursor(1, readout.rows.len());
         assert_ne!(
             render_device(&moved, &[], None, Some(&readout)),
             with,

@@ -680,7 +680,7 @@ Controls:
 | `C` | Toggle first person and over-the-shoulder |
 | `V` | Open the handheld fleet uplink (arrows pick) |
 | `Tab` | (in the handheld) Turn the page: fleet roster, map, kestrel command |
-| `Enter` | (on the kestrel page) Give the selected standing order — orbit, sortie, perch, vanguard, dock |
+| `Enter` | (on the kestrel page) Give the selected standing order — orbit, sortie, perch, vanguard, dock — or, when the machine is standing at a lock or the town's watch box, set the coil on it |
 | `Enter` | (in the uplink) Look through the selected machine |
 | `R` | Take or release the master override of what you are watching |
 | `Escape` | (on a feed) Hang up and return to your body |
@@ -743,6 +743,37 @@ while it recharges the town is blind), or shot down — which is property
 damage in front of the best witness in town. Cover now works in two
 directions: walls hide you from people, roofs and canopy hide you from the
 sky, and both are plain geometry.
+
+### Hacking through machines
+
+Once Security 10, the counter stocks spoofer coils. Fitted to a machine, a
+coil lets that machine do the lock work while you stand somewhere else: a
+light coil rides the kestrel and opens houses and shops, a heavy one rides a
+real airframe and opens anything. The Security floors from the permits round
+still apply — hardware says *where* the work can happen, your skill says
+*what* work is possible, and neither substitutes for the other.
+
+What you have bought is distance from the scene, never from the consequence.
+The machine at the lock is watched by the same eyes a body would be, and if
+it is spotted the bounty lands on your name. Worse: a machine working
+unattended gets seized, and signing it out of the pound costs a fee at the
+counter. One you are personally flying can at least be flown away. And the
+link is a leash — stay within 120 m of your machine and the machine within
+reach of the target, or the job stops where it stands.
+
+The town's watch box is a target too, and there are three things to do to
+it. **Blind** it and it stands down — though the town notices a dark box
+soonest. **Silence** it and it flies its patrols, sees everything and files
+nothing, which nobody notices until an offence goes strangely unpunished.
+**Tap** it and its sightings mirror onto your handheld: the sheriff's eyes,
+exactly, never better ones. Each grade wants more Security than the last, and
+the tap needs a heavy coil. If subtlety is not your line, the box is still a
+block — drill it out and the town is blind until it is re-boxed, at the same
+price every other loud thing costs.
+
+You can buy the same box for your own roof, at the price the sheriff paid. It
+does not fly, because it has nothing to answer; it just watches your yard and
+files what it sees to you.
 
 ### The gold panel
 

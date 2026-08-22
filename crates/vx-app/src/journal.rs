@@ -70,7 +70,12 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // joined the log (a format change). The scout itself never touches ground —
 // its orders replay as documented no-ops — but the log stays the complete
 // record of what was ordered.
-const VERSION: u32 = 8;
+//
+// Nine is both kinds again: the watch box became its own block (a world
+// change) and intrusion orders joined the log (a format change). An
+// intrusion moves claims and grants, never ground, so it replays as a
+// no-op like the scout's orders.
+const VERSION: u32 = 9;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -125,6 +130,11 @@ pub enum Command {
     /// else on purpose: a journal with cheats in it still replays to a hash,
     /// which is what makes the panel a scenario editor rather than a taint.
     Admin(Admin),
+    /// A machine sent to work a lock or the town's watch box. Journalled
+    /// for the record; replayed as a no-op, because what an intrusion moves
+    /// is claims and grants — permits state, kept in its own file — and not
+    /// one block of the ground the hash covers.
+    Intrude(IntrudeOrder),
     /// A standing order for the kestrel. Journalled because the log is the
     /// complete record of what the player ordered; replayed as a no-op
     /// because the scout reveals contacts, never terrain — nothing it does
@@ -188,6 +198,22 @@ pub enum ScoutOrder {
     Perch { x: i32, z: i32 },
     /// Hold ahead along the owner's heading.
     Vanguard,
+}
+
+/// What a machine may be told to work on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntrudeOrder {
+    /// A lockbox at this block.
+    Lock { x: i32, y: i32, z: i32 },
+    /// The watch box at this block, to the given grade.
+    Roost {
+        x: i32,
+        y: i32,
+        z: i32,
+        grade: crate::intrusion::Grade,
+    },
+    /// Called off.
+    Abort,
 }
 
 impl Command {
@@ -468,7 +494,9 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
         // The scout reveals contacts, never terrain: nothing it does can
         // reach the world hash, so replay only needs to decode the order and
         // move on — the same honest line run_replay draws for the economy.
-        Command::Scout(_) => {}
+        // An intrusion moves grants and claims, which live in their own file
+        // outside the hash, so it draws the same line.
+        Command::Scout(_) | Command::Intrude(_) => {}
         Command::Fire {
             muzzle,
             yaw_q,
@@ -596,6 +624,29 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             }
             file.write_all(&yaw_q.to_le_bytes())?;
             file.write_all(&pitch_q.to_le_bytes())?;
+        }
+        Command::Intrude(order) => {
+            file.write_all(&[14u8])?;
+            match order {
+                IntrudeOrder::Abort => file.write_all(&[0u8])?,
+                IntrudeOrder::Lock { x, y, z } => {
+                    file.write_all(&[1u8])?;
+                    file.write_all(&x.to_le_bytes())?;
+                    file.write_all(&y.to_le_bytes())?;
+                    file.write_all(&z.to_le_bytes())?;
+                }
+                IntrudeOrder::Roost { x, y, z, grade } => {
+                    file.write_all(&[2u8])?;
+                    file.write_all(&x.to_le_bytes())?;
+                    file.write_all(&y.to_le_bytes())?;
+                    file.write_all(&z.to_le_bytes())?;
+                    file.write_all(&[match grade {
+                        crate::intrusion::Grade::Blind => 0u8,
+                        crate::intrusion::Grade::Silence => 1u8,
+                        crate::intrusion::Grade::Tap => 2u8,
+                    }])?;
+                }
+            }
         }
         Command::Scout(order) => {
             file.write_all(&[13u8])?;
@@ -781,6 +832,44 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
                 }
             };
             Command::Scout(order)
+        }
+        14 => {
+            let mut which = [0u8; 1];
+            file.read_exact(&mut which)?;
+            let order = match which[0] {
+                0 => IntrudeOrder::Abort,
+                1 => IntrudeOrder::Lock {
+                    x: read_u32(file)? as i32,
+                    y: read_u32(file)? as i32,
+                    z: read_u32(file)? as i32,
+                },
+                2 => {
+                    let (x, y, z) = (
+                        read_u32(file)? as i32,
+                        read_u32(file)? as i32,
+                        read_u32(file)? as i32,
+                    );
+                    let mut grade = [0u8; 1];
+                    file.read_exact(&mut grade)?;
+                    let grade = match grade[0] {
+                        0 => crate::intrusion::Grade::Blind,
+                        1 => crate::intrusion::Grade::Silence,
+                        2 => crate::intrusion::Grade::Tap,
+                        other => {
+                            return Err(std::io::Error::other(format!(
+                                "unknown roost grade {other}"
+                            )))
+                        }
+                    };
+                    IntrudeOrder::Roost { x, y, z, grade }
+                }
+                other => {
+                    return Err(std::io::Error::other(format!(
+                        "unknown intrusion order {other}"
+                    )))
+                }
+            };
+            Command::Intrude(order)
         }
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
@@ -1562,6 +1651,72 @@ mod fire_tests {
             region_hash(&scouted, span.0, span.1),
             region_hash(&quiet, span.0, span.1),
             "scout orders changed the ground"
+        );
+    }
+
+    /// Intrusion orders survive the wire, and a log full of them replays to
+    /// the same ground as a log with none. What a hack moves is grants and
+    /// claims — permits state, its own file — so if this ever fails, an
+    /// intrusion has started touching blocks and the oracle needs telling.
+    #[test]
+    fn intrusion_orders_round_trip_and_replay_to_unchanged_ground() {
+        let directory = std::env::temp_dir().join(format!(
+            "vx-journal-intrude-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let orders = [
+            IntrudeOrder::Lock { x: 12, y: 74, z: -3 },
+            IntrudeOrder::Roost {
+                x: 14,
+                y: 76,
+                z: 9,
+                grade: crate::intrusion::Grade::Tap,
+            },
+            IntrudeOrder::Roost {
+                x: 14,
+                y: 76,
+                z: 9,
+                grade: crate::intrusion::Grade::Blind,
+            },
+            IntrudeOrder::Abort,
+        ];
+        let mut journal = CommandLog::default();
+        for order in orders {
+            journal.record(Command::Intrude(order));
+            journal.record(Command::Advance { ticks: 4 });
+        }
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let recovered: Vec<&Command> = read_back
+            .entries()
+            .iter()
+            .map(|entry| &entry.command)
+            .filter(|command| matches!(command, Command::Intrude(_)))
+            .collect();
+        assert_eq!(recovered.len(), orders.len(), "orders were lost on the wire");
+        for (found, sent) in recovered.iter().zip(&orders) {
+            assert_eq!(**found, Command::Intrude(*sent), "an order mutated in transit");
+        }
+
+        let span = (
+            vx_core::BlockPos::new(-20, 40, -20),
+            vx_core::BlockPos::new(40, 100, 40),
+        );
+        let events = EventBus::new();
+        let mut hacked = world();
+        replay(&read_back, &mut hacked, &events);
+        let mut quiet_log = CommandLog::default();
+        quiet_log.record(Command::Advance { ticks: 16 });
+        let mut quiet = world();
+        replay(&quiet_log, &mut quiet, &events);
+        assert_eq!(
+            region_hash(&hacked, span.0, span.1),
+            region_hash(&quiet, span.0, span.1),
+            "an intrusion changed the ground"
         );
     }
 

@@ -14,6 +14,7 @@
 use glam::Vec3;
 use vx_render::Object;
 use vx_world::town::{self, TownSite};
+use vx_world::World;
 
 use crate::awareness::{self, Perception, Sighting, Surroundings, TargetKind};
 use crate::clock::TimeOfDay;
@@ -574,6 +575,30 @@ impl Villagers {
                     ),
                     _ => true,
                 }
+            })
+            .count()
+    }
+
+    /// How many townsfolk can see a point in the world right now.
+    ///
+    /// [`Villagers::witnesses`] asks this about the player; a machine at a
+    /// lock needs the same question asked about *it*, because that is the
+    /// whole trade remote intrusion offers — your body is elsewhere, your
+    /// property is not.
+    pub fn watchers_of(&self, world: &World, at: Vec3) -> usize {
+        let registry = world.registry();
+        self.folk
+            .iter()
+            .filter(|villager| {
+                let eye = villager.position + Vec3::Y * TargetKind::Villager.eye_height();
+                let distance = (at - villager.position).length();
+                if distance > awareness::SIGHT_RANGE {
+                    return false;
+                }
+                if !awareness::in_cone(eye, Some(Self::facing_of(villager)), at, distance) {
+                    return false;
+                }
+                vx_world::sight::sees(world, registry, eye, at, awareness::SIGHT_RANGE)
             })
             .count()
     }
@@ -1183,6 +1208,39 @@ mod witness_tests {
         let mut town = Villagers::new();
         town.folk.clear();
         assert_eq!(seen_by(&town, &world, Vec3::new(0.0, 41.0, 0.0), 1.62), 0);
+    }
+
+    #[test]
+    fn a_machine_at_a_lock_is_watched_the_same_as_a_body() {
+        // The whole trade remote intrusion offers, in one assertion: your
+        // body is elsewhere, your property is not, and the town looks at
+        // your property with exactly the same eyes.
+        let mut world = walled_world();
+        let mut town = Villagers::new();
+        town.folk[1].position.x += 1000.0;
+        town.folk[2].position.x -= 1000.0;
+        town.folk[0].position = Vec3::new(0.0, 41.0, 0.0);
+
+        let in_the_open = Vec3::new(6.0, 41.5, 0.0);
+        town.folk[0].yaw = rig::yaw_towards(in_the_open.x, in_the_open.z).unwrap_or(0.0);
+        assert_eq!(
+            town.watchers_of(&world, in_the_open),
+            1,
+            "nobody noticed a drone hovering at arm's length"
+        );
+
+        // Put a wall between them and the machine is nobody's business.
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        for y in 41..45 {
+            for z in -6..6 {
+                world.set_block(BlockPos::new(3, y, z), stone);
+            }
+        }
+        assert_eq!(
+            town.watchers_of(&world, in_the_open),
+            0,
+            "saw a machine through a stone wall"
+        );
     }
 
     #[test]

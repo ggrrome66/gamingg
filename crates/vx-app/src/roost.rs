@@ -94,10 +94,18 @@ pub struct Roost {
     state: State,
     /// Ticks spent aloft since the last launch.
     aloft: u32,
+    /// The journal tick it was last stepped at, so the deadline questions
+    /// can be asked without threading the clock through every caller.
+    last_tick: u64,
     /// The player has been seen by this flight. Cleared when it boxes:
     /// being observed is a state of the scene, not a permanent record —
     /// the permanent record is the bounty ledger.
     pub observed: bool,
+    /// Journal ticks until each hack wears off. Zero means never hacked,
+    /// and a tick in the past means routine maintenance has since found it.
+    blinded_until: u64,
+    silenced_until: u64,
+    tapped_until: u64,
 }
 
 impl Roost {
@@ -110,7 +118,11 @@ impl Roost {
             craft: Flier::new(home),
             state: State::Boxed { recharge: 0 },
             aloft: 0,
+            last_tick: 0,
             observed: false,
+            blinded_until: 0,
+            silenced_until: 0,
+            tapped_until: 0,
         }
     }
 
@@ -144,6 +156,11 @@ impl Roost {
         if level.length() > kind.hearing() {
             return;
         }
+        if self.blind_at(self.last_tick) {
+            // A box that has been talked into standing down does not
+            // answer the door, however loud the knock.
+            return;
+        }
         match self.state {
             State::Boxed { recharge: 0 } => {
                 self.state = State::Launching {
@@ -161,8 +178,14 @@ impl Roost {
         }
     }
 
-    /// One journal tick.
-    pub fn tick(&mut self, world: &World) {
+    /// One journal tick. `now` is the journal clock, which is what the
+    /// hacked-until deadlines are measured against.
+    pub fn tick(&mut self, world: &World, now: u64) {
+        self.last_tick = now;
+        if self.blind_at(now) && self.aloft() {
+            // Blinded mid-flight: it goes home and sits there.
+            self.state = State::Returning;
+        }
         if self.aloft() {
             self.aloft += 1;
             if self.aloft >= ENDURANCE {
@@ -224,6 +247,12 @@ impl Roost {
     /// Can the watcher see this eye right now? The same occlusion raycast
     /// as every other witness — a roof is cover from above by geometry, not
     /// by rule.
+    ///
+    /// This is the *geometric* question. Whether what it sees counts against
+    /// you is [`Roost::witnesses`], which a silenced box answers no to while
+    /// still flying its patrols in plain view — that gap is exactly what
+    /// silencing buys, and why nobody notices it until an offence goes
+    /// strangely unpunished.
     pub fn sees(&self, world: &World, target_eye: Vec3) -> bool {
         if !self.aloft() {
             return false;
@@ -236,6 +265,44 @@ impl Roost {
         vx_world::sight::sees(world, world.registry(), eye, target_eye, WATCH_RADIUS + 2.0)
     }
 
+    /// Does what it sees go on your sheet? Not while it is silenced.
+    pub fn witnesses(&self, world: &World, target_eye: Vec3) -> bool {
+        !self.silenced_at(self.last_tick) && self.sees(world, target_eye)
+    }
+
+    /// Apply an intrusion's outcome, holding until `until` ticks.
+    pub fn hack(&mut self, grade: crate::intrusion::Grade, until: u64) {
+        match grade {
+            crate::intrusion::Grade::Blind => self.blinded_until = until,
+            crate::intrusion::Grade::Silence => self.silenced_until = until,
+            crate::intrusion::Grade::Tap => self.tapped_until = until,
+        }
+    }
+
+    /// Knock it out until `until` — what drilling the box out buys, and the
+    /// loud way to arrange the same silence a hack arranges quietly.
+    pub fn knock_out(&mut self, until: u64) {
+        self.blinded_until = self.blinded_until.max(until);
+    }
+
+    /// Is it standing down right now?
+    pub fn blinded(&self) -> bool {
+        self.blind_at(self.last_tick)
+    }
+
+    /// Is its feed mirrored to the player?
+    pub fn tapped(&self) -> bool {
+        self.last_tick < self.tapped_until
+    }
+
+    fn blind_at(&self, now: u64) -> bool {
+        now < self.blinded_until
+    }
+
+    fn silenced_at(&self, now: u64) -> bool {
+        now < self.silenced_until
+    }
+
     /// Something it was watching moved: keep the scene warm.
     pub fn hold_interest(&mut self) {
         if let State::Watching { over, .. } = self.state {
@@ -243,10 +310,17 @@ impl Roost {
         }
     }
 
-    /// One line of status for panels — stage 15's intrusion page is the
-    /// intended reader; unused until it lands.
-    #[allow(dead_code)]
+    /// One line of status for panels.
     pub fn status(&self) -> &'static str {
+        if self.blinded() {
+            return "DARK";
+        }
+        if self.tapped() {
+            return "TAPPED";
+        }
+        if self.silenced_at(self.last_tick) {
+            return "SILENCED";
+        }
         match self.state {
             State::Boxed { recharge: 0 } => "BOXED",
             State::Boxed { .. } => "RECHARGING",
@@ -294,14 +368,17 @@ mod tests {
         let scene = BlockPos::new(roost.home.x - 10, roost.home.y - 3, roost.home.z - 8);
 
         roost.report(scene, Report::Breach);
+        let mut clock = 0u64;
         for _ in 0..LAUNCH_TICKS {
             assert!(
                 !matches!(roost.state, State::Flying { .. }),
                 "launched before the pop-out finished"
             );
-            roost.tick(&world);
+            clock += 1;
+            roost.tick(&world, clock);
         }
-        roost.tick(&world);
+        clock += 1;
+        roost.tick(&world, clock);
         assert!(
             matches!(roost.state, State::Flying { .. } | State::Watching { .. }),
             "the box slept through a breach: {:?}",
@@ -326,9 +403,11 @@ mod tests {
         let scene = BlockPos::new(roost.home.x - 8, roost.home.y - 3, roost.home.z - 6);
         roost.report(scene, Report::Gunshot);
 
+        let mut clock = 0u64;
         let mut boxed_after = None;
         for tick in 0..(ENDURANCE + 400) {
-            roost.tick(&world);
+            clock += 1;
+            roost.tick(&world, clock);
             // A watched scene stays interesting, so patience never sends it
             // home — only the battery does.
             roost.hold_interest();
@@ -344,10 +423,12 @@ mod tests {
         assert!(!roost.aloft(), "no heist window: it relaunched flat");
         for _ in 0..RECHARGE {
             assert!(!roost.aloft(), "the window closed early");
-            roost.tick(&world);
+            clock += 1;
+            roost.tick(&world, clock);
         }
         roost.report(scene, Report::Gunshot);
-        roost.tick(&world);
+        clock += 1;
+        roost.tick(&world, clock);
         assert!(
             matches!(roost.state, State::Launching { .. }),
             "recharged and reported, but stayed boxed: {:?}",
@@ -361,8 +442,10 @@ mod tests {
         let mut roost = Roost::new(box_home());
         let scene = BlockPos::new(roost.home.x - 6, roost.home.y - 3, roost.home.z - 4);
         roost.report(scene, Report::Gunshot);
+        let mut clock = 0u64;
         for _ in 0..400 {
-            roost.tick(&world);
+            clock += 1;
+            roost.tick(&world, clock);
             if matches!(roost.state, State::Watching { .. }) {
                 break;
             }
@@ -388,6 +471,98 @@ mod tests {
         );
     }
 
+    /// Fly it to a scene and leave it there, returning the clock it stopped
+    /// at — the shared setup for the grade tests below.
+    fn watching_over(roost: &mut Roost, world: &World, scene: BlockPos) -> u64 {
+        roost.report(scene, Report::Gunshot);
+        let mut clock = 0u64;
+        for _ in 0..400 {
+            clock += 1;
+            roost.tick(world, clock);
+            roost.hold_interest();
+            if matches!(roost.state, State::Watching { .. }) {
+                return clock;
+            }
+        }
+        panic!("never reached the scene");
+    }
+
+    #[test]
+    fn a_blinded_box_stands_down_and_comes_back_when_it_wears_off() {
+        let world = town_world();
+        let mut roost = Roost::new(box_home());
+        let scene = BlockPos::new(roost.home.x - 6, roost.home.y - 3, roost.home.z - 4);
+
+        let hold = crate::intrusion::Grade::Blind.hold_ticks();
+        roost.hack(crate::intrusion::Grade::Blind, hold);
+        roost.tick(&world, 1);
+        assert!(roost.blinded());
+        roost.report(scene, Report::Gunshot);
+        assert!(!roost.aloft(), "a dark box answered the door");
+        assert_eq!(roost.status(), "DARK");
+
+        // Routine maintenance finds it, and the town is watching again.
+        roost.tick(&world, hold);
+        assert!(!roost.blinded(), "the blinding never wore off");
+        roost.report(scene, Report::Gunshot);
+        roost.tick(&world, hold + 1);
+        assert!(roost.aloft(), "it stayed down after the hack expired");
+    }
+
+    #[test]
+    fn a_silenced_box_still_flies_and_still_sees_but_files_nothing() {
+        let world = town_world();
+        let mut roost = Roost::new(box_home());
+        let scene = BlockPos::new(roost.home.x - 6, roost.home.y - 3, roost.home.z - 4);
+        let clock = watching_over(&mut roost, &world, scene);
+
+        let at = roost.position();
+        let exposed = Vec3::new(at.x as f32 + 3.5, at.y as f32 - 4.0, at.z as f32 + 0.5);
+        assert!(roost.witnesses(&world, exposed), "it was not watching to begin with");
+
+        roost.hack(crate::intrusion::Grade::Silence, clock + 1_000);
+        roost.tick(&world, clock + 1);
+        assert!(roost.aloft(), "silencing grounded it — that is blinding");
+        assert!(
+            roost.sees(&world, exposed),
+            "a silenced box should still see; that is what makes it invisible"
+        );
+        assert!(
+            !roost.witnesses(&world, exposed),
+            "a silenced box filed a report anyway"
+        );
+        assert_eq!(roost.status(), "SILENCED");
+    }
+
+    #[test]
+    fn a_tap_lasts_longest_and_says_so() {
+        let world = town_world();
+        let mut roost = Roost::new(box_home());
+        let hold = crate::intrusion::Grade::Tap.hold_ticks();
+        roost.hack(crate::intrusion::Grade::Tap, hold);
+        roost.tick(&world, 1);
+        assert!(roost.tapped());
+        assert_eq!(roost.status(), "TAPPED");
+        // Nothing about a tapped box looks wrong: it answers reports as
+        // usual, which is why it survives longest.
+        assert!(!roost.blinded());
+        roost.tick(&world, hold);
+        assert!(!roost.tapped(), "the tap outlived its hold");
+        assert!(
+            hold > crate::intrusion::Grade::Blind.hold_ticks(),
+            "the tap should outlast the blinding"
+        );
+    }
+
+    #[test]
+    fn drilling_the_box_out_buys_the_same_darkness_loudly() {
+        let world = town_world();
+        let mut roost = Roost::new(box_home());
+        roost.knock_out(2_000);
+        roost.tick(&world, 1);
+        assert!(roost.blinded(), "the box was drilled out and kept watching");
+    }
+
     #[test]
     fn two_responses_to_the_same_report_are_identical() {
         let world = town_world();
@@ -396,8 +571,8 @@ mod tests {
             let scene = BlockPos::new(roost.home.x - 9, roost.home.y - 3, roost.home.z - 7);
             roost.report(scene, Report::Breach);
             let mut path = Vec::new();
-            for _ in 0..300 {
-                roost.tick(&world);
+            for clock in 1..=300u64 {
+                roost.tick(&world, clock);
                 path.push(roost.position());
             }
             path

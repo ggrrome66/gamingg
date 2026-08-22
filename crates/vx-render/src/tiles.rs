@@ -49,8 +49,10 @@ pub mod slot {
     pub const PERMIT_I: u32 = 30;
     pub const PERMIT_II: u32 = 31;
     pub const PERMIT_III: u32 = 32;
+    /// The law's watch box, and the one you can buy for your own roof.
+    pub const ROOST: u32 = 33;
     /// Total generated tiles.
-    pub const COUNT: u32 = 33;
+    pub const COUNT: u32 = 34;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -363,6 +365,23 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.13, 0.15, 0.18], noise * 0.05)
                     } else {
                         shade(housing, noise * 0.06)
+                    }
+                }
+                slot::ROOST => {
+                    // A watch box: dark shuttered housing with a pale seam
+                    // across the lid and one cold lens. It should read as
+                    // "something lives in there and it opens", which is the
+                    // only warning the town gives you before it does.
+                    let seam = (7..9).contains(&y);
+                    let lens = (10..14).contains(&x) && (3..7).contains(&y);
+                    if lens {
+                        shade([0.45, 0.75, 0.95], noise * 0.04)
+                    } else if seam {
+                        shade([0.58, 0.60, 0.64], noise * 0.05)
+                    } else if y < 8 {
+                        shade([0.22, 0.24, 0.28], noise * 0.06)
+                    } else {
+                        shade([0.17, 0.18, 0.22], noise * 0.06)
                     }
                 }
                 // Unknown slots get magenta, the universal "missing texture".

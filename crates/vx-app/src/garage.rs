@@ -40,8 +40,12 @@ pub const FLIER: &str = "flier";
 /// the fleet is for swarms, the pack is for one — which `buy` enforces.
 pub const KESTREL: &str = "kestrel";
 
+/// A watch box for your own roof: the same kit the sheriff has, at the same
+/// price the sheriff paid. Symmetric tech, made purchasable.
+pub const WATCHBOX: &str = "watch box";
+
 /// Every machine the shop sells, in the order it lists them.
-pub const KINDS: [&str; 3] = [DRONE, FLIER, KESTREL];
+pub const KINDS: [&str; 4] = [DRONE, FLIER, KESTREL, WATCHBOX];
 
 /// What the first one of each kind costs.
 ///
@@ -50,7 +54,7 @@ pub const KINDS: [&str; 3] = [DRONE, FLIER, KESTREL];
 /// more because you are given one for nothing to start with; buying a second is
 /// a real expansion rather than a first step. The kestrel sits between: it
 /// earns nothing, but what it sees is worth a drone.
-const FIRST_COST: [u64; KINDS.len()] = [250, 400, 300];
+const FIRST_COST: [u64; KINDS.len()] = [250, 400, 300, 800];
 
 /// How much dearer each machine is than the one before, in eighths.
 ///
@@ -108,8 +112,9 @@ impl Garage {
         if !KINDS.contains(&kind) {
             return false;
         }
-        // One kestrel per person, by design rather than by price curve.
-        if kind == KESTREL && self.owned(KESTREL) > 0 {
+        // One kestrel and one watch box per person, by design rather than
+        // by price curve: the pack holds one scout, the house has one roof.
+        if matches!(kind, KESTREL | WATCHBOX) && self.owned(kind) > 0 {
             return false;
         }
         if !wallet.spend(cost(kind, self.owned(kind))) {
@@ -117,6 +122,26 @@ impl Garage {
         }
         self.grant(kind, 1);
         true
+    }
+
+    /// Fit a module — a coil, a hardened link. One per fleet, not a rising
+    /// curve: a module is a thing you own, not a machine you accumulate, so
+    /// the catalogue and the price live with whatever feature defines them
+    /// and this only records that you have it.
+    pub fn buy_module(&mut self, wallet: &mut Wallet, name: &str, cost: u64) -> bool {
+        if self.owned(name) > 0 {
+            return false;
+        }
+        if !wallet.spend(cost) {
+            return false;
+        }
+        self.grant(name, 1);
+        true
+    }
+
+    /// Is this module fitted?
+    pub fn fitted(&self, name: &str) -> bool {
+        self.owned(name) > 0
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {

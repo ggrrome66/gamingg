@@ -43,6 +43,10 @@ pub struct TerrainBlocks {
     pub leaves: BlockId,
     pub tall_grass: BlockId,
     pub metal_wall: BlockId,
+    /// The watch box the sheriff's drone lives in — and, bought, the one on
+    /// your own roof. Hard enough that a slug glances off it; a drill gets
+    /// through eventually, which is the loud way to blind the town.
+    pub roost: BlockId,
     pub rusted_metal: BlockId,
     pub catwalk: BlockId,
     pub mast: BlockId,
@@ -142,6 +146,7 @@ impl TerrainBlocks {
             permit_box_iii: register(
                 BlockDef::uniform("engine:permit_box_iii", 32).with_hardness(Some(400.0)),
             ),
+            roost: register(BlockDef::uniform("engine:roost", 33).with_hardness(Some(6.0))),
         }
     }
 
@@ -174,6 +179,7 @@ impl TerrainBlocks {
             permit_box_i: registry.id_of("engine:permit_box_i")?,
             permit_box_ii: registry.id_of("engine:permit_box_ii")?,
             permit_box_iii: registry.id_of("engine:permit_box_iii")?,
+            roost: registry.id_of("engine:roost")?,
         })
     }
 }

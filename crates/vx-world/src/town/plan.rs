@@ -39,6 +39,8 @@ pub enum Cell {
     Mailbox,
     /// The lockbox that says who may edit this building.
     Permit(Tier),
+    /// The watch box on the office roof.
+    Roost,
 }
 
 /// How hard a lockbox is to get past.
@@ -337,17 +339,19 @@ const SECURITY_OFFICE: Blueprint = Blueprint {
             "GGGGGGG",
             "GGGGGGG",
         ],
-        // The roost: a two-by-two metal box on the roof, out of which the
+        // The roost: a two-by-two watch box on the roof, out of which the
         // town's watcher drone launches when something loud happens. Placed
         // toward the plaza-facing corner so the pop-out is visible from the
         // street. Adding this layer grows the office's claim by one block of
-        // height, which is correct — the box is the sheriff's property.
+        // height, which is correct — the box is the sheriff's property. Its
+        // own block, so you can read it across the plaza and know what it is
+        // before you decide to do anything about it.
         &[
             ".......",
             ".......",
             ".......",
-            "....MM.",
-            "....MM.",
+            "....RR.",
+            "....RR.",
             ".......",
         ],
     ],
@@ -544,6 +548,7 @@ pub fn cell_at(site: &TownSite, x: i32, y: i32, z: i32) -> Option<Cell> {
             Some(b'1') => return Some(Cell::Permit(Tier::One)),
             Some(b'2') => return Some(Cell::Permit(Tier::Two)),
             Some(b'3') => return Some(Cell::Permit(Tier::Three)),
+            Some(b'R') => return Some(Cell::Roost),
             _ => continue,
         }
     }
@@ -669,6 +674,7 @@ pub fn stamp(chunk: &mut Chunk, position: ChunkPos, sites: &[TownSite], blocks: 
                         Cell::Permit(Tier::One) => blocks.permit_box_i,
                         Cell::Permit(Tier::Two) => blocks.permit_box_ii,
                         Cell::Permit(Tier::Three) => blocks.permit_box_iii,
+                        Cell::Roost => blocks.roost,
                     };
                     if let Some(local) = LocalPos::new(local_x, world_y, local_z) {
                         chunk.set(local, block);

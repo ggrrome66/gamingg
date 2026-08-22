@@ -89,7 +89,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 11 | `289a143` | Permits: ranked claims, three grades of lockbox, witnesses and sneaking, bounty, breaching and lock-picking |
 | 12 | `bbe6756` | The gold panel: journaled admin orders, live tuning, the operator's console compiled out of shipped builds |
 | 13 | `4f22cd4` | The arsenal: the slug launcher, synthesized sound, recoil and shake, town warnings, witnessed property bounty, panic, caravan interception |
-| 14 | _this_ | The kestrel and the roost: a pack scout with standing orders and decaying contact marks, and the town's own watcher on the security office roof |
+| 14 | `6b56c46` | The kestrel and the roost: a pack scout with standing orders and decaying contact marks, and the town's own watcher on the security office roof |
+| 15 | _this_ | Hacking through machines: spoofer coils, drone-borne intrusion on a leash, the watch box blinded, silenced or tapped, the impound, and a watch box for your own roof |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -605,43 +606,78 @@ warrant is a later tenant.
 
 ---
 
-## Planned — Stage 15: hacking through machines
+## Shipped — Stage 15: hacking through machines
 
-The intrusion round, recorded from the design note whole. The Security
-line's work moves *through drones* — a machine perches at the lock while
-the operator stands anywhere the link reaches — and the town's machines,
-the roost first among them, become the targets worth doing it to.
+The Security line's work, done at arm's length — and the town's own machines
+made into targets worth doing it to.
 
-- **Not a minigame.** Stage 11's rule holds: locks are gated by hard
-  floors, not dice. Moving the work onto a drone changes who is exposed
-  and where the operator stands, not the odds — which is what keeps a hack
-  journallable and honest on a Deck with no mouse to wiggle.
-- **A hack is a job, so a drone can carry it.** `Intrude { target }` is a
-  dispatched order like a dig; piloting the machine to the box by hand and
-  dispatching it are one code path, one journal entry, and a test that says
-  the two produce the same world.
-- **The machine is exposed; the owner is billed.** A witnessed machine
-  marks its owner on the bounty ledger the same as a witnessed hand, and a
-  machine caught mid-hack can be seized — impound fine at the counter.
-  Remote intrusion buys distance from the *scene*, not the *consequence*.
-- **The tool is a module, the ceiling is the skill.** The garage fits a
-  spoofer coil (light for the kestrel, heavy for ground frames); what it
-  may attempt is capped by the operator's Security level — hardware sets
-  where the work can happen, skill sets what work is possible.
-- **The roost is the first target that matters.** Three grades up the
-  Security line: *blind* it (it stands down, the town notices within a
-  day), *silence* it (it patrols and files nothing), *tap* it (its marks
-  mirror to your handheld — the strongest intelligence in the game, and
-  the view from the other side of the lens).
-- **Symmetry, on purpose.** The same spoofers arrive in faction hands
-  later, and the garage sells the counter — a hardened link that raises a
-  machine's effective lock tier. The player who has tapped a roost knows
-  exactly why their own kestrel deserves one. This round also brings the
-  **homestead's own roost box** — the sheriff's watcher on your roof, for
-  the same price the sheriff paid.
-- **Range is the link, and the link is the leash**: operator within link
-  of the machine, machine at the target; out-of-link machines finish their
-  standing order and return. The number stage 16+'s jammers will shrink.
+**Not a minigame, on purpose.** Stage 11 set the rule that locks are gated by
+hard floors, not dice. Moving the work onto a drone changes *who is exposed
+and where the operator stands*; it does not change the odds, because there
+are none. `refuse` is one pure function taking one `Attempt` — frame, coil,
+Security, reach, link, target — so the whole rule set is testable in a line
+and identical whether the machine flew there under orders or under your
+thumb. Position is the only input, which is the strongest possible form of
+"a piloted machine can do nothing an autonomous one could not."
+
+**The tool is a module, the ceiling is the skill.** The counter starts
+stocking spoofer gear at Security 10 — well before any of it is useful,
+which is the right way round. A light coil rides the kestrel and opens
+houses and shops; a heavy coil rides a real airframe and opens anything. The
+grade of lock is still gated by the floors stage 11 set, so the shop cannot
+sell what practice has not earned. The **hardened link** is on the shelf too:
+nothing hacks *you* until factions land, so it is bought early and needed
+late — which is exactly how the player's own conduct teaches the rules they
+will later be on the wrong end of.
+
+**The machine is exposed; the owner is billed.** A machine at a lock is
+watched by the same eyes as a body: `Villagers::watchers_of` is the witness
+query pointed at a point in the world rather than at the player, and the
+roost counts too. Caught, the bill lands on the name in the garage papers —
+and an *unattended* machine is seized where one you are personally flying can
+be flown off, which is the honest difference between leaving a tool
+somewhere and holding it. The pound wants a flat fee plus a tenth of the
+machine's worth, payable at the counter, and it outranks every other row on
+the shelf while it is owed.
+
+**Range is the link, and the link is the leash.** The operator must stay
+within 120 m of the machine and the machine within reach of the target, and
+every condition is re-judged every tick — walk away and the job stops where
+it stands. An intrusion is a planned act you stay committed to, not
+fire-and-forget, and that number is what stage 25's jammers will exist to
+shrink.
+
+**The watch box, three ways.** Blind it (Security 15) and it stands down —
+loud in its own way, because the town notices a dark box soonest. Silence it
+(35) and it flies its patrols, sees everything, and files nothing; nobody
+notices until an offence it should have witnessed goes strangely unpunished.
+Tap it (70, heavy coil only) and its sightings mirror onto your handheld
+through the same `Marks` the kestrel fills — the same eye, the same radius,
+the same occlusion. The tap grants the sheriff's eyes, never better ones, and
+it lasts longest because nothing about a tapped box looks wrong. The grades
+were re-scaled onto the ladder the locks already use (1 / 20 / 60) rather
+than the note's own 3 / 5 / 7, which was written against a scale this game
+does not have.
+
+**And the loud way still works.** The box is its own block now, so you can
+read it across the plaza; it joins the lockboxes' exemption from the permits
+gate for the same reason they have it — it is the attack surface, never the
+thing defended — and drilling it out blinds the town until it is re-boxed, at
+the breach price if anybody saw. **Your own roof** takes the same box for the
+same price the sheriff paid: bought at the counter, mounted with a journalled
+`Place`, and it watches your yard without ever flying, because it has nothing
+to respond to.
+
+### What is deliberately not in 15
+
+Anything hacking *you* — the hardened link has no adversary until factions.
+Targets beyond locks and the watch box: a rival's hauler, a faction digger.
+The impound as a *place* — it is a counter and a fee, not a fortified
+jailhouse holding your best machine, which is self-writing content
+deliberately left unwritten. Unmarked chassis: every machine traces to its
+owner, and stolen serials wait for a market to sell them in. And the Security
+milestones still gate cleanly while teaching nothing; the skill line needs
+its manuals.
 
 ---
 
@@ -857,7 +893,7 @@ slots: the plans kept their order, the stages moved down to make room.
 
 ## The feature map
 
-The whole game at a glance, as of stage 14.
+The whole game at a glance, as of stage 15.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -882,11 +918,11 @@ warnings, witnessed property bounty, panic with flee-or-alarm, caravan
 interception and salvage); the kestrel (pack scout, standing orders from
 the handheld, decaying contact marks, cell upgrade line) and the roost (the
 town's watcher on the office roof, observed-then-witnessed, the heist
-window); a Steam Deck dist build every round.
+window); intrusion through machines (spoofer coils, the leash, machine
+witnesses and the impound, the watch box blinded/silenced/tapped, a watch
+box for your own roof); a Steam Deck dist build every round.
 
-**Planned, in arc order:** hacking through machines (stage 15: drone-borne
-intrusion, spoofer coils, the roost blinded/silenced/tapped, impound, the
-homestead's own roost); caves; bunkers built-then-occupied; fuel loop;
+**Planned, in arc order:** caves; bunkers built-then-occupied; fuel loop;
 star forts; terminal; crafting; wear and breakdowns; hostiles and health;
 the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
 B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket
@@ -895,7 +931,8 @@ arcade.
 **Outstanding engineering:** floating-origin rebase; journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the
 weapon table; gamepad input for the gold panel and the game; the kestrel's
-cell state surviving a reload.
+cell state surviving a reload; anything that hacks *you* (the hardened link
+has no adversary until factions).
 
 ## Known rough edges
 

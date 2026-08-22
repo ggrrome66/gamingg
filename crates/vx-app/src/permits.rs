@@ -778,10 +778,15 @@ fn judge(
 pub fn install(bus: &mut vx_core::EventBus, permits: Shared, registry: &vx_core::BlockRegistry) {
     // Resolved once, here, rather than by name on every edit: ids are stable
     // for the life of a registry and this runs on the hot path.
-    let locks: Vec<vx_core::BlockId> = [Tier::One, Tier::Two, Tier::Three]
+    let mut locks: Vec<vx_core::BlockId> = [Tier::One, Tier::Two, Tier::Three]
         .iter()
         .filter_map(|tier| registry.id_of(tier.block_name()))
         .collect();
+    // The watch box joins the exemption for the same reason the lockboxes
+    // have it: it is the thing you attack, not the thing being defended.
+    // Gate it and drilling the town's eye out — the loud half of the answer
+    // to being watched — would be quietly impossible.
+    locks.extend(registry.id_of("engine:roost"));
 
     let breaking = permits.clone();
     let break_locks = locks.clone();

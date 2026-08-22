@@ -23,6 +23,7 @@ mod gold;
 mod homestead;
 mod hud;
 mod intro;
+mod intrusion;
 mod journal;
 mod map;
 mod mining;
@@ -988,6 +989,8 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             &market,
             &shed,
             &arsenal::Arsenal::default(),
+            &intrusion::Intrusions::default(),
+            1,
             &[],
         );
         let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
@@ -1151,6 +1154,17 @@ fn run_windowed(options: &Options) -> Result<(), String> {
         .map_err(|error| format!("event loop failed: {error}"))
 }
 
+/// One row of the handheld's kestrel page: what pressing Enter on it does.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ScoutRow {
+    /// A standing order for the scout's own flying.
+    Stand(journal::ScoutOrder),
+    /// A job for the spoofer coil.
+    Hack(journal::IntrudeOrder),
+    /// Call the running job off.
+    Abort,
+}
+
 /// The command-line switches that exist for development rather than play,
 /// bundled so `App::new` does not grow a parameter per round.
 struct DevOverrides {
@@ -1296,6 +1310,8 @@ struct Active {
     marks: scout::Marks,
     /// The hometown's watcher, once its box is in loaded ground.
     roost: Option<roost::Roost>,
+    /// The spoofer kit: what it is working on, and what the pound is owed.
+    intrusion: intrusion::Intrusions,
 }
 
 struct App {
@@ -2295,7 +2311,10 @@ impl App {
     fn advance_scouts(active: &mut Active, ticks: u32) {
         // The bought scout materialises docked, and its cell upgrade level
         // applies retroactively like every other upgrade.
-        if active.garage.owned(garage::KESTREL) > 0 && active.mining.kestrel.is_none() {
+        if active.garage.owned(garage::KESTREL) > 0
+            && active.mining.kestrel.is_none()
+            && active.intrusion.impounded.is_none()
+        {
             let anchor = vx_core::BlockPos::new(
                 active.player.position.x.floor() as i32,
                 active.player.position.y.floor() as i32,
@@ -2309,6 +2328,32 @@ impl App {
         }
         if let Some(kestrel) = &mut active.mining.kestrel {
             kestrel.recharge_cost = wallet::recharge_ticks(active.wallet.upgrade(wallet::CELL));
+        }
+        // A bought watch box mounts itself on your own roof. Recorded as an
+        // ordinary `Place`, exactly as the town's lock rebuilds are: a world
+        // edit the journal cannot see is a world edit that makes the oracle
+        // lie. If the house is not loaded yet this simply waits a frame.
+        if active.garage.owned(garage::WATCHBOX) > 0 && active.intrusion.roost_at.is_none() {
+            let site = vx_world::town::home_site();
+            let house = vx_world::town::plan::buildings(&site)
+                .into_iter()
+                .find(|building| building.role == vx_world::town::plan::Role::PlayerHouse);
+            if let Some(house) = house {
+                let at = vx_core::BlockPos::new(house.max.x - 2, house.max.y - 1, house.max.z - 2);
+                if let Some(id) = active.world.registry().id_of("engine:roost") {
+                    if active.world.set_block(at, id).is_some() {
+                        active.intrusion.roost_at = Some(at);
+                        active.journal.record(Command::Place {
+                            at,
+                            block: "engine:roost".to_string(),
+                        });
+                        active.greeting = Some((
+                            "WATCH BOX MOUNTED. IT KEEPS AN EYE ON YOUR YARD".into(),
+                            Instant::now(),
+                        ));
+                    }
+                }
+            }
         }
         if ticks == 0 {
             return;
@@ -2332,14 +2377,16 @@ impl App {
             (0, dz.signum() as i32)
         };
 
-        for _ in 0..ticks {
+        let started = active.journal.tick().saturating_sub(u64::from(ticks));
+        for step in 0..ticks {
             if let Some(kestrel) = &mut active.mining.kestrel {
                 // A piloted kestrel is moved by pilot_sub_tick; ticking it
                 // here too would double its meter, so Manual only drains.
                 kestrel.tick(&active.world, anchor, heading);
             }
+            let clock = started + u64::from(step) + 1;
             if let Some(roost) = &mut active.roost {
-                roost.tick(&active.world);
+                roost.tick(&active.world, clock);
             }
         }
 
@@ -2383,7 +2430,173 @@ impl App {
                 now,
             );
         }
+        // A tapped watch box files its sightings to you as well as to the
+        // sheriff: the same eye, the same radius, the same occlusion. The tap
+        // grants their eyes, never better ones — which is the whole reason it
+        // is worth having and the reason it is not a wallhack.
+        let tap_eye = active
+            .roost
+            .as_ref()
+            .filter(|roost| roost.tapped() && roost.aloft())
+            .map(|roost| {
+                let at = roost.position();
+                glam::Vec3::new(at.x as f32 + 0.5, at.y as f32 + 0.3, at.z as f32 + 0.5)
+            });
+        if let Some(eye) = tap_eye {
+            active
+                .marks
+                .scan(&active.world, eye, roost::WATCH_RADIUS, &contacts, now);
+        }
+        // Your own box on your own roof: it does not fly, because it has
+        // nothing to respond to — it only has to watch the yard.
+        if let Some(box_at) = active.intrusion.roost_at {
+            let eye = glam::Vec3::new(
+                box_at.x as f32 + 0.5,
+                box_at.y as f32 + 1.3,
+                box_at.z as f32 + 0.5,
+            );
+            active
+                .marks
+                .scan(&active.world, eye, roost::WATCH_RADIUS, &contacts, now);
+        }
         active.marks.cull(now);
+        Self::advance_intrusion(active, ticks);
+    }
+
+    /// Which machine is doing the intruding, and what frame it has.
+    ///
+    /// The machine you are looking through if there is one — piloted or just
+    /// watched — else the scout, if it is off the pack. Position is the only
+    /// input, which is what makes "flown there by hand" and "sent there"
+    /// produce the same world.
+    fn intruder(active: &Active) -> Option<(intrusion::Frame, glam::Vec3, u64)> {
+        let machine = active
+            .device
+            .feed()
+            .or_else(|| {
+                active
+                    .mining
+                    .kestrel
+                    .as_ref()
+                    .filter(|kestrel| kestrel.aloft())
+                    .map(|_| mining::MachineRef::Kestrel)
+            })?;
+        let at = active.mining.machine_eye(machine)?;
+        let (frame, value) = match machine {
+            mining::MachineRef::Kestrel => (
+                intrusion::Frame::Light,
+                garage::cost(garage::KESTREL, 0),
+            ),
+            mining::MachineRef::Flier(_) => {
+                (intrusion::Frame::Heavy, garage::cost(garage::FLIER, 0))
+            }
+            mining::MachineRef::Digger(_) => {
+                (intrusion::Frame::Heavy, garage::cost(garage::DRONE, 0))
+            }
+        };
+        Some((frame, at, value))
+    }
+
+    /// Work whatever intrusion is running, on the journal's clock.
+    ///
+    /// Every condition is re-judged each tick: fly the machine out of reach,
+    /// walk out of link, and the job stops where it stands. And every tick
+    /// the machine is *visible* is a tick it can be caught — the trade the
+    /// coil makes is distance from the scene, never from the consequence.
+    fn advance_intrusion(active: &mut Active, ticks: u32) {
+        if ticks == 0 || active.intrusion.job.is_none() {
+            return;
+        }
+        let Some(job) = active.intrusion.job else { return };
+        let Some((frame, machine_at, value)) = Self::intruder(active) else {
+            active.intrusion.abort();
+            active.greeting = Some(("THE MACHINE IS GONE".into(), Instant::now()));
+            return;
+        };
+        let target_at = job.target.at();
+        let target_centre = glam::Vec3::new(
+            target_at.x as f32 + 0.5,
+            target_at.y as f32 + 0.5,
+            target_at.z as f32 + 0.5,
+        );
+        let attempt = intrusion::Attempt {
+            frame,
+            fitted: active.garage.fitted(frame.coil()),
+            security: active.skills.level(skills::SECURITY),
+            reach: (machine_at - target_centre).length(),
+            link: (machine_at - active.player.eye_position()).length(),
+            target: job.target,
+        };
+
+        // Caught at it: the bill lands on the name in the garage papers, and
+        // an unattended machine is grabbed where a held one can be flown off.
+        let seen_by_town = active.villagers.watchers_of(&active.world, machine_at);
+        let seen_by_roost = active
+            .roost
+            .as_ref()
+            .is_some_and(|roost| roost.witnesses(&active.world, machine_at));
+        let witnesses = seen_by_town + usize::from(seen_by_roost);
+        if witnesses > 0 {
+            let bill = arsenal::witnessed_bounty(intrusion::BOUNTY_MACHINE, witnesses);
+            active.permits.borrow_mut().caught(bill, witnesses);
+            let unattended = !active.device.is_piloting();
+            if unattended {
+                active.intrusion.impound(value);
+                active.mining.kestrel = None;
+                active.greeting = Some((
+                    "YOUR MACHINE WAS SEIZED AT THE LOCK".into(),
+                    Instant::now(),
+                ));
+            } else {
+                active.intrusion.abort();
+                active.greeting = Some((
+                    "SPOTTED. GET IT OUT OF THERE".into(),
+                    Instant::now(),
+                ));
+            }
+            return;
+        }
+
+        let dt = ticks as f32 / crate::mining::TICK_RATE as f32;
+        match active.intrusion.work(&attempt, dt) {
+            intrusion::Progress::Working(_) => {}
+            intrusion::Progress::Refused(why) => {
+                active.greeting = Some((why, Instant::now()));
+            }
+            intrusion::Progress::Opened { xp } => {
+                let claim = active.permits.borrow().claim_here(target_at);
+                let label = match claim {
+                    Some(claim) => {
+                        let label = claim.label.clone();
+                        active.permits.borrow_mut().grant(claim.key);
+                        label
+                    }
+                    None => "IT".to_string(),
+                };
+                if let Some(level) = active.skills.add_xp(skills::SECURITY, xp) {
+                    active.level_up =
+                        Some((skills::SECURITY.to_string(), level, Instant::now()));
+                }
+                active.greeting = Some((
+                    format!("{label} IS OPEN. NOBODY SAW A THING"),
+                    Instant::now(),
+                ));
+            }
+            intrusion::Progress::Graded { grade, hold, xp } => {
+                let now = active.journal.tick();
+                if let Some(roost) = &mut active.roost {
+                    roost.hack(grade, now + hold);
+                }
+                if let Some(level) = active.skills.add_xp(skills::SECURITY, xp) {
+                    active.level_up =
+                        Some((skills::SECURITY.to_string(), level, Instant::now()));
+                }
+                active.greeting = Some((
+                    format!("THE TOWNS EYE IS {}", grade.label()),
+                    Instant::now(),
+                ));
+            }
+        }
     }
 
     /// Walk-up salvage: stand next to a downed load and it goes onto the
@@ -2577,6 +2790,36 @@ impl App {
                     }
                 }
 
+                // The watch box drilled out: the town is blind until it is
+                // re-boxed, which is the loud way to buy what a hack buys
+                // quietly — and it costs the loud price.
+                if active.world.registry().id_of("engine:roost") == Some(hit.id) {
+                    let now = active.journal.tick();
+                    let mine = active.intrusion.roost_at == Some(hit.block);
+                    if mine {
+                        active.intrusion.roost_at = None;
+                        active.greeting =
+                            Some(("YOUR WATCH BOX IS DOWN".into(), Instant::now()));
+                    } else {
+                        if let Some(roost) = &mut active.roost {
+                            roost.knock_out(now + permits::REBUILD_TICKS);
+                        }
+                        let seen = usize::from(active.watched);
+                        let caught = active
+                            .permits
+                            .borrow_mut()
+                            .caught(permits::BOUNTY_BREACH, seen);
+                        active.greeting = Some((
+                            if caught {
+                                "THE TOWNS EYE IS DOWN - AND YOU WERE SEEN".into()
+                            } else {
+                                "THE TOWNS EYE IS DOWN".to_string()
+                            },
+                            Instant::now(),
+                        ));
+                    }
+                }
+
                 // Breaking the chest packs it up: the block is forgotten, the
                 // contents stay in the homestead — they were never in the
                 // world to begin with.
@@ -2670,13 +2913,15 @@ impl App {
                 .is_some_and(|active| active.device.page == device::Page::Kestrel);
             match code {
                 KeyCode::ArrowUp | KeyCode::ArrowDown => {
-                    let Some(active) = &mut self.active else { return };
-                    let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
                     let rows = if on_kestrel_page {
-                        device::SCOUT_ORDERS.len()
+                        self.active
+                            .as_ref()
+                            .map_or(0, |active| Self::scout_rows(active).len())
                     } else {
                         roster_len
                     };
+                    let Some(active) = &mut self.active else { return };
+                    let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
                     active.device.move_cursor(delta, rows);
                 }
                 KeyCode::Enter | KeyCode::NumpadEnter if on_kestrel_page => {
@@ -2890,6 +3135,8 @@ impl App {
                         &market,
                         &active.garage,
                         &active.arsenal,
+                        &active.intrusion,
+                        active.skills.level(skills::SECURITY),
                         &active.offers,
                     )
                     .len();
@@ -2910,6 +3157,7 @@ impl App {
                     // `market_mut` below, so nothing here loses a write.
                     let mut market = active.economy.market_mut(&site, now).clone();
                     let offers = active.offers.clone();
+                    let security = active.skills.level(skills::SECURITY);
                     let mut post = shop::MailContext {
                         economy: &mut active.economy,
                         mailbox_held: active.homestead.mailbox.total(),
@@ -2921,6 +3169,8 @@ impl App {
                         &mut market,
                         &mut active.garage,
                         &mut active.arsenal,
+                        &mut active.intrusion,
+                        security,
                         &offers,
                         Some(&mut post),
                     );
@@ -3311,9 +3561,104 @@ impl App {
     /// Master override: take the wheel of whatever is being watched, or give
     /// it back. Keeps the handheld's idea of control and the simulation's in
     /// step by doing both in one place.
-    /// Enter on the handheld's kestrel page: turn the cursor row into a
-    /// journalled standing order and hand it to the machine.
+    /// One row of the handheld's kestrel page: a standing order, or a job
+    /// for the coil if the machine is standing next to something worth
+    /// working on.
+    fn scout_rows(active: &Active) -> Vec<(String, ScoutRow)> {
+        let mut rows: Vec<(String, ScoutRow)> = [
+            ("ORBIT OVERHEAD", journal::ScoutOrder::Orbit),
+            ("SORTIE WHERE I LOOK", journal::ScoutOrder::Sortie { x: 0, z: 0 }),
+            ("PERCH HERE", journal::ScoutOrder::Perch { x: 0, z: 0 }),
+            ("FLY VANGUARD", journal::ScoutOrder::Vanguard),
+            ("DOCK", journal::ScoutOrder::Dock),
+        ]
+        .into_iter()
+        .map(|(label, order)| (label.to_string(), ScoutRow::Stand(order)))
+        .collect();
+
+        if active.intrusion.job.is_some() {
+            rows.push(("CALL THE COIL OFF".into(), ScoutRow::Abort));
+            return rows;
+        }
+        // What is the machine actually standing next to? A short scan around
+        // it, because reach is the whole rule: the operator can be anywhere
+        // the link carries, the machine has to be *there*.
+        let Some((_, machine_at, _)) = Self::intruder(active) else {
+            return rows;
+        };
+        let span = intrusion::REACH.ceil() as i32;
+        let centre = vx_core::BlockPos::new(
+            machine_at.x.floor() as i32,
+            machine_at.y.floor() as i32,
+            machine_at.z.floor() as i32,
+        );
+        let registry = active.world.registry();
+        let roost_id = registry.id_of("engine:roost");
+        let security = active.skills.level(skills::SECURITY);
+        for dx in -span..=span {
+            for dy in -span..=span {
+                for dz in -span..=span {
+                    let at = centre.offset([dx, dy, dz]);
+                    let id = active.world.block(at);
+                    if let Some(tier) = permits::tier_of(registry, id) {
+                        rows.push((
+                            "HACK THIS LOCK".into(),
+                            ScoutRow::Hack(journal::IntrudeOrder::Lock {
+                                x: at.x,
+                                y: at.y,
+                                z: at.z,
+                            }),
+                        ));
+                        let _ = tier;
+                        return rows;
+                    }
+                    if roost_id == Some(id) {
+                        for grade in intrusion::Grade::ALL {
+                            if security < grade.min_security() {
+                                continue;
+                            }
+                            rows.push((
+                                format!("{} THE WATCH BOX", grade.label()),
+                                ScoutRow::Hack(journal::IntrudeOrder::Roost {
+                                    x: at.x,
+                                    y: at.y,
+                                    z: at.z,
+                                    grade,
+                                }),
+                            ));
+                        }
+                        return rows;
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    /// Enter on the kestrel page: run the selected row.
     fn order_kestrel(&mut self) {
+        let chosen = {
+            let Some(active) = &self.active else { return };
+            let rows = Self::scout_rows(active);
+            rows.get(active.device.cursor()).cloned()
+        };
+        let Some((label, row)) = chosen else { return };
+        match row {
+            ScoutRow::Abort => {
+                let Some(active) = &mut self.active else { return };
+                active.intrusion.abort();
+                active
+                    .journal
+                    .record(Command::Intrude(journal::IntrudeOrder::Abort));
+                active.device.feedback = Some("CALLED OFF".into());
+            }
+            ScoutRow::Hack(order) => self.begin_intrusion(order, label),
+            ScoutRow::Stand(order) => self.order_scout(order, label),
+        }
+    }
+
+    /// Hand a standing order to the scout, journalling it if it is taken.
+    fn order_scout(&mut self, order: journal::ScoutOrder, label: String) {
         let Some(active) = &mut self.active else { return };
         let Some(kestrel) = &mut active.mining.kestrel else {
             active.device.feedback = Some("NO KESTREL ON THE PACK".into());
@@ -3321,18 +3666,19 @@ impl App {
         };
         let player = active.player.position;
         let ahead = player + active.camera.forward_level() * 30.0;
-        let order = match active.device.cursor() {
-            0 => journal::ScoutOrder::Orbit,
-            1 => journal::ScoutOrder::Sortie {
+        // The orders carrying a place are filled in here, from where the
+        // player actually is and is looking, and the *filled-in* order is
+        // what the log records.
+        let order = match order {
+            journal::ScoutOrder::Sortie { .. } => journal::ScoutOrder::Sortie {
                 x: ahead.x.floor() as i32,
                 z: ahead.z.floor() as i32,
             },
-            2 => journal::ScoutOrder::Perch {
+            journal::ScoutOrder::Perch { .. } => journal::ScoutOrder::Perch {
                 x: player.x.floor() as i32,
                 z: player.z.floor() as i32,
             },
-            3 => journal::ScoutOrder::Vanguard,
-            _ => journal::ScoutOrder::Dock,
+            other => other,
         };
         let mode = match order {
             journal::ScoutOrder::Dock => vx_agent::KestrelMode::Docked,
@@ -3349,15 +3695,59 @@ impl App {
             // Accepted orders go in the log; a refused one changed nothing
             // and records nothing.
             active.journal.record(Command::Scout(order));
-            active.device.feedback = Some(
-                device::SCOUT_ORDERS[active.device.cursor().min(device::SCOUT_ORDERS.len() - 1)]
-                    .to_string(),
-            );
+            active.device.feedback = Some(label);
         } else {
             active.device.feedback = Some(format!(
                 "CELL RECHARGING - READY IN {}S",
                 kestrel.cooldown / 8
             ));
+        }
+    }
+
+    /// Put the coil on something. Refusals are the intrusion module's to
+    /// name, so the panel says exactly what is missing.
+    fn begin_intrusion(&mut self, order: journal::IntrudeOrder, label: String) {
+        let Some(active) = &mut self.active else { return };
+        let target = match order {
+            journal::IntrudeOrder::Abort => return,
+            journal::IntrudeOrder::Lock { x, y, z } => {
+                let at = vx_core::BlockPos::new(x, y, z);
+                let Some(tier) = permits::tier_of(active.world.registry(), active.world.block(at))
+                else {
+                    active.device.feedback = Some("THAT IS NOT A LOCK".into());
+                    return;
+                };
+                intrusion::Target::Lock { at, tier }
+            }
+            journal::IntrudeOrder::Roost { x, y, z, grade } => intrusion::Target::Roost {
+                at: vx_core::BlockPos::new(x, y, z),
+                grade,
+            },
+        };
+        let Some((frame, machine_at, _)) = Self::intruder(active) else {
+            active.device.feedback = Some("NO MACHINE TO SEND".into());
+            return;
+        };
+        let centre = glam::Vec3::new(
+            target.at().x as f32 + 0.5,
+            target.at().y as f32 + 0.5,
+            target.at().z as f32 + 0.5,
+        );
+        let attempt = intrusion::Attempt {
+            frame,
+            fitted: active.garage.fitted(frame.coil()),
+            security: active.skills.level(skills::SECURITY),
+            reach: (machine_at - centre).length(),
+            link: (machine_at - active.player.eye_position()).length(),
+            target,
+        };
+        match intrusion::refuse(&attempt) {
+            Some(reason) => active.device.feedback = Some(reason),
+            None => {
+                active.intrusion.begin(&attempt);
+                active.journal.record(Command::Intrude(order));
+                active.device.feedback = Some(label);
+            }
         }
     }
 
@@ -3492,10 +3882,28 @@ impl App {
             centre,
             markers: &markers,
         };
+        let scout_rows: Vec<String> = Self::scout_rows(active)
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+        let job_line = active
+            .intrusion
+            .job
+            .map(|job| format!("COIL WORKING {:.0}%", job.fraction() * 100.0))
+            .or_else(|| {
+                // Nothing running: say what the town's eye is doing instead,
+                // which is the number that decides whether anything should be.
+                active
+                    .roost
+                    .as_ref()
+                    .map(|roost| format!("TOWN EYE {}", roost.status()))
+            });
         let scout = active.mining.kestrel.as_ref().map(|kestrel| device::ScoutReadout {
             state: mining::kestrel_state(kestrel),
             endurance: kestrel.endurance,
             cooldown: kestrel.cooldown,
+            rows: scout_rows,
+            job: job_line,
         });
         let pixels = device::render_device(&active.device, &roster, Some(&country), scout.as_ref());
         let (width, height) = active.renderer.size();
@@ -3566,6 +3974,8 @@ impl App {
             &market,
             &active.garage,
             &active.arsenal,
+            &active.intrusion,
+            active.skills.level(skills::SECURITY),
             &active.offers,
         );
         let (width, height) = active.renderer.size();
@@ -4295,6 +4705,9 @@ impl App {
         if let Err(error) = active.arsenal.save(save.root()) {
             log::error!("could not save the arsenal: {error}");
         }
+        if let Err(error) = active.intrusion.save(save.root()) {
+            log::error!("could not save the intrusion kit: {error}");
+        }
         match active.economy.save(save.root()) {
             Ok(()) => log::info!("saved {} town markets", active.economy.tracked()),
             Err(error) => log::error!("could not save the town books: {error}"),
@@ -4471,6 +4884,7 @@ impl ApplicationHandler for App {
         let mut homestead = homestead::Homestead::new();
         let mut town_permits = permits::Permits::new();
         let mut rack = arsenal::Arsenal::default();
+        let mut kit = intrusion::Intrusions::default();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -4483,6 +4897,7 @@ impl ApplicationHandler for App {
             homestead.load(save.root());
             town_permits.load(save.root());
             rack.load(save.root());
+            kit.load(save.root());
         }
         if self.sheriff {
             town_permits.take_office(permits::Office::Sheriff);
@@ -4580,6 +4995,7 @@ impl ApplicationHandler for App {
             shake: 0.0,
             shake_phase: 0.0,
             marks: scout::Marks::default(),
+            intrusion: kit,
             roost: {
                 // The box stands on the hometown security office roof; the
                 // roost is its tenant. Derived from the office's claim so
