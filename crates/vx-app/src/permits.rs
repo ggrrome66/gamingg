@@ -1074,13 +1074,18 @@ mod tests {
         for lesser in [None, Some(Tier::One), Some(Tier::Two)] {
             assert_eq!(breach_bounty(lesser), BOUNTY_BREACH);
         }
-        for other in [BOUNTY_PRYING, BOUNTY_HACK, BOUNTY_BREACH] {
-            assert!(BOUNTY_VAULT > other, "a vault is not the worst thing here");
-        }
+        const {
+            assert!(BOUNTY_VAULT > BOUNTY_PRYING);
+            assert!(BOUNTY_VAULT > BOUNTY_HACK);
+            assert!(BOUNTY_VAULT > BOUNTY_BREACH);
+        };
 
         // And one is enough to bring the warrant chain down on its own —
         // there is no walking this one off by keeping your head down.
-        assert!(BOUNTY_VAULT > WARRANT_THRESHOLD);
+        // A compile-time claim, so it fails at build rather than at test:
+        // tuning the threshold up past the fine would quietly un-warrant the
+        // worst crime in the game.
+        const { assert!(BOUNTY_VAULT > WARRANT_THRESHOLD) };
         let mut permits = Permits::new();
         permits.set_sites(vec![town::home_site()]);
         assert!(permits.caught(BOUNTY_VAULT, 1), "nobody saw the loudest crime");
