@@ -23,6 +23,29 @@ pub const DRILL: &str = "drill";
 pub const CARGO: &str = "cargo";
 /// The kestrel's cell line: each mark shortens the recharge after a flight.
 pub const CELL: &str = "cell";
+/// The pack line: how much you can carry before the weight tells on you.
+pub const PACK: &str = "pack";
+/// The fabricator's rollers: every print finishes sooner. The one line the
+/// counter does not stock — the workshop improves itself, from the inside.
+pub const PRESS: &str = "press";
+/// The suit lamp's reflector: a longer, stronger throw underground.
+pub const LAMP: &str = "lamp";
+
+/// Every line, in the order panels list them.
+pub const LINES: [&str; 6] = [DRILL, CARGO, CELL, PACK, PRESS, LAMP];
+
+/// What each line does, for the panels and the terminal's `kit`.
+pub fn describes(line: &str) -> &'static str {
+    match line {
+        DRILL => "THE DRILL BITES HARDER",
+        CARGO => "EVERY HOLD IN THE FLEET CARRIES MORE",
+        CELL => "THE KESTREL RECHARGES SOONER",
+        PACK => "YOU CARRY MORE BEFORE IT SLOWS YOU",
+        PRESS => "THE FABRICATOR PRINTS FASTER",
+        LAMP => "THE LAMP THROWS FURTHER",
+        _ => "",
+    }
+}
 
 /// Levels each upgrade line can reach.
 pub const MAX_UPGRADE: u32 = 5;
@@ -157,6 +180,32 @@ pub fn boosted_capacity(base: u64, level: u32) -> u64 {
     base + base * level as u64 / 2
 }
 
+/// What you can carry with the pack line applied: +30% of base per mark.
+///
+/// Safe against the replay oracle for a reason worth writing down: the
+/// player's load reaches the journal as a *byte recorded in the
+/// `MoveCommand`*, not as something replay re-derives. An upgrade that
+/// changed how much you can carry would otherwise quietly change how fast
+/// a replayed session walked.
+pub fn pack_capacity(base: u64, level: u32) -> u64 {
+    base + base * 3 * level as u64 / 10
+}
+
+/// How much of a print's time the rollers save: -15% per mark, compounding
+/// no faster than that. Print *timing* is live-only — the journal records
+/// the order, and its replay arm moves the pile in one go — so this can
+/// change freely without the oracle noticing.
+pub fn press_multiplier(level: u32) -> f32 {
+    1.0 / (1.0 + 0.15 * level as f32)
+}
+
+/// The beam with the reflector fitted: +12% reach and +10% strength per
+/// mark. A shader uniform and nothing else, so it never reaches the hash.
+pub fn boosted_beam(strength: f32, reach: f32, level: u32) -> (f32, f32) {
+    let level = level.min(MAX_UPGRADE) as f32;
+    (strength * (1.0 + 0.10 * level), reach * (1.0 + 0.12 * level))
+}
+
 /// The kestrel's full-cell recharge with the cell line applied: a straight
 /// walk from the stock cost down to the best, one fifth per mark.
 pub fn recharge_ticks(level: u32) -> u32 {
@@ -169,6 +218,56 @@ pub fn recharge_ticks(level: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fresh_wallet_is_the_exact_identity_on_every_line() {
+        // The whole promise of the upgrade system in one assertion: level
+        // zero changes nothing at all, on every line, including the ones
+        // this round added.
+        assert_eq!(pack_capacity(400, 0), 400);
+        assert_eq!(press_multiplier(0), 1.0);
+        assert_eq!(boosted_beam(1.5, 16.0, 0), (1.5, 16.0));
+        assert_eq!(drill_multiplier(0), 1.0);
+        assert_eq!(boosted_capacity(400, 0), 400);
+        assert_eq!(recharge_ticks(0), vx_agent::kestrel::COOLDOWN);
+    }
+
+    #[test]
+    fn every_new_line_improves_monotonically_and_caps() {
+        let mut carry = 0;
+        let mut time = f32::MAX;
+        let mut throw = 0.0;
+        for level in 0..=MAX_UPGRADE {
+            let next_carry = pack_capacity(400, level);
+            assert!(next_carry >= carry, "the pack shrank at {level}");
+            carry = next_carry;
+
+            let next_time = press_multiplier(level);
+            assert!(next_time <= time, "the press slowed at {level}");
+            time = next_time;
+
+            let (_, reach) = boosted_beam(1.5, 16.0, level);
+            assert!(reach >= throw, "the lamp dimmed at {level}");
+            throw = reach;
+        }
+        // Past the cap nothing further is owed: a save that somehow holds a
+        // sixth mark gets the fifth mark's effect, never a runaway.
+        assert_eq!(
+            boosted_beam(1.5, 16.0, MAX_UPGRADE + 3),
+            boosted_beam(1.5, 16.0, MAX_UPGRADE)
+        );
+    }
+
+    #[test]
+    fn every_line_is_listed_and_described() {
+        // A line the panels cannot name is a line the player cannot find.
+        for line in LINES {
+            assert!(!describes(line).is_empty(), "{line} has no description");
+            for character in describes(line).chars() {
+                assert!(vx_render::font::knows(character), "undrawable in {line}");
+            }
+        }
+    }
 
     #[test]
     fn earning_and_spending_are_exact_and_overdrafts_refused() {

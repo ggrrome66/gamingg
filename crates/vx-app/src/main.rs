@@ -204,6 +204,8 @@ struct Options {
     people: bool,
     /// Draw the controller scheme overlay, exactly as SELECT shows it.
     pad: bool,
+    /// The terminal's `kit` listing: every upgrade line and what is fitted.
+    kit: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -240,6 +242,7 @@ fn parse_args() -> Result<Options, String> {
         terminal: false,
         people: false,
         pad: false,
+        kit: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -315,6 +318,7 @@ fn parse_args() -> Result<Options, String> {
             "--terminal" => options.terminal = true,
             "--people" => options.people = true,
             "--pad" => options.pad = true,
+            "--kit" => options.kit = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -1482,6 +1486,69 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         );
     }
 
+    if options.kit {
+        // The kit sheet, drawn by the same code the verb uses: real lines,
+        // real costs, real descriptions — a wallet part-way up three of
+        // them so the sheet shows a workshop in progress rather than zeros.
+        let mut fitted = wallet::Wallet::new();
+        fitted.earn(2_400);
+        for _ in 0..3 {
+            fitted.raise(wallet::DRILL);
+        }
+        fitted.raise(wallet::CARGO);
+        fitted.raise(wallet::CARGO);
+        for _ in 0..wallet::MAX_UPGRADE {
+            fitted.raise(wallet::PACK);
+        }
+        fitted.raise(wallet::PRESS);
+
+        let mut console = terminal::Terminal::default();
+        console.toggle();
+        console.say(terminal::Kind::Echo, "> KIT");
+        console.say(
+            terminal::Kind::Note,
+            format!("CREDITS {}", fitted.credits()),
+        );
+        for line in wallet::LINES {
+            let level = fitted.upgrade(line);
+            let next = if level >= wallet::MAX_UPGRADE {
+                "FULL".to_string()
+            } else {
+                format!("{}C", shop::upgrade_cost(level + 1))
+            };
+            console.say(
+                terminal::Kind::Note,
+                format!(
+                    "{:<7} {}/{}  {:<6} {}",
+                    line.to_uppercase(),
+                    level,
+                    wallet::MAX_UPGRADE,
+                    next,
+                    wallet::describes(line)
+                ),
+            );
+        }
+        console.say(terminal::Kind::Echo, "> PRINT PRESS ROLLERS");
+        console.say(terminal::Kind::Note, "FITTED - PRESS NOW 2 OF 5");
+
+        let pixels = terminal::render_terminal(&console, false);
+        let panel_width = terminal::TERM_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = terminal::TERM_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            TERM_SLOT,
+            &context.device,
+            &context.queue,
+            (terminal::TERM_WIDTH, terminal::TERM_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     if options.pad {
         // The scheme panel, exactly as SELECT raises it in play — same
         // renderer, same table the tests hold drawable.
@@ -1581,6 +1648,15 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             fab_skills.add_xp(skills::FABRICATION, 500);
         }
         let fabrication = fab_skills.level(skills::FABRICATION);
+        // A workshop with some marks already fitted: the panel's mark
+        // column is half the point of the shot.
+        let mut fitted = wallet::Wallet::new();
+        for _ in 0..3 {
+            fitted.raise(wallet::DRILL);
+        }
+        fitted.raise(wallet::CARGO);
+        fitted.raise(wallet::PACK);
+        fitted.raise(wallet::PACK);
         let panel = printer::Printer {
             at: Some(vx_core::BlockPos::new(options.at.0 - 5, 0, options.at.1 + 10)),
             open: true,
@@ -1588,11 +1664,15 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             job: Some(printer::Job {
                 recipe: 0,
                 done: 9.1,
-                total: printer::duration(&printer::CATALOGUE[0], fabrication),
+                total: printer::duration(
+                    &printer::CATALOGUE[0],
+                    fabrication,
+                    fitted.upgrade(wallet::PRESS),
+                ),
             }),
             feedback: None,
         };
-        let pixels = printer::render_printer(&panel, Some(&pile), fabrication);
+        let pixels = printer::render_printer(&panel, Some(&pile), fabrication, &fitted);
         let panel_width = printer::PRINT_WIDTH as f32 * shop::SHOP_SCALE;
         let panel_height = printer::PRINT_HEIGHT as f32 * shop::SHOP_SCALE;
         renderer.set_overlay(
@@ -2145,9 +2225,15 @@ impl App {
                     } else {
                         0
                     };
-                let capacity = skills::capacity(
-                    vx_agent::DEFAULT_CAPACITY,
-                    active.skills.level(skills::LOGISTICS),
+                // What you learned, then what you fitted. Safe against the
+                // oracle because the load reaches the journal as the byte
+                // computed below, not as something replay re-derives.
+                let capacity = wallet::pack_capacity(
+                    skills::capacity(
+                        vx_agent::DEFAULT_CAPACITY,
+                        active.skills.level(skills::LOGISTICS),
+                    ),
+                    active.wallet.upgrade(wallet::PACK),
                 );
                 let load = movement::load_byte(carried, capacity);
                 let command = self
@@ -2586,10 +2672,18 @@ impl App {
         // active eye, the visors are how the eye reads what arrives.
         if active.optics.mode == optics::Mode::Lamp {
             let beam = active.optics.beam();
+            // The reflector fits whatever lamp you are carrying, suit or
+            // printed. A shader uniform and nothing else, which is why an
+            // upgrade is allowed to touch it at all.
+            let (strength, reach) = wallet::boosted_beam(
+                beam.strength,
+                beam.reach,
+                active.wallet.upgrade(wallet::LAMP),
+            );
             let eye = active.camera.position;
             let aim = active.camera.forward();
-            sun.lamp_position = [eye.x, eye.y, eye.z, beam.strength];
-            sun.lamp_direction = [aim.x, aim.y, aim.z, beam.reach];
+            sun.lamp_position = [eye.x, eye.y, eye.z, strength];
+            sun.lamp_direction = [aim.x, aim.y, aim.z, reach];
         }
         sun.light[2] = active.optics.shader_mode();
         match active.optics.mode {
@@ -3046,7 +3140,7 @@ impl App {
             active.printer.feedback = Some("NO BASE PILE TO DRAW ON".into());
             return;
         };
-        match active.printer.begin(index, &mut base.stockpile, level) {
+        match active.printer.begin(index, &mut base.stockpile, level, &active.wallet) {
             Ok(()) => {
                 active.journal.record(Command::Print {
                     recipe: index as u32,
@@ -3192,6 +3286,28 @@ impl App {
                     for (name, count) in vault.entries() {
                         lines.push(format!("{:<20} {count}", shop::display_name(name)));
                     }
+                }
+                lines
+            }
+            "kit" => {
+                // The character sheet the game never had: what is fitted,
+                // what it does, and what the next mark costs at a counter.
+                let mut lines = vec![format!("CREDITS {}", active.wallet.credits())];
+                for line in wallet::LINES {
+                    let level = active.wallet.upgrade(line);
+                    let next = if level >= wallet::MAX_UPGRADE {
+                        "FULL".to_string()
+                    } else {
+                        format!("{}C", shop::upgrade_cost(level + 1))
+                    };
+                    lines.push(format!(
+                        "{:<7} {}/{}  {:<6} {}",
+                        line.to_uppercase(),
+                        level,
+                        wallet::MAX_UPGRADE,
+                        next,
+                        wallet::describes(line)
+                    ));
                 }
                 lines
             }
@@ -3633,6 +3749,14 @@ impl App {
             printer::Output::Optic(name) => {
                 active.optics.owned.insert(name.to_string());
                 format!("PRINTED A {}", name.to_uppercase())
+            }
+            printer::Output::Upgrade(line) => {
+                // The same line the counter sells, raised the same way —
+                // this is a second door onto one upgrade, not a second
+                // upgrade system. Live-only, like every other print that is
+                // not a good: the wallet is not state a replay carries.
+                let level = active.wallet.raise(line);
+                format!("FITTED - {} NOW {level} OF {}", line.to_uppercase(), wallet::MAX_UPGRADE)
             }
         };
         active.printer.feedback = Some(line.clone());
@@ -6465,7 +6589,7 @@ impl App {
             .base
             .as_ref()
             .map(|base| &base.stockpile);
-        let pixels = printer::render_printer(&active.printer, pile, level);
+        let pixels = printer::render_printer(&active.printer, pile, level, &active.wallet);
         let (width, height) = active.renderer.size();
         let panel_width = printer::PRINT_WIDTH as f32 * printer::PRINT_SCALE;
         let panel_height = printer::PRINT_HEIGHT as f32 * printer::PRINT_SCALE;

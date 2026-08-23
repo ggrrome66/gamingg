@@ -114,7 +114,14 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // Seventeen adds `Talk` and `Gift` — the townsfolk got names. Talk replays
 // as a no-op like `Scout`; `Gift` takes a good off the base pile, which is
 // state `Rebuilt` carries, so the format change is also a meaning change.
-const VERSION: u32 = 17;
+//
+// Eighteen changes no command at all — it renumbers them. Five upgrade
+// parts joined the fabricator's catalogue *in ladder order*, which shifts
+// the indices `Print` records, so a version-seventeen log replayed here
+// would print the wrong pattern and spend the wrong materials. The same
+// reason twelve exists: recipe indices are content, and the ladder is worth
+// more than an append-only table.
+const VERSION: u32 = 18;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///

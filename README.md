@@ -685,6 +685,34 @@ compiled in. It needs **glibc 2.39 or newer** (SteamOS 3.7+ is fine, 3.6 is not)
 ./dist/gamingg-linux-x86_64
 ```
 
+### The workshop
+
+Upgrades used to be a shelf at the counter: five marks a line, cash only.
+Now every line worth fitting also has a *part* you can print — a **drill
+head**, a **cargo rack**, a **pack frame**, a **lamp reflector** — made out
+of ore and time at your own fabricator. It is the same upgrade either way:
+the same number, applied retroactively to machines already out in the field.
+The counter is for people with money and the printer is for people with a
+mine, which is the argument the fabricator has been making since it shipped.
+
+Three of the lines are new. The **pack** lets you carry more before the
+weight tells on your legs, the **lamp** throws further down a cave, and the
+**press** makes every print finish sooner — and that last one is the single
+thing the counter will not sell you. Rollers for the fabricator come out of
+the fabricator. The panel shows what is fitted on each row (`3/5`), and
+typing `kit` at the terminal prints the whole sheet: every line, what it
+does, and what the next mark costs.
+
+A repeat part never costs more materials than the first one did — the price
+on the row is the price forever. What rises instead is the **skill** each
+successive mark demands, so a fifth drill head is earned rather than bought.
+That is not a balance whim: a recipe's cost is arithmetic the replay oracle
+re-runs, so it has to be the same on both sides of a reload, while the
+question *"may you start this print"* is only ever asked live. The same rule
+cut a fuel-efficiency line from this round — machines burn fuel inside the
+call replay re-runs, so an upgrade there would quietly change where the hole
+ended up.
+
 ### Steam Deck: install once, play in Game Mode
 
 Copy the `dist/` folder onto the Deck (Desktop Mode), then:
@@ -768,7 +796,7 @@ Controls:
 | `[` / `]` | Zoom the minimap out / in |
 | `9` | The electrolyser, to place on a shore |
 | `E` | A word with the nearest townsperson when nothing solid is in reach — their line lands as a toast and in the terminal's transcript |
-| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs |
+| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
 | `F5` | Save |

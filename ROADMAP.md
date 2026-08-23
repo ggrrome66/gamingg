@@ -99,7 +99,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 21 | `38024dc` | Star forts and banks: bastioned traces per town tier with gates, ditches and deterministic breaches, a strongroom in every town behind the first Tier Three lock ever stamped, and foundations under everything |
 | 22 | `9148a77` | The terminal: the font's third user — typed commands, a caret and history, and four hundred lines of scrollback the toasts also land in |
 | 23 | `58bc6ac` | The townsfolk: names, trades and temperaments per person, pure schedules with market days, a friendship ledger with gift tables and tier unlocks, and speech templated over the live simulation |
-| 24 | _this_ | The controller: native gamepad play synthesized into the keyboard and mouse seams, a SELECT-key control scheme overlay, and a one-command Steam Deck installer |
+| 24 | `89aa6b3` | The controller: native gamepad play synthesized into the keyboard and mouse seams, a SELECT-key control scheme overlay, and a one-command Steam Deck installer |
+| 25 | _this_ | The workshop: upgrades printable in materials as well as bought in credits, three new lines (pack, press, lamp), and the rule that an upgrade may not change arithmetic the journal re-runs |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1246,6 +1247,67 @@ does.
 
 ---
 
+## Shipped — Stage 25: the workshop
+
+**Two doors onto one upgrade.** The fabricator has always argued that "the
+counter is for people with money, the printer is for people with a mine".
+Upgrades were the last thing that ignored it: three lines, credits only,
+bought at a shelf. Now every line worth fitting has a *part* — DRILL HEAD,
+CARGO RACK, PACK FRAME, LAMP REFLECTOR — printable out of ore and time, and
+raising the same line the counter raises. Not a second upgrade system: the
+same `wallet` entry, the same retroactive effect on machines already in the
+field, one number.
+
+**The rule this round discovered.** Adding printable upgrades turned up a
+constraint worth writing on the wall: **a recipe's inputs are oracle state;
+its refusal is not.** Replay re-runs `Command::Print` by taking
+`recipe.inputs` off the pile, so a price that scaled with what you already
+own — a wallet level, live-only state a replay does not carry — would have
+the two sides take different amounts and the pile would drift apart within
+one print. So the parts cost a flat price forever, and the *gate* stiffens
+instead: each mark on a line demands `FLOOR_STEP` more Fabrication than the
+last, and `refuse()` is only ever asked live. Two tests pin it — one proves
+the charge does not move when the wallet does, one walks a line from zero
+to five and checks the floor rises every time and that a sixth is refused
+at any skill.
+
+**Three new lines, chosen by the same rule.** Every effect had to be
+something the journal does not re-derive:
+
+- **PACK** — carry more before the weight tells on you. Legal because the
+  player's load reaches the log as a *byte recorded in the `MoveCommand`*,
+  not as something replay recomputes.
+- **PRESS** — every print finishes sooner. Legal because print *timing* is
+  live-only; the journal records the order and its replay arm moves the pile
+  in one go.
+- **LAMP** — a longer, stronger throw on whichever lamp you carry. Legal
+  because it is a shader uniform and reaches nothing else.
+
+A fourth candidate was cut for failing the same test: fuel efficiency.
+Burning happens *inside* `Mining::advance`, which is exactly the call
+`Command::Advance` replays, so a wallet-dependent burn rate would run the
+crew dry at a different tick and leave a different hole. The rule earned its
+first refusal before it earned its first feature.
+
+**The press is the one line the counter will not sell.** Rollers for the
+fabricator come out of the fabricator, which gives the machine a reason to
+be stood in front of rather than ordered from. The panel now shows marks
+per row (`3/5`), and the terminal's new `kit` verb prints the character
+sheet the game never had: every line, what is fitted, what the next mark
+costs in credits, and what it actually does.
+
+Journal **VERSION 18** — no command changed, but five rows joined the
+catalogue in ladder order and that renumbers the indices `Print` records.
+The same reason twelve exists: recipe indices are content.
+
+**Deliberately not in 25:** per-machine fitments (a drone that is *this*
+drone, with its own parts) — that wants machines to be distinguishable
+first, which is the wear round's job; recycling a printed thing back into
+materials; upgrade lines that touch replayed arithmetic, now formally out of
+bounds rather than merely absent; and a sixth mark on any line.
+
+---
+
 ## Planned — the civic layer: permits, offices, elections
 
 The town-law arc, in three rounds. The user's design, recorded whole so none of
@@ -1338,14 +1400,13 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-Renumbered again after the townsfolk (23) and the controller round (24)
-took their slots: the plans kept their order, the stages moved down to make
-room.
+Renumbered again after the townsfolk (23), the controller (24) and the
+workshop (25) took their slots: the plans kept their order, the stages moved
+down to make room.
 
 | Stage | What | Why here |
 |---|---|---|
-| 25 | Crafting + upgrades | Needs the fuel and trade economies to have something to feed |
-| 26 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 |
+| 26 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 — and parts to mend them with, which the workshop (25) now prints |
 | 27 | Hostiles and health | The half of combat stage 13 leaves out — and the people note's combat half lands here: policies emitting `MoveCommand` through the player integrator, composure driven off the `nerve` stage 23 already derived, modes from Fight down to Surrender, cover as occlusion sampled at three eye heights |
 | 28 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 27 brings. Squads bounded on purpose: pairs move alternately, a pair that loses its partner takes the ally-down composure hit — suppression and command layers explicitly out of scope. Surrender feeds the arrest verb, the jailhouse and capture contracts |
 | 29 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
@@ -1354,7 +1415,7 @@ room.
 
 ## The feature map
 
-The whole game at a glance, as of stage 24.
+The whole game at a glance, as of stage 25.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1407,9 +1468,12 @@ templated over live prices, bounty and fuel state);
 native gamepad play (buttons synthesized into the keyboard seams,
 context-sensitive face buttons, analog sticks with a rescaled deadzone, a
 SELECT control-scheme overlay) and a one-command Steam Deck installer;
+the workshop (upgrade parts printed from ore as a second route to the same
+lines the counter sells, the pack, press and lamp lines, and the rule that
+an upgrade may not touch arithmetic the journal re-runs);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** crafting; wear and breakdowns; hostiles and health
+**Planned, in arc order:** wear and breakdowns; hostiles and health
 (and with them bunkers occupied, and the people note's combat half — nerve,
 cover, surrender and the arrest verb);
 the civic layer B2 (offices, the NPC economic loop, the warrant chain) and

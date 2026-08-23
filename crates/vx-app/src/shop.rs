@@ -187,7 +187,16 @@ impl Shop {
                 }
             }
         }
-        for line in [wallet::DRILL, wallet::CARGO, wallet::CELL] {
+        // The press is deliberately absent: the workshop is the only place
+        // that sells rollers for itself, which is what makes a fabricator
+        // worth standing in front of rather than a counter.
+        for line in [
+            wallet::DRILL,
+            wallet::CARGO,
+            wallet::CELL,
+            wallet::PACK,
+            wallet::LAMP,
+        ] {
             // The cell line only means anything to a kestrel owner.
             if line == wallet::CELL && shed.owned(garage::KESTREL) == 0 {
                 continue;
@@ -602,6 +611,11 @@ mod tests {
                 Row::BuyLauncher,
                 Row::Buy(wallet::DRILL),
                 Row::Buy(wallet::CARGO),
+                // The pack and the reflector are counter goods too; the
+                // press is not, and its absence here is the point — the
+                // workshop is the only place that sells rollers for itself.
+                Row::Buy(wallet::PACK),
+                Row::Buy(wallet::LAMP),
             ],
             "the shelf should list every traded good in the pile and nothing else"
         );
@@ -614,6 +628,10 @@ mod tests {
         let rows = Shop::rows(Some(&pile), &maxed, &market, &Garage::new(), &Arsenal::default(), &Intrusions::default(), 1, &[]);
         assert!(!rows.contains(&Row::Buy(wallet::DRILL)));
         assert!(rows.contains(&Row::Buy(wallet::CARGO)));
+        assert!(
+            !rows.contains(&Row::Buy(wallet::PRESS)),
+            "the counter is selling press rollers"
+        );
     }
 
     #[test]
