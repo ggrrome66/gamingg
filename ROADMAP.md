@@ -100,7 +100,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 22 | `9148a77` | The terminal: the font's third user — typed commands, a caret and history, and four hundred lines of scrollback the toasts also land in |
 | 23 | `58bc6ac` | The townsfolk: names, trades and temperaments per person, pure schedules with market days, a friendship ledger with gift tables and tier unlocks, and speech templated over the live simulation |
 | 24 | `89aa6b3` | The controller: native gamepad play synthesized into the keyboard and mouse seams, a SELECT-key control scheme overlay, and a one-command Steam Deck installer |
-| 25 | _this_ | The workshop: upgrades printable in materials as well as bought in credits, three new lines (pack, press, lamp), and the rule that an upgrade may not change arithmetic the journal re-runs |
+| 25 | `c235ac7` | The workshop: upgrades printable in materials as well as bought in credits, three new lines (pack, press, lamp), and the rule that an upgrade may not change arithmetic the journal re-runs |
+| 26 | _this_ | Wear and recovery: machines age by the tick they work, the worst one sets the crew's pace, and spare parts printed at the workshop mend them — the first machine state that had to live inside the replayed simulation |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1308,6 +1309,156 @@ bounds rather than merely absent; and a sixth mark on any line.
 
 ---
 
+## Shipped — Stage 26: wear, and what mends it
+
+**The first machine state that had to be oracle state.** Every other number
+a player accumulates in this game — credits, upgrade marks, optics,
+friendships — is live-only by design, deliberately outside the replay hash.
+Wear cannot be, and the reason is the whole round: a worn crew digs slower,
+a seized crew stops, and *how long a crew turned* is exactly what decides
+where the hole ends up. So the ledger lives inside `Mining`, beside the fuel
+tank, which is the struct `Rebuilt` carries — replay re-runs the same ticks,
+re-derives the same wear, and the two sides cannot disagree about how much
+ground got cut. Stage 25 said an upgrade may not touch arithmetic the
+journal re-runs; this round is the other half of that rule, a system that
+*must*, and so had to be built where the oracle can see it.
+
+**A seized tick is a tick nobody works** — the same sentence the fuel loop
+wrote, deliberately. Wear plugs into `Mining::advance` beside `fuelled()`,
+one gate below the other, and reads as its sibling: fuel decides whether the
+crew *can* turn, wear decides whether it *does*.
+
+**Ticks worked, never seconds elapsed.** A machine parked in the garage ages
+not at all; one that dug all night is ruined. A session recorded at nine
+frames a second wears identically to one at three hundred, for the same
+reason the journal counts ticks rather than time.
+
+**Fresh → Worn → Failing → Seized**, at 4 400 / 8 800 / 13 200 worked ticks,
+losing one tick in five, then one in two, then all of them. A pleasing
+consequence falls out of charging wear only on ticks that *turn*: a failing
+machine wears more slowly than a fresh one, because it is working less. The
+last stretch of a machine's life is the longest, decay curves rather than
+falls off a cliff, and a test pins the ordering.
+
+**The worst machine sets the pace.** A crew works as a crew, and the duty
+cycle comes off the worst condition in it rather than an average — an
+average is something a player must be *told*, a worst is something they can
+*see*. The roster names the bad machine, the HUD says so out loud when one
+starts failing, and mending that one machine visibly hands the dig back.
+
+**Recovery closes the loop the workshop opened.** Spare parts are a printed
+good, low on the fabricator's ladder on purpose: a fleet that cannot be
+mended is a fleet that dies of old age, and nobody should meet that wall
+before they can print their way past it. `repair` at the terminal mends the
+worst machine, or a named one. `Command::Repair` is journalled — the most
+oracle-entangled order in the log — and both the live game and the replay
+arm run one `Wear::repair`, so there is no second implementation to drift.
+Journal **VERSION 19**.
+
+**Deliberately not in 26:** per-machine fitments and parts (a drone that is
+*this* drone); wear on the kestrel, which runs on a cell and a cooldown and
+would be charged twice; machines that break *catastrophically* rather than
+seizing; and repair as a thing you must physically travel to — you already
+can pilot to a machine, and making it mandatory is a fetch quest wearing a
+maintenance costume.
+
+---
+
+## Planned — the hunt: how hostiles will search, shoot and stalk
+
+A design note arrived extending the combat half of the people note, and it
+is recorded whole here — as every note before it has been, because this file
+is the one record and a second copy is a second thing to drift. It is the
+*engine* the next two rounds assemble rather than invent. Its thesis: the famous failures of game
+AI — enemies that do not search, do not survive, do not check their fire,
+cannot walk, and never hunt — are pipeline rot, not intelligence problems.
+Baked navmeshes desync from streamed worlds; hand-annotated cover goes
+stale; the AI reads a copy of a world that moved on. **This engine has none
+of those failure modes available to it**: the world *is* the grid, cover and
+navigation are derived from live voxels on demand, and derived data cannot
+rot. Most of the work is the discipline of not reintroducing by habit the
+problems the architecture already solved.
+
+**Belief, not position.** Each squad holds a last-known position with a
+confidence that decays — exactly the model the kestrel's marks already give
+the player, and the symmetry is the point. Their intelligence about you goes
+stale the way yours goes stale about them, breaking line of sight means the
+same thing on both sides, and stealth becomes a system rather than a stat.
+
+**Search is an occupancy map, and the map is the behaviour.** Probability
+diffuses from the last-known position across walkable cells each tick;
+searchers move to the highest-probability cell they can reach; every cell
+they see is zeroed. Sweeping rooms, covering exits and doubling back all
+fall out of the arithmetic, with no scripted search points and no cheating —
+the map literally cannot send a searcher where the player provably is not.
+Below a mass threshold they give up, visibly: weapon lowered, patrol
+resumed, a line landed.
+
+**Cover is only cover against a belief**, so re-scoring when the belief
+moves *is* the flanking mechanic; suppression is composure spent faster than
+cover restores it, which hands the player pinning as a verb without a new
+system. **Nobody fires through a friend**: two `sight::obstruction` checks —
+allies count as blockers at the shot, and the cover scorer charges for
+standing in an ally's lane — enforced as an invariant rather than tuned.
+Allies extend the same courtesy to the player, because the player's yaw is
+already in the command stream.
+
+**A progress watchdog bounds the one failure players never forgive.** An
+agent that closes no distance in `STUCK_TICKS` replans; twice stuck, it
+abandons the approach. Flow fields already derive from the live grid, so a
+dug wall is in the next field rather than in a mesh three patches stale;
+people-shaped traversal costs reuse the player's own movement
+classification, so a route a hostile takes is a route a player could.
+
+**The stalker is two brains, and it hunts by ear.** A director that knows
+the truth but feeds the creature only *zone-grade hints* — a 32-metre cell,
+never a position — and a creature that must close the rest with the same
+occupancy search as anyone else, so it genuinely hunts and can genuinely be
+evaded. What makes it belong to *this* game: hints are weighted by noise,
+**and machines are loud**. Drills, crews, the fuel loop's burners — every
+report the roost can hear, the deep thing hears better. A dig site in
+stalker country is a dinner bell, so the tension attaches to the core mining
+loop rather than to a haunted corridor: run the swarm loud and rich, run it
+slow and quiet, or dig decoy noise a valley over and work in the shadow of
+your own diversion. Pacing is the director's other job — a pressure budget,
+forced back-off, a floor distance it never spawns inside.
+
+**Intelligence the player cannot perceive is intelligence wasted.** Every
+mode transition lands a tell through the toast-and-terminal channel the
+townsfolk round built. The search that sweeps a room in silence may as well
+be random; the same search behind "check the far side" is the smartest enemy
+the player has ever met.
+
+| Constant | Value |
+|---|---|
+| `LKP_DECAY` | confidence 100 → 0 over 45 s unseen (matches the kestrel's marks, on purpose) |
+| `DIFFUSE_RATE` | 0.18 per tick to open neighbours |
+| `GIVE_UP` | total mass < 0.15 |
+| `LANE_W` | 1.5 m ally firing lane, charged in the cover score |
+| `SUPPRESS_NEAR` | impact within 2 m, composure −8 |
+| `STUCK_TICKS` | 40 (~0.6 s) |
+| `HINT_GRADE` | 32 m zone — the director never says more |
+| `HINT_NOISE_W` | report loudness × 3 |
+| `BACK_OFF` | forced ≥ 60 s after 90 s pressure |
+| `NO_SPAWN_R` | 48 m |
+
+**How it lands against this roadmap.** The note sequences itself by what a
+part has to attach to, which maps onto the arc as it now stands:
+
+| Part | Stage | Why there |
+|---|---|---|
+| `belief.rs`, the occupancy search, the watchdog | 27 | lands with the first hostile — there is nothing to hold a belief until then |
+| Fire discipline and lane costs | 27–28 | needs a *pair* of hostiles before "do not shoot your friend" can be violated |
+| The director and its pacing budget | 28 | arrives with the occupied bunkers it paces |
+| The stalker, and noise-weighted hints | 30 | waits until the deep caves have somewhere worth being afraid of |
+
+Its tests come with it, and one is a house rule restated: **all of it
+replays** — a firefight's journal reproduces every mode transition at the
+same tick, hunting AI covered by the oracle like everything else. Nothing in
+the note blocks the civic half, which shipped in stage 23.
+
+---
+
 ## Planned — the civic layer: permits, offices, elections
 
 The town-law arc, in three rounds. The user's design, recorded whole so none of
@@ -1400,22 +1551,22 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-Renumbered again after the townsfolk (23), the controller (24) and the
-workshop (25) took their slots: the plans kept their order, the stages moved
-down to make room.
+Renumbered again after the townsfolk (23), the controller (24), the
+workshop (25) and wear (26) took their slots: the plans kept their order,
+the stages moved down to make room. The hunt note above supplies the engine
+for 27 and 28; the stalker waits for 30.
 
 | Stage | What | Why here |
 |---|---|---|
-| 26 | Wear, breakdowns, recovery | Machines that can fail need machines you can reach — piloting shipped in 7 — and parts to mend them with, which the workshop (25) now prints |
-| 27 | Hostiles and health | The half of combat stage 13 leaves out — and the people note's combat half lands here: policies emitting `MoveCommand` through the player integrator, composure driven off the `nerve` stage 23 already derived, modes from Fight down to Surrender, cover as occlusion sampled at three eye heights |
-| 28 | Bunkers, occupied | Mobs and military. Held until here because both attack you, and that needs the health model stage 27 brings. Squads bounded on purpose: pairs move alternately, a pair that loses its partner takes the ally-down composure hit — suppression and command layers explicitly out of scope. Surrender feeds the arrest verb, the jailhouse and capture contracts |
+| 27 | Hostiles and health | The half of combat stage 13 leaves out — and where the hunt note's belief, occupancy search and stuck watchdog land, alongside the people note's combat half: policies emitting `MoveCommand` through the player integrator, composure driven off the `nerve` stage 23 already derived, modes from Fight down to Surrender, cover as occlusion sampled at three eye heights |
+| 28 | Bunkers, occupied | Mobs and military, and the hunt note's director with its pacing budget and zone-grade hints. Held until here because both attack you, and that needs the health model stage 27 brings. Squads bounded on purpose: pairs move alternately, a pair that loses its partner takes the ally-down composure hit — suppression and command layers explicitly out of scope. Surrender feeds the arrest verb, the jailhouse and capture contracts |
 | 29 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
-| 30 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore |
+| 30 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore. The hunt note's stalker lands here too: it waits until the deep places are worth being afraid of, and hunts by the noise a working mine makes |
 | 31 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 25.
+The whole game at a glance, as of stage 26.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1471,9 +1622,12 @@ SELECT control-scheme overlay) and a one-command Steam Deck installer;
 the workshop (upgrade parts printed from ore as a second route to the same
 lines the counter sells, the pack, press and lamp lines, and the rule that
 an upgrade may not touch arithmetic the journal re-runs);
+wear and recovery (machines age by the tick they work, the worst one sets
+the crew's pace, printed spare parts mend them, and the ledger lives inside
+the replayed simulation because it decides how much ground gets cut);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** wear and breakdowns; hostiles and health
+**Planned, in arc order:** hostiles and health
 (and with them bunkers occupied, and the people note's combat half — nerve,
 cover, surrender and the arrest verb);
 the civic layer B2 (offices, the NPC economic loop, the warrant chain) and

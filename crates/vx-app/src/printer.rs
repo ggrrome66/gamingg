@@ -128,6 +128,19 @@ pub const CATALOGUE: &[Recipe] = &[
         floor: 1,
     },
     Recipe {
+        label: "SPARE PARTS X4",
+        output: Output::Good {
+            name: crate::wear::SPARE_PART,
+            count: 4,
+        },
+        // Low on the ladder on purpose: a fleet that cannot be mended is a
+        // fleet that dies of old age, and nobody should meet that wall
+        // before they can print their way out of it.
+        inputs: &[("engine:copper_bar", 2), ("engine:stone", 6)],
+        seconds: 16.0,
+        floor: 3,
+    },
+    Recipe {
         label: "METAL WALL X2",
         output: Output::Good {
             name: "engine:metal_wall",
@@ -486,6 +499,7 @@ mod tests {
                 "SLUGS X8",
                 "COPPER BAR",
                 "PLANKS X4",
+                "SPARE PARTS X4",
                 "METAL WALL X2",
                 "HIGH BEAM LAMP",
                 "DRILL HEAD",

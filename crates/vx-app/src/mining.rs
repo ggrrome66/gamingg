@@ -69,6 +69,12 @@ pub struct Mining {
     /// decides how much ground gets dug, and ground is what the hash covers:
     /// replay carries this struct, so replay carries the tank.
     pub tank: crate::fuel::Tank,
+    /// What the work is costing the machines doing it. Beside the tank for
+    /// the same reason and by the same argument: a worn crew digs slower, a
+    /// seized one stops, and how long a crew dug is what decides where the
+    /// hole ends up — so replay carries this struct, and replay carries the
+    /// wear.
+    pub wear: crate::wear::Wear,
     /// Fractional ticks carried between frames, so the drone runs at a steady
     /// rate rather than at whatever the frame rate happens to be.
     pending: f64,
@@ -126,6 +132,9 @@ pub struct MachineListing {
     pub name: String,
     /// What it is up to, in a word.
     pub state: String,
+    /// How it is holding up. The roster is where a player learns which
+    /// machine is the one dragging the crew.
+    pub condition: crate::wear::Condition,
     /// How far the player is from it, in blocks.
     pub distance: f32,
     pub cargo: u64,
@@ -141,6 +150,7 @@ impl Default for Mining {
             chosen: 0,
             operation: None,
             tank: crate::fuel::Tank::default(),
+            wear: crate::wear::Wear::default(),
             pinned: Vec::new(),
             last_ticks: 0,
             pending: 0.0,
@@ -366,6 +376,9 @@ impl Mining {
                 if !self.fuelled() {
                     break;
                 }
+                if !self.turning() {
+                    continue;
+                }
                 self.pilot_sub_tick(world, events);
                 let tick = self.fleet.tick(world, &mut []);
                 report.delivered += tick.delivered;
@@ -383,6 +396,12 @@ impl Mining {
         for _ in 0..ticks {
             if !self.fuelled() {
                 break;
+            }
+            // Worn machines lose ticks; seized ones lose all of them. The
+            // fuel is still spent — a machine that will not turn has still
+            // been asked to.
+            if !self.turning() {
+                continue;
             }
             worked += 1;
             self.pilot_sub_tick(world, events);
@@ -413,6 +432,21 @@ impl Mining {
             .as_ref()
             .map_or(0, |operation| operation.drones.len() as u32);
         diggers + self.fleet.fliers.len() as u32
+    }
+
+    /// Charge one tick's wear to the crew and answer whether it turns.
+    ///
+    /// A seized tick is a tick nobody works — exactly the shape of the dry
+    /// tick above, and for the same reason: both are decided inside the
+    /// call `Command::Advance` replays, so both sides reach the same answer
+    /// without either re-deciding anything.
+    fn turning(&mut self) -> bool {
+        let diggers = self
+            .operation
+            .as_ref()
+            .map_or(0, |operation| operation.drones.len());
+        let fliers = self.fleet.fliers.len();
+        self.wear.tick(diggers, fliers)
     }
 
     /// Spend one tick's fuel, drawing on the base pile. False when dry.
@@ -588,6 +622,7 @@ impl Mining {
                 let machine = MachineRef::Digger(index);
                 rows.push(MachineListing {
                     machine,
+                    condition: self.wear.condition(machine),
                     name: format!("DIGGER {}", index + 1),
                     state: match drone.state {
                         DroneState::Idle => "IDLE".into(),
@@ -609,6 +644,7 @@ impl Mining {
             let machine = MachineRef::Kestrel;
             rows.push(MachineListing {
                 machine,
+                condition: self.wear.condition(machine),
                 name: "KESTREL".into(),
                 state: kestrel_state(kestrel).into(),
                 distance: self
@@ -622,6 +658,7 @@ impl Mining {
             let machine = MachineRef::Kestrel;
             rows.push(MachineListing {
                 machine,
+                condition: self.wear.condition(machine),
                 name: "KESTREL".into(),
                 state: kestrel_state(kestrel).into(),
                 distance: self
@@ -635,6 +672,7 @@ impl Mining {
             let machine = MachineRef::Flier(index);
             rows.push(MachineListing {
                 machine,
+                condition: self.wear.condition(machine),
                 name: format!("FLIER {}", index + 1),
                 state: match flier.state {
                     FlierState::Idle => "IDLE".into(),
@@ -813,6 +851,17 @@ impl Mining {
 
     /// A one-line readout for the title bar.
     pub fn status(&self) -> Option<String> {
+        // A seized crew outranks everything: it is the reason nothing else
+        // on this line is happening, and a player staring at a stopped dig
+        // deserves to be told why rather than left to work it out.
+        let diggers = self
+            .operation
+            .as_ref()
+            .map_or(0, |operation| operation.drones.len());
+        if let Some(complaint) = self.wear.complaint(diggers, self.fleet.fliers.len()) {
+            return Some(complaint.to_lowercase());
+        }
+
         // A working flier outranks the mining readout: it is the thing the
         // player just ordered.
         if let Some(machine) = self.piloted {

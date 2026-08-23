@@ -414,6 +414,7 @@ mod tests {
     fn roster() -> Vec<MachineListing> {
         vec![
             MachineListing {
+                condition: crate::wear::Condition::Fresh,
                 machine: MachineRef::Digger(0),
                 name: "DIGGER 1".into(),
                 state: "DIGGING".into(),
@@ -422,6 +423,7 @@ mod tests {
                 capacity: 64,
             },
             MachineListing {
+                condition: crate::wear::Condition::Fresh,
                 machine: MachineRef::Flier(0),
                 name: "FLIER 1".into(),
                 state: "SCANNING".into(),

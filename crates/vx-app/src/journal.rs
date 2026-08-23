@@ -121,7 +121,13 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // would print the wrong pattern and spend the wrong materials. The same
 // reason twelve exists: recipe indices are content, and the ladder is worth
 // more than an append-only table.
-const VERSION: u32 = 18;
+//
+// Nineteen adds `Repair`. Wear is the first machine state that had to live
+// *inside* the replayed `Mining` rather than beside it in a live-only file,
+// because how long a crew turned is what decides where the hole ends up —
+// so mending a machine is an order the log must carry, and its replay arm
+// spends the same parts off the same pile.
+const VERSION: u32 = 19;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -246,6 +252,42 @@ pub enum Command {
         person: u8,
         good: String,
     },
+    /// A machine mended: spare parts off the pile, its wear back to nothing.
+    ///
+    /// The most oracle-entangled order in the log. Wear decides how many
+    /// ticks a crew actually turns, turning decides how much ground it cuts,
+    /// and ground is the hash — so a replay that skipped a repair would dig
+    /// a visibly different hole. Both sides run `Wear::repair`, one
+    /// function, no second implementation to drift.
+    Repair { machine: MachineTag },
+}
+
+/// Which machine an order names, on the wire.
+///
+/// A tag rather than [`crate::mining::MachineRef`] because the wire is a
+/// format and the enum is code: the kestrel is absent here because it takes
+/// no wear, and if that ever changes it is a version bump, loudly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineTag {
+    Digger(u32),
+    Flier(u32),
+}
+
+impl MachineTag {
+    pub fn of(machine: crate::mining::MachineRef) -> Option<MachineTag> {
+        match machine {
+            crate::mining::MachineRef::Digger(index) => Some(MachineTag::Digger(index as u32)),
+            crate::mining::MachineRef::Flier(index) => Some(MachineTag::Flier(index as u32)),
+            crate::mining::MachineRef::Kestrel => None,
+        }
+    }
+
+    pub fn machine(self) -> crate::mining::MachineRef {
+        match self {
+            MachineTag::Digger(index) => crate::mining::MachineRef::Digger(index as usize),
+            MachineTag::Flier(index) => crate::mining::MachineRef::Flier(index as usize),
+        }
+    }
 }
 
 /// What the gold panel may order.
@@ -594,6 +636,13 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
         // outside the hash, so it draws the same line — and so does a word
         // with a neighbour: talk moves disposition, kept in its own ledger.
         Command::Scout(_) | Command::Intrude(_) | Command::Talk { .. } => {}
+        Command::Repair { machine } => {
+            // One function, both sides: the parts come off the pile and the
+            // ledger resets, or neither happens.
+            if let Some(base) = state.mining.fleet.base.as_mut() {
+                state.mining.wear.repair(machine.machine(), &mut base.stockpile);
+            }
+        }
         Command::Gift { good, .. } => {
             // One good, off the pile, both sides. What it earned is in the
             // disposition ledger, outside the hash.
@@ -822,6 +871,19 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             file.write_all(&town.0.to_le_bytes())?;
             file.write_all(&town.1.to_le_bytes())?;
             file.write_all(&[*person])?;
+        }
+        Command::Repair { machine } => {
+            file.write_all(&[21u8])?;
+            match machine {
+                MachineTag::Digger(index) => {
+                    file.write_all(&[0u8])?;
+                    file.write_all(&index.to_le_bytes())?;
+                }
+                MachineTag::Flier(index) => {
+                    file.write_all(&[1u8])?;
+                    file.write_all(&index.to_le_bytes())?;
+                }
+            }
         }
         Command::Gift { town, person, good } => {
             file.write_all(&[20u8])?;
@@ -1117,6 +1179,19 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
                 person: person[0],
                 good,
             }
+        }
+        21 => {
+            let mut kind = [0u8; 1];
+            file.read_exact(&mut kind)?;
+            let index = read_u32(file)?;
+            let machine = match kind[0] {
+                0 => MachineTag::Digger(index),
+                1 => MachineTag::Flier(index),
+                other => {
+                    return Err(std::io::Error::other(format!("unknown machine tag {other}")))
+                }
+            };
+            Command::Repair { machine }
         }
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
@@ -1896,6 +1971,55 @@ mod fire_tests {
         banks.deposit((0, 0), "engine:copper_ore", 240, &mut pile);
         assert_eq!(banks.stored((0, 0)), 240);
         assert_eq!(pile.count("engine:copper_ore"), 0);
+    }
+
+    #[test]
+    fn a_repair_round_trips_and_replays_to_the_same_pile() {
+        let directory =
+            std::env::temp_dir().join(format!("vx-journal-repair-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let orders = [
+            Command::Repair {
+                machine: MachineTag::Digger(0),
+            },
+            Command::Repair {
+                machine: MachineTag::Flier(3),
+            },
+        ];
+        let mut journal = CommandLog::default();
+        for order in &orders {
+            journal.record(order.clone());
+        }
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let recovered: Vec<Command> = read_back
+            .entries()
+            .iter()
+            .map(|entry| entry.command.clone())
+            .collect();
+        assert_eq!(recovered, orders.to_vec(), "a repair did not survive the wire");
+
+        // And the arm both sides run spends exactly the same parts: a worn
+        // machine, mended once, leaves the pile short by one repair's worth
+        // and the machine fresh.
+        let mut wear = crate::wear::Wear::default();
+        for _ in 0..crate::wear::WORN_AT {
+            wear.tick(1, 0);
+        }
+        let mut pile = vx_agent::Stockpile::new();
+        pile.add(crate::wear::SPARE_PART, 5);
+        assert!(wear.repair(crate::mining::MachineRef::Digger(0), &mut pile));
+        assert_eq!(
+            pile.count(crate::wear::SPARE_PART),
+            5 - crate::wear::PARTS_PER_REPAIR
+        );
+        assert_eq!(
+            wear.condition(crate::mining::MachineRef::Digger(0)),
+            crate::wear::Condition::Fresh
+        );
     }
 
     #[test]

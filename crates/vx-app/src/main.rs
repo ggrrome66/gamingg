@@ -49,6 +49,7 @@ mod terminal;
 mod tuning;
 mod view;
 mod villagers;
+mod wear;
 mod wallet;
 
 use std::sync::Arc;
@@ -206,6 +207,8 @@ struct Options {
     pad: bool,
     /// The terminal's `kit` listing: every upgrade line and what is fitted.
     kit: bool,
+    /// A worn crew on the terminal: the roster with conditions, and a mend.
+    wear: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -243,6 +246,7 @@ fn parse_args() -> Result<Options, String> {
         people: false,
         pad: false,
         kit: false,
+        wear: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -319,6 +323,7 @@ fn parse_args() -> Result<Options, String> {
             "--people" => options.people = true,
             "--pad" => options.pad = true,
             "--kit" => options.kit = true,
+            "--wear" => options.wear = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -1466,6 +1471,72 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         console.say(
             terminal::Kind::Note,
             format!("{}: NOW THAT IS A FINE THING (+62)", speaker.name),
+        );
+
+        let pixels = terminal::render_terminal(&console, false);
+        let panel_width = terminal::TERM_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = terminal::TERM_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            TERM_SLOT,
+            &context.device,
+            &context.queue,
+            (terminal::TERM_WIDTH, terminal::TERM_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
+    if options.wear {
+        // A crew part-way through its life, drawn from the real ledger:
+        // every condition below is what `Wear` says about ticks worked, and
+        // the mend spends what `Wear::repair` spends.
+        let mut ledger = wear::Wear::default();
+        // Three diggers and a flier, worked until the second digger is in
+        // trouble. Ticking the real ledger is what makes the row honest.
+        while ledger.condition(mining::MachineRef::Digger(0)) != wear::Condition::Failing {
+            ledger.tick(3, 1);
+        }
+        // Then mend one of them, so the roster shows a spread rather than a
+        // row of identical numbers.
+        let mut pile = vx_agent::Stockpile::new();
+        pile.add(wear::SPARE_PART, 8);
+        ledger.repair(mining::MachineRef::Digger(2), &mut pile);
+
+        let mut console = terminal::Terminal::default();
+        console.toggle();
+        console.say(terminal::Kind::Echo, "> FLEET");
+        for (name, state, machine) in [
+            ("DIGGER 1", "DIGGING", mining::MachineRef::Digger(0)),
+            ("DIGGER 2", "HAULING", mining::MachineRef::Digger(1)),
+            ("DIGGER 3", "DIGGING", mining::MachineRef::Digger(2)),
+            ("FLIER 1", "FERRYING", mining::MachineRef::Flier(0)),
+        ] {
+            console.say(
+                terminal::Kind::Note,
+                format!(
+                    "{:<12} {:>5}M  {:<9} {}",
+                    name,
+                    18,
+                    state,
+                    ledger.condition(machine).name()
+                ),
+            );
+        }
+        console.say(terminal::Kind::Note, "A MACHINE IS FAILING - REPAIR IT");
+        console.say(terminal::Kind::Echo, "> REPAIR");
+        console.say(
+            terminal::Kind::Note,
+            format!("DIGGER 1 MENDED - {} PARTS SPENT", wear::PARTS_PER_REPAIR),
+        );
+        console.say(terminal::Kind::Echo, "> PILE");
+        console.say(
+            terminal::Kind::Note,
+            format!("{:<20} {}", "SPARE PART", pile.count(wear::SPARE_PART) - wear::PARTS_PER_REPAIR),
         );
 
         let pixels = terminal::render_terminal(&console, false);
@@ -3221,7 +3292,13 @@ impl App {
                 }
                 rows.into_iter()
                     .map(|row| {
-                        format!("{:<12} {:>5}M  {}", row.name, row.distance as i32, row.state)
+                        format!(
+                            "{:<12} {:>5}M  {:<9} {}",
+                            row.name,
+                            row.distance as i32,
+                            row.state,
+                            row.condition.name()
+                        )
                     })
                     .collect()
             }
@@ -3289,6 +3366,7 @@ impl App {
                 }
                 lines
             }
+            "repair" => self.mend(args),
             "kit" => {
                 // The character sheet the game never had: what is fitted,
                 // what it does, and what the next mark costs at a counter.
@@ -3356,6 +3434,62 @@ impl App {
             }
             _ => vec![],
         }
+    }
+
+    /// Mend a machine: the named one, or whichever is worst.
+    ///
+    /// Goes through the journal like every other order that moves the pile,
+    /// and through `Wear::repair` like the replay arm does — the live game
+    /// and the oracle run one function between them.
+    fn mend(&mut self, args: &[String]) -> Vec<String> {
+        let Some(active) = &mut self.active else {
+            return Vec::new();
+        };
+        let rows = active.mining.roster(active.player.position);
+        let wanted: Option<mining::MachineRef> = if args.is_empty() {
+            // No name: the machine holding everyone else up, which is the
+            // one the player means nine times in ten.
+            rows.iter()
+                .filter(|row| row.condition != wear::Condition::Fresh)
+                .max_by_key(|row| row.condition)
+                .map(|row| row.machine)
+        } else {
+            let wanted = args.join(" ").to_uppercase();
+            rows.iter()
+                .find(|row| row.name == wanted)
+                .map(|row| row.machine)
+        };
+
+        let Some(machine) = wanted else {
+            return if args.is_empty() {
+                vec!["EVERY MACHINE IS FRESH".into()]
+            } else {
+                vec![format!("NO SUCH MACHINE: {}", args.join(" ").to_uppercase())]
+            };
+        };
+        let Some(tag) = journal::MachineTag::of(machine) else {
+            return vec!["THE KESTREL TAKES NO WEAR".into()];
+        };
+        let name = rows
+            .iter()
+            .find(|row| row.machine == machine)
+            .map_or_else(String::new, |row| row.name.clone());
+
+        let Some(base) = active.mining.fleet.base.as_mut() else {
+            return vec!["NO BASE PILE TO DRAW ON".into()];
+        };
+        let held = base.stockpile.count(wear::SPARE_PART);
+        if held < wear::PARTS_PER_REPAIR {
+            return vec![format!(
+                "NEEDS {} SPARE PARTS, THE PILE HAS {held}",
+                wear::PARTS_PER_REPAIR
+            )];
+        }
+        if !active.mining.wear.repair(machine, &mut base.stockpile) {
+            return vec![format!("{name} IS FRESH ALREADY")];
+        }
+        active.journal.record(Command::Repair { machine: tag });
+        vec![format!("{name} MENDED - {} PARTS SPENT", wear::PARTS_PER_REPAIR)]
     }
 
     /// Metres within which a townsperson can hear you.
@@ -6820,6 +6954,9 @@ impl App {
         if let Err(error) = active.mining.tank.save(save.root()) {
             log::error!("could not save the fleet's tank: {error}");
         }
+        if let Err(error) = active.mining.wear.save(save.root()) {
+            log::error!("could not save the wear ledger: {error}");
+        }
         if let Err(error) = active.banks.save(save.root()) {
             log::error!("could not save the town vaults: {error}");
         }
@@ -7009,6 +7146,7 @@ impl ApplicationHandler for App {
         let mut eyes = optics::Optics::default();
         let mut bath = electrolysis::Electrolyser::default();
         let mut tank = fuel::Tank::default();
+        let mut crew_wear = wear::Wear::default();
         let mut vaults = bank::Bank::default();
         let mut friends = disposition::Disposition::default();
         if let Some(save) = &save {
@@ -7032,6 +7170,7 @@ impl ApplicationHandler for App {
             // an empty one would run dry at a different tick than its own
             // journal says it did.
             tank.load(save.root());
+            crew_wear.load(save.root());
             vaults.load(save.root());
             friends.load(save.root());
         }
@@ -7075,6 +7214,10 @@ impl ApplicationHandler for App {
                 let mut mining = Mining::default();
                 mining.ensure_flier(camera.position);
                 mining.tank = tank;
+                // Like the tank: replay re-derives it from tick zero, and a
+                // reload that started fresh would hand back a worn-out
+                // fleet's youth.
+                mining.wear = crew_wear;
                 mining
             },
             map,

@@ -685,6 +685,34 @@ compiled in. It needs **glibc 2.39 or newer** (SteamOS 3.7+ is fine, 3.6 is not)
 ./dist/gamingg-linux-x86_64
 ```
 
+### Machines wear out
+
+Work costs machines. Every tick a drone actually digs or a flier actually
+hauls is a tick of wear on that machine — and only work counts, so a fleet
+parked in the garage ages not at all while one that dug all night is ruined.
+They go **FRESH → WORN → FAILING → SEIZED**, losing a tick in five, then one
+in two, then all of them.
+
+The crew's pace comes off its *worst* machine, not an average, because an
+average is something you have to be told and a worst is something you can
+see. Type `fleet` and the roster names the bad one; the status line says so
+out loud when something starts failing; and mending that one machine hands
+the whole dig back. There is a nice wrinkle in it: a failing machine wears
+*slower*, because it is working less, so machines decay towards death rather
+than falling off a cliff.
+
+Mending is what the workshop was for. **Spare parts** are printed low on the
+fabricator's ladder — a fleet that cannot be mended is a fleet that dies of
+old age, and you should never meet that wall before you can print your way
+past it. `repair` at the terminal mends the worst machine, or name one:
+`repair digger 2`.
+
+This is the first thing a machine carries that the game's replay log has to
+know about. Everything else you accumulate — credits, upgrades, friendships
+— sits outside it deliberately, but a worn crew digs slower and how long a
+crew dug is exactly what decides where the hole ended up, so wear lives
+inside the simulation the log re-runs, right beside the fuel tank.
+
 ### The workshop
 
 Upgrades used to be a shelf at the counter: five marks a line, cash only.
@@ -796,7 +824,7 @@ Controls:
 | `[` / `]` | Zoom the minimap out / in |
 | `9` | The electrolyser, to place on a shore |
 | `E` | A word with the nearest townsperson when nothing solid is in reach — their line lands as a toast and in the terminal's transcript |
-| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades |
+| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
 | `F5` | Save |
