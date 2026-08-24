@@ -104,7 +104,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 26 | `23d8bea` | Wear and recovery: machines age by the tick they work, the worst one sets the crew's pace, and spare parts printed at the workshop mend them — the first machine state that had to live inside the replayed simulation |
 | 27 | `6a2eeef` | Micro-on-damage: a block gains a 4³ interior only when violence touches it, one `u64` a wound, so walls chew where they are shot, rays pass through the holes and feet never do |
 | 28 | `4665d04` | Hostiles and health: a warrant sends deputies who believe rather than know, search an occupancy map, take cover, never fire through each other, and break or surrender on nerve |
-| 29 | _this_ | Bunkers occupied: every shelter holds a squad derived from its own seed, hostiles route on the drones' flow fields, noise reaches them as 32-metre zones, pairs move under overwatch, and a surrendered holder can be taken in for the board's pay |
+| 29 | `12425b4` | Bunkers occupied: every shelter holds a squad derived from its own seed, hostiles route on the drones' flow fields, noise reaches them as 32-metre zones, pairs move under overwatch, and a surrendered holder can be taken in for the board's pay |
+| 30 | _this_ | Factions: the Compact and the Holdouts remember what the bounty board forgets — standing shades prices, buys a challenge before a volley, and puts the spoofers in the other side's hands |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1581,6 +1582,64 @@ live-only, like every reaction to the player.
 
 ---
 
+## Shipped — Stage 30: factions, and the memory the board does not have
+
+**Reputation is the ledger arrest cannot settle.** Bounty is a *bill*: it
+accrues per crime, a warrant answers it, and the arrest wipes it. Standing
+is what everybody remembers anyway. Pay every fine you like — a county
+that has watched you breach four vaults trades with you accordingly, and a
+shelter whose neighbours you dragged to the board does not care that your
+paperwork is in order. Bounty and standing stay linked but distinct,
+exactly the split disposition and law made at the townsfolk round, one
+level up.
+
+**Two factions, because two exist.** The **Compact** is the settled towns —
+already one people in every mechanical sense: one lattice, one beacon
+network, one economy hauling between them, one warrant that follows you
+town to town. The **Holdouts** are whoever holds the shelters. Nothing else
+in this world flies a flag, and a faction system with more factions than
+peoples would be a menu, not a world. The file grows by adding a field.
+
+**One deed, two opinions.** A capture pleases the towns (+25) and damns
+you to the shelters (−40); a kill is worth less to the law (+8) and costs
+more to the shelters (−60), because the board parades captures and graves
+are quiet — an ordering pinned in `const` blocks so a rebalance is a
+decision, not a drift. Witnessed crimes cost Compact standing at the
+bounty bill over five, the disposition ledger's own scaling. Honest trade
+is a trickle (+1 a sale) and takes a season to matter, which is the point.
+
+**What standing buys.** Bands are seasons, not moods — Enemy, Cold,
+Neutral, Warm, Friend at ±100/±400. The Compact's counters shade their
+prices a few percent either way, never a cliff. Neutral-or-better with the
+Holdouts buys the **truce**: a shelter's sentries challenge a stranger —
+"WALK ON - THIS GROUND IS HELD" — and grant a grace period instead of a
+volley. The truce ends at the inner ring, at the end of an ignored grace,
+at any noise on their ground (a drill inside the leash is not a stranger
+passing through), or at the first round fired.
+
+**The spoofers arrive in their hands.** The arc has promised it since the
+intrusion round: a shelter with a grudge runs a coil of its own, and
+inside its leash the kestrel's contact marks simply do not take — "THE
+SHELTER IS JAMMING YOUR SCOUT". Only grudged shelters jam, because running
+a jammer is itself a declaration and a truce-holding squad would not tip
+its hand. The tool the player learned to fear the roost with is finally
+pointed back.
+
+**Surface.** `standing` at the terminal prints both names, the points, and
+the effects in force; band crossings land as toasts ("THE SHELTERS NOW
+CALL YOU COLD"); `reputation.dat` (VXRP) persists it all, live-only —
+the replay oracle never learns anyone had a name.
+
+**Deliberately not in 30:** positive Holdouts standing — nothing can raise
+it yet, because there is no fence or black market to be their side of the
+counter; that door opens when their economy exists. Standing decay toward
+neutral over seasons. Per-town grudges under the Compact umbrella (the
+county shares one opinion; per-person disposition already covers the
+local texture). And elections — trade goodwill as a vote stays with the
+civic layer.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -1778,13 +1837,12 @@ the micro note asked to land before the hostiles rather than after them.
 
 | Stage | What | Why here |
 |---|---|---|
-| 30 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
 | 31 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore. The hunt note's stalker lands here too: it waits until the deep places are worth being afraid of, and hunts by the noise a working mine makes |
 | 32 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 29.
+The whole game at a glance, as of stage 30.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1854,10 +1912,15 @@ six hits, quiet-then-mend recovery, and an arrest that settles the bounty);
 held shelters (every bunker garrisoned from its own seed, hostiles routing
 on the drones' flow fields toward their belief, noise heard as 32-metre
 zones with the drill as dinner bell, paired overwatch, and surrendered
-holders taken in for the board's tier-scaled pay);
+holders taken in for the board's tier-scaled pay); factions (the Compact
+and the Holdouts as standings the bounty board cannot settle — captures,
+kills, crimes, trade and gifts each moving two opinions, prices shaded a
+few percent, a challenge-and-grace truce at Neutral, and grudged shelters
+jamming the scout with the spoofers the intrusion round taught);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
+**Planned, in arc order:** uranium, oil and gas with the stalker; the
+pocket arcade; the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
 B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket
 arcade.
 

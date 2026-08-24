@@ -319,6 +319,10 @@ pub struct Report {
     pub barks: Vec<String>,
     /// A deputy reached a downed player: the arrest is made.
     pub arrested: bool,
+    /// People the player's fire put down this frame — reputation's business.
+    pub downed: u8,
+    /// Whole squads broken this frame.
+    pub cleared: u8,
 }
 
 /// The squad the warrant sent.
@@ -882,6 +886,7 @@ pub(crate) fn rake(deputies: &mut [Deputy], exposed: bool, from: Vec3, to: Vec3)
         }
     }
 
+    report.downed = downed as u8;
     // Watching a partner go down is the worst thing that happens to a
     // squad, and it happens to everyone still standing.
     for _ in 0..downed {

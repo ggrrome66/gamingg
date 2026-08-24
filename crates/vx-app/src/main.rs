@@ -40,6 +40,7 @@ mod fuel;
 mod movement;
 mod optics;
 mod printer;
+mod reputation;
 mod rig;
 mod salvage;
 mod gamepad;
@@ -219,6 +220,8 @@ struct Options {
     posse: bool,
     /// A held shelter: its garrison on the hatch, mid-search.
     held: bool,
+    /// The standing sheet after a raiding career, on the terminal.
+    standing: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -260,6 +263,7 @@ fn parse_args() -> Result<Options, String> {
         wound: false,
         posse: false,
         held: false,
+        standing: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -340,6 +344,7 @@ fn parse_args() -> Result<Options, String> {
             "--wound" => options.wound = true,
             "--posse" => options.posse = true,
             "--held" => options.held = true,
+            "--standing" => options.standing = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -763,6 +768,85 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
     // Late for the same reason as the posse fixture: the villagers' pass
     // would otherwise replace these bodies with the townsfolk.
+    if options.standing {
+        // A raiding career, run through the real ledger: honest trade and
+        // gifts on one side, captures, kills and a cleared shelter on the
+        // other. Every number below is what the ledger says afterwards.
+        let mut name = reputation::Reputation::default();
+        for _ in 0..60 {
+            name.with_compact(reputation::TRADE_COMPACT);
+        }
+        for _ in 0..8 {
+            name.with_compact(reputation::GIFT_COMPACT);
+        }
+        for _ in 0..3 {
+            name.with_compact(reputation::CAPTURE_COMPACT);
+            name.with_holdouts(reputation::CAPTURE_HOLDOUTS);
+        }
+        for _ in 0..2 {
+            name.with_compact(reputation::KILL_COMPACT);
+            name.with_holdouts(reputation::KILL_HOLDOUTS);
+        }
+        name.with_holdouts(reputation::CLEARED_HOLDOUTS);
+
+        let mut console = terminal::Terminal::default();
+        console.toggle();
+        console.say(terminal::Kind::Note, "SOLD 40 COPPER ORE FOR 445 CR");
+        console.say(terminal::Kind::Note, "TAKEN IN - 120 CREDITS FROM THE BOARD");
+        console.say(
+            terminal::Kind::Note,
+            format!("THE SHELTERS NOW CALL YOU {}", name.holdouts().name()),
+        );
+        console.say(terminal::Kind::Warn, "THE SHELTER IS JAMMING YOUR SCOUT");
+        console.say(terminal::Kind::Echo, "> STANDING");
+        console.say(
+            terminal::Kind::Note,
+            format!(
+                "THE TOWNS     {:<8} {:>5}  SHADE {:+}PC AT THE COUNTER",
+                name.compact().name(),
+                name.compact_points(),
+                reputation::price_shade(name.compact())
+            ),
+        );
+        console.say(
+            terminal::Kind::Note,
+            format!(
+                "THE SHELTERS  {:<8} {:>5}  {}",
+                name.holdouts().name(),
+                name.holdouts_points(),
+                if name.holdouts() >= reputation::Standing::Neutral {
+                    "THEY CHALLENGE BEFORE THEY SHOOT"
+                } else {
+                    "SHOT ON SIGHT, AND THEY JAM YOUR SCOUT"
+                }
+            ),
+        );
+
+        let pixels = terminal::render_terminal(&console, false);
+        let panel_width = terminal::TERM_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = terminal::TERM_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            TERM_SLOT,
+            &context.device,
+            &context.queue,
+            (terminal::TERM_WIDTH, terminal::TERM_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+        println!(
+            "standing capture: towns {} ({}), shelters {} ({})",
+            name.compact().name(),
+            name.compact_points(),
+            name.holdouts().name(),
+            name.holdouts_points()
+        );
+    }
+
     if options.wound {
         // Build a wall the camera is looking at and then damage it with the
         // real shapes, through the real `World::carve` — a slug bite here, a
@@ -1470,7 +1554,9 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         squads.hear(player);
         let mut lines = Vec::new();
         for _ in 0..240 {
-            let report = squads.update(1.0 / 30.0, &world, player, false);
+            // No truce in the shot: the drill noise inside the leash has
+            // already made this personal, which is what the capture shows.
+            let report = squads.update(1.0 / 30.0, &world, player, false, false);
             for bark in report.barks {
                 if !lines.contains(&bark) {
                     lines.push(bark);
@@ -2431,6 +2517,10 @@ struct Active {
     posse: hostile::Posse,
     /// Every held shelter the session has met.
     garrisons: garrison::Garrisons,
+    /// Your name across the county, and among the shelters.
+    reputation: reputation::Reputation,
+    /// The jam toast has been shown for the current overflight.
+    jam_warned: bool,
     /// Seconds until the warrant is checked again — a callout starts on a
     /// beat rather than the instant a bounty ticks over.
     warrant_check: f32,
@@ -3464,6 +3554,29 @@ impl App {
     /// startled. The world edits happen inside `arsenal::advance_shots`,
     /// which is the half replay re-runs; everything else here is live-only
     /// consequence, the same side of the line the economy lives on.
+    /// A band crossing is worth saying out loud; a point is not.
+    fn note_band(active: &mut Active, faction: &str, band: Option<reputation::Standing>) {
+        if let Some(band) = band {
+            let line = format!("{faction} NOW CALL YOU {}", band.name());
+            active.terminal.say(terminal::Kind::Note, line.clone());
+            active.greeting = Some((line, Instant::now()));
+        }
+    }
+
+    /// Holders put down or shelters broken: what everybody thinks of that.
+    fn note_the_deeds(active: &mut Active, downed: u8, cleared: u8) {
+        for _ in 0..downed {
+            let compact = active.reputation.with_compact(reputation::KILL_COMPACT);
+            Self::note_band(active, "THE TOWNS", compact);
+            let holdouts = active.reputation.with_holdouts(reputation::KILL_HOLDOUTS);
+            Self::note_band(active, "THE SHELTERS", holdouts);
+        }
+        for _ in 0..cleared {
+            let holdouts = active.reputation.with_holdouts(reputation::CLEARED_HOLDOUTS);
+            Self::note_band(active, "THE SHELTERS", holdouts);
+        }
+    }
+
     /// The law, one frame of it: mend, muster, and let the squad work.
     ///
     /// Live-only from top to bottom — nothing here touches a block, so the
@@ -3516,7 +3629,10 @@ impl App {
             &active.world,
             active.player.position,
             !active.health.standing(),
+            // The truce is what Neutral buys: a challenge before a volley.
+            active.reputation.holdouts() >= reputation::Standing::Neutral,
         );
+        Self::note_the_deeds(active, held.downed, held.cleared);
         for line in &held.barks {
             active.terminal.say(terminal::Kind::Warn, line.clone());
             active.greeting = Some((line.clone(), Instant::now()));
@@ -3627,6 +3743,7 @@ impl App {
                     active.greeting = Some((line, Instant::now()));
                 }
                 let held = active.garrisons.under_fire(sweep.from, sweep.to);
+                Self::note_the_deeds(active, held.downed, held.cleared);
                 for line in held.barks {
                     active.terminal.say(terminal::Kind::Warn, line.clone());
                     active.greeting = Some((line, Instant::now()));
@@ -3909,6 +4026,27 @@ impl App {
                     }
                 }
                 lines
+            }
+            "standing" => {
+                let name = &active.reputation;
+                vec![
+                    format!(
+                        "THE TOWNS     {:<8} {:>5}  SHADE {:+}PC AT THE COUNTER",
+                        name.compact().name(),
+                        name.compact_points(),
+                        reputation::price_shade(name.compact())
+                    ),
+                    format!(
+                        "THE SHELTERS  {:<8} {:>5}  {}",
+                        name.holdouts().name(),
+                        name.holdouts_points(),
+                        if name.holdouts() >= reputation::Standing::Neutral {
+                            "THEY CHALLENGE BEFORE THEY SHOOT"
+                        } else {
+                            "SHOT ON SIGHT, AND THEY JAM YOUR SCOUT"
+                        }
+                    ),
+                ]
             }
             "law" => {
                 let mut lines = if active.posse.called_out() {
@@ -4202,6 +4340,8 @@ impl App {
         let key = (site.centre, index as u8);
         let person = people::person(&site, index);
         let given = active.friends.gift(key, &person, &good, day);
+        let band = active.reputation.with_compact(reputation::GIFT_COMPACT);
+        Self::note_band(active, "THE TOWNS", band);
         active.journal.record(Command::Gift {
             town: site.centre,
             person: index as u8,
@@ -4582,13 +4722,26 @@ impl App {
         {
             let at = kestrel.craft.position;
             let eye = glam::Vec3::new(at.x as f32 + 0.5, at.y as f32 + 0.3, at.z as f32 + 0.5);
-            active.marks.scan(
-                &active.world,
-                eye,
-                vx_agent::kestrel::SCAN_RADIUS,
-                &contacts,
-                now,
-            );
+            // The spoofers stage 15 taught the player have arrived in the
+            // other side's hands: over a shelter with a grudge, the scout's
+            // link is jammed and its marks simply do not take.
+            if active.garrisons.jamming_at(eye) {
+                if !active.jam_warned {
+                    active.jam_warned = true;
+                    let line = "THE SHELTER IS JAMMING YOUR SCOUT".to_string();
+                    active.terminal.say(terminal::Kind::Warn, line.clone());
+                    active.greeting = Some((line, Instant::now()));
+                }
+            } else {
+                active.jam_warned = false;
+                active.marks.scan(
+                    &active.world,
+                    eye,
+                    vx_agent::kestrel::SCAN_RADIUS,
+                    &contacts,
+                    now,
+                );
+            }
         }
         // A tapped watch box files its sightings to you as well as to the
         // sheriff: the same eye, the same radius, the same occlusion. The tap
@@ -5027,6 +5180,10 @@ impl App {
                             let day = (now / schedule::TICKS_PER_DAY) as u32;
                             active.friends.crime(claim.key.town, bill, day);
                         }
+                        // And the county remembers, long after the fine is
+                        // paid: the bill scales the standing cost too.
+                        let band = active.reputation.crime(bill);
+                        Self::note_band(active, "THE TOWNS", band);
                     }
                     active.greeting = Some((
                         match (caught, bill >= permits::BOUNTY_VAULT) {
@@ -5756,6 +5913,7 @@ impl App {
                         mailbox_held: active.homestead.mailbox.total(),
                         now,
                     };
+                    let compact_before = active.wallet.credits();
                     active.shop.confirm(
                         pile,
                         &mut active.wallet,
@@ -5766,8 +5924,15 @@ impl App {
                         security,
                         &offers,
                         Some(&mut post),
+                        active.reputation.compact(),
                     );
                     *active.economy.market_mut(&site, now) = market;
+                    // Honest trade is how a county comes to know you: a
+                    // trickle per sale, seasons to matter.
+                    if active.wallet.credits() > compact_before {
+                        let band = active.reputation.with_compact(reputation::TRADE_COMPACT);
+                        Self::note_band(active, "THE TOWNS", band);
+                    }
                 }
                 KeyCode::KeyE | KeyCode::Escape => {
                     active.shop.close();
@@ -6015,6 +6180,12 @@ impl App {
                     let line = format!("TAKEN IN - {pay} CREDITS FROM THE BOARD");
                     active.terminal.say(terminal::Kind::Note, line.clone());
                     active.greeting = Some((line, Instant::now()));
+                    // Civic service to one people, betrayal to the other.
+                    let compact = active.reputation.with_compact(reputation::CAPTURE_COMPACT);
+                    Self::note_band(active, "THE TOWNS", compact);
+                    let holdouts =
+                        active.reputation.with_holdouts(reputation::CAPTURE_HOLDOUTS);
+                    Self::note_band(active, "THE SHELTERS", holdouts);
                     return;
                 }
             }
@@ -7572,6 +7743,9 @@ impl App {
         if let Err(error) = active.health.save(save.root()) {
             log::error!("could not save the player's condition: {error}");
         }
+        if let Err(error) = active.reputation.save(save.root()) {
+            log::error!("could not save the player's reputation: {error}");
+        }
         if let Err(error) = active.banks.save(save.root()) {
             log::error!("could not save the town vaults: {error}");
         }
@@ -7763,6 +7937,7 @@ impl ApplicationHandler for App {
         let mut tank = fuel::Tank::default();
         let mut crew_wear = wear::Wear::default();
         let mut condition = health::Health::default();
+        let mut name = reputation::Reputation::default();
         let mut vaults = bank::Bank::default();
         let mut friends = disposition::Disposition::default();
         if let Some(save) = &save {
@@ -7788,6 +7963,7 @@ impl ApplicationHandler for App {
             tank.load(save.root());
             crew_wear.load(save.root());
             condition.load(save.root());
+            name.load(save.root());
             vaults.load(save.root());
             friends.load(save.root());
         }
@@ -7859,6 +8035,8 @@ impl ApplicationHandler for App {
             health: condition,
             posse: hostile::Posse::default(),
             garrisons: garrison::Garrisons::default(),
+            reputation: name,
+            jam_warned: false,
             warrant_check: 0.0,
             greeting: None,
             wallet,

@@ -55,6 +55,13 @@ pub const LEASH: f32 = 46.0;
 /// Seconds each half of a pair spends moving while the other watches.
 pub const OVERWATCH_SECONDS: f32 = 2.0;
 
+/// Seconds a challenged stranger has to turn around before a truce-holding
+/// squad decides they are not a stranger passing through.
+pub const GRACE_SECONDS: f32 = 6.0;
+
+/// Inside this fraction of the leash, a challenge stops being a courtesy.
+pub const INNER_RING: f32 = 0.5;
+
 /// What turning in a surrendered holder pays, by the shelter's tier — the
 /// board's premium postings, finally posted.
 pub fn capture_pay(tier: Tier) -> u64 {
@@ -101,6 +108,13 @@ pub struct Garrison {
     /// turn it is: pairs alternate, one moving while one watches.
     window: f32,
     movers_even: bool,
+    /// The truce is over: they have been shot at, robbed, or crowded, and
+    /// standing no longer buys the player a challenge before contact.
+    grudge: bool,
+    /// Whether the stranger has been told to walk on, and how long they
+    /// have left to do it.
+    challenged: bool,
+    grace: f32,
 }
 
 impl Garrison {
@@ -132,6 +146,9 @@ impl Garrison {
             pathing: Pathing::default(),
             window: OVERWATCH_SECONDS,
             movers_even: true,
+            grudge: false,
+            challenged: false,
+            grace: GRACE_SECONDS,
         }
     }
 
@@ -148,8 +165,14 @@ impl Garrison {
     /// A noise reached this garrison. The director's one sentence: the
     /// zone, never the spot, and only when it does not already know better.
     pub fn hear(&mut self, at: Vec3) {
-        if (at - self.hatch).length() > LEASH + HINT_GRADE as f32 {
+        let gap = (at - self.hatch).length();
+        if gap > LEASH + HINT_GRADE as f32 {
             return;
+        }
+        // Noise *on* their ground is a provocation, truce or none: a drill
+        // chewing rock inside the leash is not a stranger passing through.
+        if gap <= LEASH {
+            self.grudge = true;
         }
         // Fresh eyes beat a rumour: a hint never overwrites a confident
         // sighting, only a stale or absent one.
@@ -161,6 +184,8 @@ impl Garrison {
 
     /// A round of the player's crossed this squad.
     pub fn under_fire(&mut self, from: Vec3, to: Vec3) -> Report {
+        // A round is the end of any conversation.
+        self.grudge = true;
         // Being shot from anywhere near tells them roughly where from.
         self.hear(from);
         let exposed = self.belief.confidence() > 0.9;
@@ -168,7 +193,14 @@ impl Garrison {
     }
 
     /// One frame of holding the shelter.
-    pub fn update(&mut self, dt: f32, world: &World, player: Vec3, player_down: bool) -> Report {
+    pub fn update(
+        &mut self,
+        dt: f32,
+        world: &World,
+        player: Vec3,
+        player_down: bool,
+        truce: bool,
+    ) -> Report {
         let mut report = Report::default();
 
         // The overwatch clock: each window, half the squad may walk and the
@@ -200,6 +232,40 @@ impl Garrison {
             })
             .collect();
         let exposed = seen_by.iter().any(|seen| *seen);
+
+        // The truce: while the shelters have no grudge against this player
+        // — by standing, and by nothing having been done *here* — a
+        // stranger in sight gets a challenge and a grace period, not a
+        // volley. Sentries watch; they do not hunt. The truce ends at the
+        // inner ring, at the end of an ignored grace, at any noise on
+        // their ground, or at the first round fired.
+        if truce && !self.grudge {
+            if exposed {
+                let gap = (player - self.hatch).length();
+                if !self.challenged {
+                    self.challenged = true;
+                    report
+                        .barks
+                        .push("HOLDER: WALK ON - THIS GROUND IS HELD".into());
+                }
+                self.grace = (self.grace - dt).max(0.0);
+                if gap <= LEASH * INNER_RING || (self.grace == 0.0 && gap <= LEASH * 0.75) {
+                    self.grudge = true;
+                    report.barks.push("HOLDER: YOU WERE TOLD".into());
+                }
+                for (holder, sees) in self.holders.iter_mut().zip(&seen_by) {
+                    if *sees {
+                        holder.face(player);
+                    }
+                }
+            } else {
+                // Out of sight, the courtesy slowly re-arms.
+                self.grace = (self.grace + dt * 0.5).min(GRACE_SECONDS);
+            }
+            if !self.grudge {
+                return report;
+            }
+        }
 
         if exposed {
             self.belief.seen(player);
@@ -445,11 +511,19 @@ impl Garrisons {
     }
 
     /// One frame for every mustered squad; broken ones become cleared.
-    pub fn update(&mut self, dt: f32, world: &World, player: Vec3, player_down: bool) -> Report {
+    pub fn update(
+        &mut self,
+        dt: f32,
+        world: &World,
+        player: Vec3,
+        player_down: bool,
+        truce: bool,
+    ) -> Report {
         let mut report = Report::default();
         for squad in &mut self.squads {
-            let one = squad.update(dt, world, player, player_down);
+            let one = squad.update(dt, world, player, player_down, truce);
             report.hits += one.hits;
+            report.downed += one.downed;
             report.barks.extend(one.barks);
         }
         let cleared = &mut self.cleared;
@@ -457,6 +531,7 @@ impl Garrisons {
             if squad.broken() {
                 cleared.push(squad.centre);
                 report.barks.push("THE SHELTER IS YOURS".into());
+                report.cleared += 1;
                 false
             } else {
                 true
@@ -478,9 +553,25 @@ impl Garrisons {
         for squad in &mut self.squads {
             let one = squad.under_fire(from, to);
             report.hits += one.hits;
+            report.downed += one.downed;
             report.barks.extend(one.barks);
         }
         report
+    }
+
+    /// Is the scout's link jammed at `eye`?
+    ///
+    /// The spoofers stage 15 taught the player have arrived in the other
+    /// side's hands: a shelter with a grudge runs a coil of its own, and
+    /// inside its leash the kestrel's contact marks simply do not take.
+    /// Only grudged shelters jam — running a jammer is itself a declaration,
+    /// and a truce-holding squad would not tip its hand.
+    pub fn jamming_at(&self, eye: Vec3) -> bool {
+        self.squads.iter().any(|squad| {
+            squad.grudge
+                && !squad.broken()
+                && (eye - squad.hatch).length() <= LEASH
+        })
     }
 
     /// Holders actively after the player right now, for the HUD.
@@ -610,11 +701,37 @@ mod tests {
             holder.mode = Mode::Down;
         }
         let world = World::new(2024);
-        let report = garrisons.update(0.1, &world, Vec3::ZERO, false);
+        let report = garrisons.update(0.1, &world, Vec3::ZERO, false, false);
         assert!(report.barks.iter().any(|line| line.contains("YOURS")));
         assert!(garrisons.squads.is_empty());
         // And it stays cleared: mustering again finds nothing to raise.
         assert!(garrisons.cleared.contains(&site.centre));
+    }
+
+    #[test]
+    fn a_neutral_stranger_is_challenged_and_fire_ends_the_courtesy() {
+        let site = a_site();
+        let mut squad = Garrison::muster(&site);
+        let world = World::new(2024);
+        // Standing far out under a truce: watched, not hunted — the update
+        // returns before the engage machinery ever runs.
+        let stranger = squad.hatch + Vec3::new(LEASH * 0.9, 0.0, 0.0);
+        let report = squad.update(0.1, &world, stranger, false, true);
+        assert!(!squad.grudge, "a distant stranger already has a grudge");
+        let _ = report;
+
+        // One round fired and the truce is over, whatever the standing.
+        squad.under_fire(stranger, squad.hatch);
+        assert!(squad.grudge, "a volley did not end the conversation");
+
+        // And noise on their ground is a provocation on its own.
+        let mut quiet = Garrison::muster(&site);
+        quiet.hear(quiet.hatch + Vec3::new(10.0, 0.0, 0.0));
+        assert!(quiet.grudge, "a drill on their doorstep kept the truce");
+        // While noise past the leash is a rumour, not an offence.
+        let mut far = Garrison::muster(&site);
+        far.hear(far.hatch + Vec3::new(LEASH + 10.0, 0.0, 0.0));
+        assert!(!far.grudge, "a distant shot ended a truce it should not");
     }
 
     #[test]
@@ -626,7 +743,7 @@ mod tests {
         let before = squad.movers_even;
         // A full window flips the turn.
         let world = World::new(2024);
-        squad.update(OVERWATCH_SECONDS + 0.01, &world, Vec3::ZERO, false);
+        squad.update(OVERWATCH_SECONDS + 0.01, &world, Vec3::ZERO, false, false);
         assert_ne!(squad.movers_even, before, "the overwatch clock never turned");
     }
 }

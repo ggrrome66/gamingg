@@ -685,6 +685,26 @@ compiled in. It needs **glibc 2.39 or newer** (SteamOS 3.7+ is fine, 3.6 is not)
 ./dist/gamingg-linux-x86_64
 ```
 
+### Two peoples keep two books on you
+
+The bounty board is a bill; getting arrested settles it. Your *name* is a
+different thing, and nobody wipes that. The settled towns — the Compact —
+remember every witnessed crime long after the fine cleared, and every honest
+sale, capture turned in, and gift too. The people who hold the shelters —
+the Holdouts — remember which of theirs you dragged to the board, and a
+capture offends them *less* than a body: the board parades captures, graves
+are quiet.
+
+Standing runs Enemy → Cold → Neutral → Warm → Friend, and it moves like a
+season, not a mood. With the towns it shades every counter's prices a few
+percent either way. With the shelters, Neutral buys you the **truce**: walk
+near a held hatch and you get "WALK ON - THIS GROUND IS HELD" and a few
+seconds of grace instead of a volley — until you press in close, linger too
+long, run a drill on their ground, or fire a shot. And once a shelter holds
+a grudge, the spoofers you learned about in the hacking round turn up in
+*their* hands: fly your kestrel over their ground and it marks nothing.
+`standing` at the terminal shows both books and what they are costing you.
+
 ### The shelters are held
 
 The bunkers stopped being free real estate. Come near a hatch and its
@@ -918,7 +938,7 @@ Controls:
 | `[` / `]` | Zoom the minimap out / in |
 | `9` | The electrolyser, to place on a shore |
 | `E` | A word with the nearest townsperson when nothing solid is in reach — or, if somebody nearby has their hands up, take them in for the board's pay |
-| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `law` reads the deputies |
+| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `law` reads the deputies, `standing` your name with both peoples |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
 | `F5` | Save |

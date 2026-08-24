@@ -238,6 +238,7 @@ impl Shop {
         security: u32,
         offers: &[Offer],
         post: Option<&mut MailContext>,
+        standing: crate::reputation::Standing,
     ) {
         let rows = Shop::rows(
             pile.as_deref(),
@@ -259,7 +260,7 @@ impl Shop {
                     self.feedback = Some("NO BASE PILE".into());
                     return;
                 };
-                let (sold, earned) = sell_all(pile, walletbook, market, name);
+                let (sold, earned) = sell_all(pile, walletbook, market, name, standing);
                 self.feedback =
                     Some(format!("SOLD {sold} {} FOR {earned} CR", display_name(name)));
             }
@@ -409,6 +410,7 @@ pub fn sell_all(
     walletbook: &mut Wallet,
     market: &mut Market,
     name: &str,
+    standing: crate::reputation::Standing,
 ) -> (u64, u64) {
     let Some(good) = economy::good_index(name) else {
         return (0, 0);
@@ -418,8 +420,11 @@ pub fn sell_all(
         return (0, 0);
     }
     // Priced before the sale lands: you are paid what the board said, and the
-    // market moves for the next seller rather than under your own feet.
-    let earned = sold * market.price(good);
+    // market moves for the next seller rather than under your own feet. The
+    // Compact's opinion of you shades the unit rate a few percent either way
+    // — a relationship, deliberately never a cliff.
+    let rate = crate::reputation::shaded_sell(market.price(good), standing);
+    let earned = sold * rate;
     market.deposit(good, sold as f32);
     walletbook.earn(earned);
     (sold, earned)
@@ -641,7 +646,7 @@ mod tests {
         let mut market = market();
 
         let rate = market.price(economy::ORE);
-        let (sold, earned) = sell_all(&mut pile, &mut wallet, &mut market, "engine:copper_ore");
+        let (sold, earned) = sell_all(&mut pile, &mut wallet, &mut market, "engine:copper_ore", crate::reputation::Standing::Neutral);
         assert_eq!((sold, earned), (240, 240 * rate));
         assert_eq!(wallet.credits(), 240 * rate);
         assert_eq!(pile.count("engine:copper_ore"), 0);
@@ -657,7 +662,7 @@ mod tests {
 
         // Kinds the network does not trade cannot be sold even by asking.
         assert_eq!(
-            sell_all(&mut pile, &mut wallet, &mut market, "engine:dirt"),
+            sell_all(&mut pile, &mut wallet, &mut market, "engine:dirt", crate::reputation::Standing::Neutral),
             (0, 0)
         );
         assert_eq!(pile.count("engine:dirt"), 60);
@@ -714,7 +719,7 @@ mod tests {
         shop.open_at_counter();
         let mut wallet = Wallet::new();
         // Cursor 0 lands on the first Buy row (no pile rows exist).
-        shop.confirm(None, &mut wallet, &mut market(), &mut Garage::new(), &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None);
+        shop.confirm(None, &mut wallet, &mut market(), &mut Garage::new(), &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None, crate::reputation::Standing::Neutral);
         assert_eq!(shop.feedback.as_deref(), Some("NOT ENOUGH CR"));
     }
 
@@ -768,12 +773,12 @@ mod tests {
             .expect("no drone on the shelf");
         shop.move_cursor(at as i32, rows.len());
 
-        shop.confirm(None, &mut wallet, &mut market, &mut shed, &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None);
+        shop.confirm(None, &mut wallet, &mut market, &mut shed, &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None, crate::reputation::Standing::Neutral);
         assert_eq!(shed.owned(garage::DRONE), 1, "the drone never arrived");
         assert_eq!(wallet.credits(), 0, "the wrong amount was spent");
 
         // And a second one is refused, because it costs more than the first.
-        shop.confirm(None, &mut wallet, &mut market, &mut shed, &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None);
+        shop.confirm(None, &mut wallet, &mut market, &mut shed, &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None, crate::reputation::Standing::Neutral);
         assert_eq!(shed.owned(garage::DRONE), 1, "a drone was bought on credit");
         assert_eq!(shop.feedback.as_deref(), Some("NOT ENOUGH CR"));
     }
