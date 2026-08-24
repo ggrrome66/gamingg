@@ -59,6 +59,12 @@ impl World {
     /// The number itself means nothing; only "has it changed since I looked"
     /// does. No-op writes (setting a block to what it already is) do not count,
     /// matching the dirty-marking rule above.
+    /// How many wounded blocks the loaded world is carrying — the debug
+    /// panel's honesty check on micro-on-damage's "rare by construction".
+    pub fn composite_count(&self) -> usize {
+        self.chunks.values().map(|chunk| chunk.composite_count()).sum()
+    }
+
     pub fn edit_count(&self) -> u64 {
         self.edit_count
     }

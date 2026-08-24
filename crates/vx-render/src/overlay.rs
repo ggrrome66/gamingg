@@ -41,7 +41,7 @@ struct RectUniform {
 /// skips entirely, so the "nothing set means byte-identical frames" guarantee
 /// the culling tests rest on is per-slot and cannot be disturbed by the array
 /// getting longer.
-pub const OVERLAY_SLOTS: usize = 15;
+pub const OVERLAY_SLOTS: usize = 16;
 
 /// One picture on screen: its texture, its rectangle uniform, and the bind
 /// group tying them together.

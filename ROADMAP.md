@@ -1917,6 +1917,10 @@ and the Holdouts as standings the bounty board cannot settle — captures,
 kills, crimes, trade and gifts each moving two opinions, prices shaded a
 few percent, a challenge-and-grace truce at Neutral, and grudged shelters
 jamming the scout with the spoofers the intrusion round taught);
+an F3 debug readout in every build (engine vitals, the journal clock, the
+fleet, the hostiles' belief and both standings — diagnostics that change
+nothing they report on, unlike the gold panel, which is why one ships and
+the other is compiled out);
 a Steam Deck dist build every round.
 
 **Planned, in arc order:** uranium, oil and gas with the stalker; the

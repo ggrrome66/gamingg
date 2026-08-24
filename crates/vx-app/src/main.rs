@@ -17,6 +17,7 @@ mod belief;
 mod board;
 mod clock;
 mod controller;
+mod debug;
 mod device;
 mod disposition;
 mod economy;
@@ -91,6 +92,8 @@ const VAULT_SLOT: usize = 12;
 const TERM_SLOT: usize = 13;
 /// The controller help overlay.
 const PAD_SLOT: usize = 14;
+/// The F3 diagnostics readout.
+const DEBUG_SLOT: usize = 15;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -222,6 +225,8 @@ struct Options {
     held: bool,
     /// The standing sheet after a raiding career, on the terminal.
     standing: bool,
+    /// The F3 diagnostics readout, filled with a busy session.
+    debug: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -264,6 +269,7 @@ fn parse_args() -> Result<Options, String> {
         posse: false,
         held: false,
         standing: false,
+        debug: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -345,6 +351,7 @@ fn parse_args() -> Result<Options, String> {
             "--posse" => options.posse = true,
             "--held" => options.held = true,
             "--standing" => options.standing = true,
+            "--debug" => options.debug = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -844,6 +851,59 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             name.compact_points(),
             name.holdouts().name(),
             name.holdouts_points()
+        );
+    }
+
+    if options.debug {
+        // The F3 readout over a real scene. The engine numbers are the
+        // capture's own; the fight and ledger rows are a staged session,
+        // since a screenshot has no posse to be chased by.
+        let content = debug::DebugContent {
+            fps: 60.0,
+            position: (options.at.0 as f32 + 0.5, 74.0, options.at.1 as f32 + 0.5),
+            chunk: (options.at.0 >> 4, options.at.1 >> 4),
+            yaw: 195.0,
+            pitch: -9.0,
+            aimed: Some("ENGINE:STONE".into()),
+            chunks_loaded: world.loaded_chunk_count(),
+            chunks_drawn: renderer.visible_chunk_count(),
+            triangles: renderer.triangle_count(),
+            edits: world.edit_count(),
+            composites: world.composite_count(),
+            tick: 88_412,
+            log_entries: 1_204,
+            day: 9,
+            hhmm: (13, 42),
+            burners: 4,
+            fuel_cells: 11,
+            worst_machine: "WORN",
+            panicking: 0,
+            marks: 3,
+            shots: 1,
+            deputies: 3,
+            squads: 1,
+            hunting: 2,
+            belief: Some((0.82, 0.44)),
+            hits: (4, 6),
+            bounty: 120,
+            compact: "WARM",
+            holdouts: "COLD",
+        };
+        let pixels = debug::render_debug(&content);
+        let panel_width = debug::DEBUG_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = debug::DEBUG_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            DEBUG_SLOT,
+            &context.device,
+            &context.queue,
+            (debug::DEBUG_WIDTH, debug::DEBUG_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: width as f32 - panel_width - 12.0,
+                y: 12.0,
+                width: panel_width,
+                height: panel_height,
+            },
         );
     }
 
@@ -2521,6 +2581,8 @@ struct Active {
     reputation: reputation::Reputation,
     /// The jam toast has been shown for the current overflight.
     jam_warned: bool,
+    /// The F3 readout is up.
+    debug_open: bool,
     /// Seconds until the warrant is checked again — a callout starts on a
     /// beat rather than the instant a bounty ticks over.
     warrant_check: f32,
@@ -2637,6 +2699,9 @@ struct App {
     // Frame timing for the title bar readout.
     frames: u32,
     last_report: Instant,
+    /// The last measured frames-per-second, for the F3 readout — measured
+    /// in one place so the title bar and the panel can never disagree.
+    fps: f32,
 }
 
 impl App {
@@ -2665,6 +2730,7 @@ impl App {
             last_frame: Instant::now(),
             frames: 0,
             last_report: Instant::now(),
+            fps: 0.0,
         }
     }
 
@@ -3406,6 +3472,7 @@ impl App {
         self.refresh_electrolyser();
         self.refresh_vault();
         self.refresh_terminal();
+        self.refresh_debug();
         #[cfg(feature = "gold")]
         self.refresh_gold();
         self.refresh_intro();
@@ -5981,6 +6048,14 @@ impl App {
                     active.greeting = Some((line.to_string(), Instant::now()));
                 }
             }
+            KeyCode::F3 => {
+                if let Some(active) = &mut self.active {
+                    active.debug_open = !active.debug_open;
+                    if !active.debug_open {
+                        active.renderer.clear_overlay(DEBUG_SLOT);
+                    }
+                }
+            }
             KeyCode::F5 => self.save_world(),
             KeyCode::KeyM => self.mark_target(),
             KeyCode::Tab => {
@@ -7386,6 +7461,112 @@ impl App {
     }
 
     /// Draw the terminal when it is open.
+    /// Assemble the F3 snapshot and draw it. The panel is a pure function
+    /// of this struct; everything here only *reads*, which is the whole
+    /// contract — diagnostics must never perturb what they report.
+    fn refresh_debug(&mut self) {
+        let fps = self.fps;
+        let Some(active) = &mut self.active else { return };
+        if !active.debug_open {
+            return;
+        }
+        // A steady cadence rather than every frame: the roster walk below
+        // is cheap, but a diagnostics panel that costs frames would be
+        // lying about the number it is proudest of.
+        if !self.frames.is_multiple_of(6) {
+            return;
+        }
+
+        let at = active.player.position;
+        let feet = vx_core::BlockPos::new(at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
+        let aimed = raycast_solid(
+            &active.world,
+            active.world.registry(),
+            active.camera.position,
+            active.camera.forward(),
+            Self::REACH,
+        )
+        .map(|hit| {
+            active
+                .world
+                .registry()
+                .get_or_air(hit.id)
+                .name
+                .to_uppercase()
+        });
+        let rows = active.mining.roster(at);
+        let worst_machine = rows
+            .iter()
+            .map(|row| row.condition)
+            .max()
+            .unwrap_or(wear::Condition::Fresh)
+            .name();
+        let spare = active
+            .mining
+            .fleet
+            .base
+            .as_ref()
+            .map_or(0, |base| base.stockpile.count(fuel::CELL));
+        let now = active.journal.tick();
+
+        let content = debug::DebugContent {
+            fps,
+            position: (at.x, at.y, at.z),
+            chunk: {
+                let chunk = feet.chunk();
+                (chunk.x, chunk.z)
+            },
+            yaw: active.camera.yaw.to_degrees(),
+            pitch: active.camera.pitch.to_degrees(),
+            aimed,
+            chunks_loaded: active.world.loaded_chunk_count(),
+            chunks_drawn: active.renderer.visible_chunk_count(),
+            triangles: active.renderer.triangle_count(),
+            edits: active.world.edit_count(),
+            composites: active.world.composite_count(),
+            tick: now,
+            log_entries: active.journal.entries().len(),
+            day: (now / schedule::TICKS_PER_DAY) as u32,
+            hhmm: active.clock.hhmm(),
+            burners: active.mining.burners(),
+            fuel_cells: u64::from(active.mining.tank.cells()) + spare,
+            worst_machine,
+            panicking: active.villagers.panicking(),
+            marks: active.marks.live(now).count(),
+            shots: active.shots.len(),
+            deputies: active.posse.active(),
+            squads: active.garrisons.squads.len(),
+            hunting: active.garrisons.hunting(),
+            belief: active
+                .posse
+                .called_out()
+                .then(|| (active.posse.belief.total(), active.posse.belief.confidence())),
+            hits: (active.health.hits(), health::MAX_HITS),
+            bounty: active.permits.borrow().bounty,
+            compact: active.reputation.compact().name(),
+            holdouts: active.reputation.holdouts().name(),
+        };
+
+        let pixels = debug::render_debug(&content);
+        let (width, _height) = active.renderer.size();
+        let panel_width = debug::DEBUG_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = debug::DEBUG_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            DEBUG_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (debug::DEBUG_WIDTH, debug::DEBUG_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                // Top-right, clear of the HUD's top-left column.
+                x: width as f32 - panel_width - 12.0,
+                y: 12.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     fn refresh_terminal(&mut self) {
         let Some(active) = &mut self.active else { return };
         if !active.terminal.open {
@@ -7765,8 +7946,9 @@ impl App {
             return;
         }
 
+        self.fps = self.frames as f32 / elapsed.as_secs_f32();
         if let Some(active) = &self.active {
-            let fps = self.frames as f32 / elapsed.as_secs_f32();
+            let fps = self.fps;
             active.window.set_title(&format!(
                 "gamingg - {fps:.0} fps - {} - {}/{} chunks drawn - {} tris",
                 match active.mode {
@@ -8037,6 +8219,7 @@ impl ApplicationHandler for App {
             garrisons: garrison::Garrisons::default(),
             reputation: name,
             jam_warned: false,
+            debug_open: false,
             warrant_check: 0.0,
             greeting: None,
             wallet,

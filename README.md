@@ -941,6 +941,7 @@ Controls:
 | `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `law` reads the deputies, `standing` your name with both peoples |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
+| `F3` | The debug readout: FPS, position, chunks and triangles, journal tick, fleet and fuel, hostiles and their belief, your standings — diagnostics only, in every build, and it changes nothing it reports on |
 | `F5` | Save |
 | `F10` | The gold panel — the operator's console (dev builds only, see below) |
 | `Escape` | Release the mouse |
