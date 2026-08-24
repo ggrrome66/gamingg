@@ -39,7 +39,11 @@ pub const REGION_SIZE: i32 = 32;
 
 const WORLD_MAGIC: &[u8; 4] = b"VXWD";
 const REGION_MAGIC: &[u8; 4] = b"VXRG";
-const FORMAT_VERSION: u32 = 1;
+/// Two: chunks carry their wounds. Every block-level field is unchanged and
+/// a version-one region would decode perfectly right up to the point where
+/// the wound table is not there, which is precisely why the number moves —
+/// a reader that guessed would read the next chunk's header as cell masks.
+const FORMAT_VERSION: u32 = 2;
 
 /// An upper bound on palette entries, so a corrupt length cannot make us
 /// allocate wildly before failing.
@@ -77,6 +81,14 @@ struct StoredChunk {
     bits: u32,
     palette: Vec<String>,
     data: Vec<u64>,
+    /// The chunk's wounds: local block index, and the cells still standing.
+    ///
+    /// Raw masks rather than references into an intern table. The design
+    /// note is explicit that saved masks are a *cache* of what replay would
+    /// recompute from the orders already in the journal, and that a cache
+    /// gets pragmatic compression rather than optimal compression — so this
+    /// stays eight bytes a wound until a measurement asks for better.
+    wounds: Vec<(u16, u64)>,
 }
 
 impl StoredChunk {
@@ -91,6 +103,7 @@ impl StoredChunk {
                 .map(|id| registry.get_or_air(*id).name.clone())
                 .collect(),
             data: storage.packed_data().to_vec(),
+            wounds: chunk.composites().collect(),
         }
     }
 
@@ -117,6 +130,7 @@ impl StoredChunk {
             PalettedStorage::from_parts(palette, self.bits, self.data, self.len as usize)?;
         let mut chunk = Chunk::from_storage(pos, storage);
         chunk.optimise();
+        chunk.load_composites(self.wounds);
         Ok(chunk)
     }
 }
@@ -344,6 +358,12 @@ impl Region {
             for word in &chunk.data {
                 out.extend_from_slice(&word.to_le_bytes());
             }
+
+            out.extend_from_slice(&(chunk.wounds.len() as u32).to_le_bytes());
+            for (index, mask) in &chunk.wounds {
+                out.extend_from_slice(&index.to_le_bytes());
+                out.extend_from_slice(&mask.to_le_bytes());
+            }
         }
         out
     }
@@ -378,6 +398,18 @@ impl Region {
                 data.push(reader.u64()?);
             }
 
+            let wound_count = reader.u32()?;
+            if wound_count as usize > vx_core::CHUNK_VOLUME {
+                return Err(SaveError::Corrupt(format!(
+                    "{wound_count} wounds is more blocks than a chunk holds"
+                )));
+            }
+            let mut wounds = Vec::with_capacity(wound_count as usize);
+            for _ in 0..wound_count {
+                let index = reader.u16()?;
+                wounds.push((index, reader.u64()?));
+            }
+
             region.insert(
                 pos,
                 StoredChunk {
@@ -385,6 +417,7 @@ impl Region {
                     bits,
                     palette,
                     data,
+                    wounds,
                 },
             );
         }
@@ -448,6 +481,11 @@ impl<'a> Reader<'a> {
 
     fn i32(&mut self) -> Result<i32, SaveError> {
         Ok(self.u32()? as i32)
+    }
+
+    fn u16(&mut self) -> Result<u16, SaveError> {
+        let bytes: [u8; 2] = self.take(2)?.try_into().expect("took exactly two bytes");
+        Ok(u16::from_le_bytes(bytes))
     }
 
     fn u64(&mut self) -> Result<u64, SaveError> {
@@ -815,6 +853,51 @@ mod tests {
             save.load_chunk(pos, world.registry()),
             Err(SaveError::BadVersion { .. })
         ));
+    }
+
+    #[test]
+    fn a_wounded_block_survives_a_round_trip_to_disk() {
+        // Wounds are a cache of what replay would recompute, but a cache
+        // that forgets on reload is a wall that heals when you blink.
+        let dir = TempDir::new("wounds");
+        let save = WorldSave::create(dir.path()).unwrap();
+        let (mut world, _, _) = edited_world();
+        let pos = ChunkPos::new(0, 0);
+
+        // Chew a block, and keep one that nobody touched beside it.
+        let target = world
+            .chunk(pos)
+            .and_then(|chunk| {
+                (0..vx_core::CHUNK_HEIGHT).find_map(|y| {
+                    let local = vx_core::LocalPos::new(1, y, 1)?;
+                    (!chunk.get(local).is_air())
+                        .then(|| BlockPos::new(1, y, 1))
+                })
+            })
+            .expect("the test world has some ground in it");
+        let bite = crate::micro::Shape::SlugBite.cells(1, 1, 1, 0);
+        assert!(matches!(world.carve(target, bite), crate::Carved::Wounded(_)));
+        let wound = world.mask(target).expect("the carve left no wound");
+
+        save.save_world(&mut world).unwrap();
+        let loaded = save
+            .load_chunk(pos, world.registry())
+            .unwrap()
+            .expect("the chunk came back empty");
+        assert_eq!(
+            loaded.mask(vx_core::LocalPos::new(target.x, target.y, target.z).unwrap()),
+            Some(wound),
+            "the wound did not survive the round trip"
+        );
+        // And an untouched block still reports no wound at all, rather than
+        // a full mask: "intact" has exactly one representation.
+        let intact = BlockPos::new(2, target.y, 2);
+        if !world.block(intact).is_air() {
+            assert_eq!(
+                loaded.mask(vx_core::LocalPos::new(intact.x, intact.y, intact.z).unwrap()),
+                None
+            );
+        }
     }
 
     #[test]

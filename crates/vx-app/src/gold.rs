@@ -135,7 +135,11 @@ pub struct Telemetry<'a> {
     pub base_total: u64,
     pub town_name: Option<String>,
     pub town_centre: Option<(i32, i32)>,
-    pub stocks: [f32; 4],
+    /// One entry per traded good, sized by the catalogue rather than by a
+    /// number typed here: HHO joined the economy in the fuel round and this
+    /// array did not follow, which indexed off the end the moment the town
+    /// tab drew. Deriving the length means the next good cannot repeat it.
+    pub stocks: [f32; crate::economy::GOODS.len()],
     pub tuning: &'a tuning::Tuning,
     /// The world hash, computed only when the operator asked for it — it walks
     /// every loaded chunk, which is not a per-frame cost.
@@ -463,7 +467,7 @@ mod tests {
             base_total: 340,
             town_name: Some("STONEHAVEN".into()),
             town_centre: Some((0, 0)),
-            stocks: [400.0, 200.0, 100.0, 40.0],
+            stocks: [400.0, 200.0, 100.0, 40.0, 15.0],
             tuning,
             world_hash: None,
         }

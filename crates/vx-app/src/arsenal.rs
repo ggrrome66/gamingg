@@ -181,9 +181,31 @@ pub fn advance_shots(shots: &mut Vec<Shot>, world: &mut World, tuning: &Tuning) 
                     .get(found.id)
                     .and_then(|def| def.hardness)
                     .is_some_and(|hardness| hardness <= tuning.slug_punch);
-                if breakable {
-                    world.set_block(found.block, vx_core::BlockId::AIR);
-                }
+                // A slug bites rather than deletes. Which cell it bit comes
+                // from where the round actually stopped, so a round that
+                // clipped a corner chews the corner — and a block only goes
+                // once it has been chewed past holding together. What a slug
+                // may damage at all is unchanged: rock too hard to punch
+                // still turns the round away without a mark.
+                let breakable = if breakable {
+                    let cell = |along: f32, block: i32| {
+                        (((along - block as f32) * vx_world::micro::SIDE as f32).floor() as i32)
+                            .clamp(0, vx_world::micro::SIDE - 1)
+                    };
+                    let face = vx_core::Face::ALL
+                        .iter()
+                        .position(|other| *other == found.face)
+                        .unwrap_or(0);
+                    let bite = vx_world::micro::Shape::SlugBite.cells(
+                        cell(stopped.x, found.block.x),
+                        cell(stopped.y, found.block.y),
+                        cell(stopped.z, found.block.z),
+                        face,
+                    );
+                    matches!(world.carve(found.block, bite), vx_world::Carved::Broke(_))
+                } else {
+                    false
+                };
                 (
                     false,
                     stopped,
@@ -456,30 +478,80 @@ mod tests {
             .expect("no copper ore");
         let air = vx_core::BlockId::AIR;
 
-        for (target, expect_broken) in [(plank, true), (ore, false)] {
+        // A single slug into each, to see what one round does.
+        for (target, expect_wound) in [(plank, true), (ore, false)] {
             let at = BlockPos::new(10, 180, 0);
             world.set_block(at, target);
-            let mut shots = vec![Shot {
-                position: Vec3::new(0.5, 180.5, 0.5),
-                velocity: Vec3::new(tuning.slug_speed, 0.0, 0.0),
-                age: 0,
-            }];
-            // A tick sweeps ~7 m; the wall at x = 10 takes two.
-            let mut landed = None;
-            for _ in 0..4 {
-                let sweeps = advance_shots(&mut shots, &mut world, &tuning);
-                if let Some(sweep) = sweeps.into_iter().find(|sweep| sweep.hit.is_some()) {
-                    landed = sweep.hit;
-                    break;
-                }
-            }
-            let impact = landed.as_ref().expect("shot missed the wall");
+            let impact =
+                fire_one(&mut world, &tuning, 180.5, 0.5).expect("shot missed the wall");
             assert_eq!(impact.block, at);
-            assert_eq!(impact.broke, expect_broken);
-            assert_eq!(world.block(at) == air, expect_broken);
-            assert!(shots.is_empty(), "a shot survives its own impact");
+            // Nothing dies to one round any more: a slug bites. What a slug
+            // may damage at all is unchanged, so ore still turns it away
+            // without a mark on it.
+            assert!(!impact.broke, "one slug destroyed a whole block");
+            assert_ne!(world.block(at), air, "one slug destroyed a whole block");
+            assert_eq!(
+                world.mask(at).is_some(),
+                expect_wound,
+                "the wrong thing was marked by a slug"
+            );
             world.set_block(at, air);
         }
+
+        // Firing twice down the *same* line drills a peephole and then
+        // shoots through it. This is the whole promise of micro-on-damage
+        // arriving through the arsenal by itself: nobody wrote "make a
+        // hole", the cells simply stopped being there and the ray noticed.
+        let at = BlockPos::new(10, 180, 0);
+        world.set_block(at, plank);
+        assert!(fire_one(&mut world, &tuning, 180.5, 0.5).is_some());
+        let mut through = false;
+        for _ in 0..8 {
+            if fire_one(&mut world, &tuning, 180.5, 0.5).is_none() {
+                through = true;
+                break;
+            }
+        }
+        assert!(through, "a line of fire never opened a hole it could shoot through");
+        assert_ne!(world.block(at), air, "a peephole took the whole block");
+
+        // And spread fire does finish it: violence converges, which is what
+        // keeps the launcher a weapon rather than a chisel.
+        world.set_block(at, air);
+        world.set_block(at, plank);
+        let mut rounds = 0;
+        'demolition: for _ in 0..8 {
+            for cell in 0..4 {
+                for column in 0..4 {
+                    let y = 180.125 + cell as f32 * 0.25;
+                    let z = 0.125 + column as f32 * 0.25;
+                    fire_one(&mut world, &tuning, y, z);
+                    rounds += 1;
+                    if world.block(at) == air {
+                        break 'demolition;
+                    }
+                }
+            }
+        }
+        assert_eq!(world.block(at), air, "a plank outlasted {rounds} slugs");
+        assert!(rounds > 1, "the plank still died to a single round");
+    }
+
+    /// One slug down the +x line at the wall, returning what it struck.
+    fn fire_one(world: &mut World, tuning: &Tuning, y: f32, z: f32) -> Option<Impact> {
+        let mut shots = vec![Shot {
+            position: Vec3::new(0.5, y, z),
+            velocity: Vec3::new(tuning.slug_speed, 0.0, 0.0),
+            age: 0,
+        }];
+        // A tick sweeps ~7 m; the wall at x = 10 takes two.
+        for _ in 0..4 {
+            let sweeps = advance_shots(&mut shots, world, tuning);
+            if let Some(sweep) = sweeps.into_iter().find(|sweep| sweep.hit.is_some()) {
+                return sweep.hit;
+            }
+        }
+        None
     }
 
     #[test]

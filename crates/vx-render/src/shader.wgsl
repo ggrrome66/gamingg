@@ -36,7 +36,10 @@ struct Sun {
 @group(3) @binding(0) var<uniform> chunk_origin: vec4<f32>;
 
 // One instance per quad, eight bytes:
-//   kind:4 | plane:9 | iu:9 | iv:9 | w:9 | h:9 | tile:8
+//   kind:4 | plane:9 | iu:9 | iv:9 | w:9 | h:9 | tile:8 | light:4
+// Kinds 0..5 are cube faces, 6..9 a plant's crossed quads, and 10..15 the
+// quarter-metre faces of a wounded block, whose sub-cell offsets ride inside
+// the `w`/`h` fields (see `PackedQuad::micro`).
 // There is no vertex buffer and no index buffer; the six vertices of a quad's
 // two triangles are synthesised from `vertex_index`. Must stay in step with
 // `vx_mesh::PackedQuad`, whose `corners`/`normal`/`uvs` are the same arithmetic
@@ -76,14 +79,36 @@ fn vs_main(quad: QuadInput, @builtin(vertex_index) vertex_index: u32) -> VertexO
     let low = quad.packed.x;
     let high = quad.packed.y;
 
-    let kind = low & 0xfu;
-    let plane = f32((low >> 4u) & 0x1ffu);
-    let iu = f32((low >> 13u) & 0x1ffu);
-    let iv = f32((low >> 22u) & 0x1ffu);
+    let raw_kind = low & 0xfu;
+    var plane = f32((low >> 4u) & 0x1ffu);
+    var iu = f32((low >> 13u) & 0x1ffu);
+    var iv = f32((low >> 22u) & 0x1ffu);
     // `w` straddles the word boundary: one bit at the top of `low`, eight at
     // the bottom of `high`.
-    let w = f32(((low >> 31u) & 1u) | ((high & 0xffu) << 1u));
-    let h = f32((high >> 8u) & 0x1ffu);
+    let w_bits = ((low >> 31u) & 1u) | ((high & 0xffu) << 1u);
+    let h_bits = (high >> 8u) & 0x1ffu;
+    var w = f32(w_bits);
+    var h = f32(h_bits);
+
+    // Kinds 10..15 are a wounded block's quarter-metre cell faces. The
+    // position stays in block units and the sub-cell offsets ride in the
+    // bits `w` and `h` do not need at that scale, so the whole thing decodes
+    // into the same variables the metre-scale path already uses — and every
+    // quad below this point is handled by one piece of code.
+    var kind = raw_kind;
+    if raw_kind >= 10u {
+        kind = raw_kind - 10u;
+        let cells_u = f32(w_bits & 7u);
+        let sub_u = f32((w_bits >> 3u) & 3u);
+        let sub_plane = f32((w_bits >> 5u) & 7u);
+        let cells_v = f32(h_bits & 7u);
+        let sub_v = f32((h_bits >> 3u) & 3u);
+        plane = plane + sub_plane * 0.25;
+        iu = iu + sub_u * 0.25;
+        iv = iv + sub_v * 0.25;
+        w = cells_u * 0.25;
+        h = cells_v * 0.25;
+    }
     let tile = (high >> 17u) & 0xffu;
     let sky_exposure = f32((high >> 25u) & 0xfu) / 15.0;
 

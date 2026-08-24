@@ -209,6 +209,8 @@ struct Options {
     kit: bool,
     /// A worn crew on the terminal: the roster with conditions, and a mend.
     wear: bool,
+    /// Chew a wall in front of the camera, to show cells rather than boxes.
+    wound: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -247,6 +249,7 @@ fn parse_args() -> Result<Options, String> {
         pad: false,
         kit: false,
         wear: false,
+        wound: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -324,6 +327,7 @@ fn parse_args() -> Result<Options, String> {
             "--pad" => options.pad = true,
             "--kit" => options.kit = true,
             "--wear" => options.wear = true,
+            "--wound" => options.wound = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -742,6 +746,111 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         println!(
             "cave capture from {:?}, facing ({}, {}) with {} blocks of gallery",
             spot, heading.0, heading.1, heading.2
+        );
+    }
+
+    if options.wound {
+        // Build a wall the camera is looking at and then damage it with the
+        // real shapes, through the real `World::carve` — a slug bite here, a
+        // blast there, a drilled face, and a hole shot clean through. Every
+        // cell drawn below came out of the same code the game runs.
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let wall_z = options.at.1 + 6;
+        // Take the ground from the wall's own column, not the camera's: on a
+        // slope those differ, and the first cut of this fixture buried the
+        // whole wall in a hillside.
+        let ground = world.surface_y(options.at.0, wall_z).unwrap_or(80);
+
+        // Clear the approach and level the footing, so what the shot shows
+        // is the wall rather than whatever the hill was doing.
+        for x in options.at.0 - 4..=options.at.0 + 4 {
+            for z in wall_z - 7..=wall_z {
+                for y in ground + 1..ground + 10 {
+                    world.set_block(vx_core::BlockPos::new(x, y, z), vx_core::BlockId::AIR);
+                }
+                world.set_block(vx_core::BlockPos::new(x, ground, z), stone);
+            }
+        }
+        // A clean face, five wide and four tall, standing on the ground.
+        for x in options.at.0 - 2..=options.at.0 + 2 {
+            for y in ground + 1..=ground + 4 {
+                world.set_block(vx_core::BlockPos::new(x, y, wall_z), stone);
+            }
+        }
+
+        let at = |x: i32, y: i32| vx_core::BlockPos::new(x, y, wall_z);
+        // A slug bite, low left: a small blob out of the face.
+        world.carve(
+            at(options.at.0 - 2, ground + 2),
+            vx_world::micro::Shape::SlugBite.cells(2, 2, 0, 4),
+        );
+        // Two bites in the same block, which is what sustained fire looks
+        // like before a hole opens.
+        for cell in [(1, 1), (2, 3)] {
+            world.carve(
+                at(options.at.0 - 1, ground + 2),
+                vx_world::micro::Shape::SlugBite.cells(cell.0, cell.1, 0, 4),
+            );
+        }
+        // A blast, centre. Aimed at a corner rather than the middle: a
+        // three-cell radius centred inside a four-cell block takes nearly
+        // all of it and the block simply dies, which is correct and shows
+        // nothing. Clipped off a corner it leaves a crater to look at.
+        world.carve(
+            at(options.at.0, ground + 3),
+            vx_world::micro::Shape::Blast.cells(0, 3, 0, 4),
+        );
+        // A drilled face, right: one tick of the bit has taken the near layer.
+        // Two ticks of the bit, so the recess reads as depth rather than as
+        // a slightly darker square.
+        for depth in 0..2 {
+            let mut layer = 0;
+            for y in 0..vx_world::micro::SIDE {
+                for x in 0..vx_world::micro::SIDE {
+                    layer |= vx_world::micro::bit(x, y, depth);
+                }
+            }
+            world.carve(at(options.at.0 + 1, ground + 2), layer);
+        }
+        // And a channel shot clean through, far right — the peephole a ray
+        // can pass but a body cannot.
+        let mut channel = 0;
+        for depth in 0..vx_world::micro::SIDE {
+            channel |= vx_world::micro::bit(1, 2, depth);
+            channel |= vx_world::micro::bit(2, 2, depth);
+        }
+        world.carve(at(options.at.0 + 2, ground + 2), channel);
+
+        // The wall and its wounds were written after the scene was built, so
+        // the GPU still holds the meshes of an untouched hillside.
+        remesh_all(&context, &mut renderer, &mut world);
+
+        let wounds: usize = (options.at.0 - 2..=options.at.0 + 2)
+            .map(|x| {
+                (ground + 1..=ground + 4)
+                    .filter(|y| world.mask(at(x, *y)).is_some())
+                    .count()
+            })
+            .sum();
+        let cells: u32 = (options.at.0 - 2..=options.at.0 + 2)
+            .flat_map(|x| (ground + 1..=ground + 4).map(move |y| (x, y)))
+            .filter_map(|(x, y)| world.mask(at(x, y)))
+            .map(|mask| vx_world::micro::CELLS - vx_world::micro::remaining(mask))
+            .sum();
+        println!("wound capture: {wounds} composite blocks, {cells} cells taken");
+
+        camera.position = glam::Vec3::new(
+            options.at.0 as f32 + 0.5,
+            ground as f32 + 3.0,
+            wall_z as f32 - if options.close { 3.0 } else { 6.5 },
+        );
+        look_at(
+            &mut camera,
+            glam::Vec3::new(
+                options.at.0 as f32 + 0.5,
+                ground as f32 + 2.8,
+                wall_z as f32,
+            ),
         );
     }
 
@@ -1283,7 +1392,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             base_total: 340,
             town_name: Some("STONEHAVEN".into()),
             town_centre: Some((0, 0)),
-            stocks: [400.0, 200.0, 100.0, 40.0],
+            stocks: [400.0, 200.0, 100.0, 40.0, 15.0],
             tuning: &tuning,
             world_hash: None,
         };
@@ -4327,19 +4436,36 @@ impl App {
                 return;
             }
         } else {
+            // Drilling is the same amount of work it always was; it is
+            // simply visible now. Each quarter of the way through takes the
+            // layer of cells nearest the bit, so a face being worked looks
+            // worked — and the block still finishes on the same tick, by the
+            // same `break_block` below.
+            let before = match &active.digging {
+                Some((target, progress)) if *target == hit.block => *progress,
+                _ => 0.0,
+            };
             match &mut active.digging {
                 Some((target, progress)) if *target == hit.block => {
                     *progress += step;
-                    if *progress < 1.0 {
-                        return;
-                    }
                 }
                 other => {
                     *other = Some((hit.block, step.min(1.0)));
-                    if step < 1.0 {
-                        return;
-                    }
                 }
+            }
+            let after = active.digging.map_or(0.0, |(_, progress)| progress);
+            let layers = |progress: f32| (progress * 4.0).floor() as i32;
+            if layers(after) > layers(before) && after < 1.0 {
+                let face = vx_core::Face::ALL
+                    .iter()
+                    .position(|other| *other == hit.face)
+                    .unwrap_or(0);
+                active
+                    .world
+                    .carve(hit.block, vx_world::micro::Shape::DrillFace.cells(0, 0, 0, face));
+            }
+            if after < 1.0 {
+                return;
             }
         }
 
@@ -6327,14 +6453,16 @@ impl App {
                 // to be caught up by the next reader anyway.
                 let mut books = active.economy.clone();
                 let market = books.market(site, active.journal.tick()).clone();
-                [
-                    market.stock(0),
-                    market.stock(1),
-                    market.stock(2),
-                    market.stock(3),
-                ]
+                // Built by walking the catalogue, so a new good appears in
+                // the panel the day it is added rather than the day someone
+                // notices the panel crashing.
+                let mut stocks = [0.0; economy::GOODS.len()];
+                for (good, stock) in stocks.iter_mut().enumerate() {
+                    *stock = market.stock(good);
+                }
+                stocks
             }
-            None => [0.0; 4],
+            None => [0.0; economy::GOODS.len()],
         };
         gold::Telemetry {
             tick: active.journal.tick(),

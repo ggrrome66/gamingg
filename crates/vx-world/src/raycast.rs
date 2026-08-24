@@ -99,12 +99,34 @@ pub fn raycast(
         let position = BlockPos::new(voxel[0], voxel[1], voxel[2]);
         let id = view.block_at(position.x, position.y, position.z);
         if is_target(id) {
-            return Some(RayHit {
-                block: position,
-                face: entered,
-                distance,
-                id,
-            });
+            // A wounded block is not a box any more. Descend into its cells
+            // and let the ray through if it found a hole — this is the whole
+            // of "chip cover long enough and a firing hole opens", and it is
+            // the only place in the engine that reads damage geometry.
+            match view.mask_at(position.x, position.y, position.z) {
+                Some(mask) => {
+                    if let Some(cell_distance) =
+                        pierce(mask, position, &origin, &direction, distance)
+                    {
+                        return Some(RayHit {
+                            block: position,
+                            face: entered,
+                            distance: cell_distance,
+                            id,
+                        });
+                    }
+                    // Every cell along the line was already gone: keep
+                    // marching, the ray passed through the wound.
+                }
+                None => {
+                    return Some(RayHit {
+                        block: position,
+                        face: entered,
+                        distance,
+                        id,
+                    });
+                }
+            }
         }
 
         // Advance along whichever axis reaches its boundary soonest.
@@ -130,6 +152,55 @@ pub fn raycast(
         // Stepping in +x crosses into the new voxel through its -x face.
         entered = face_of(axis, step[axis]);
     }
+}
+
+/// March a ray through one wounded block's cells.
+///
+/// A four-step mini-DDA in cell space, which is small enough to walk by
+/// sampling: the segment inside a block is at most `sqrt(3)` long, so
+/// stepping in quarter-cell increments cannot skip a cell. Returns the
+/// distance at which the ray met material, or `None` when it found only
+/// holes and should carry on to the next block.
+fn pierce(
+    mask: crate::micro::Mask,
+    block: BlockPos,
+    origin: &[f32; 3],
+    direction: &[f32; 3],
+    entry_distance: f32,
+) -> Option<f32> {
+    use crate::micro::SIDE;
+
+    // Where the ray is when it meets this block, in cell coordinates.
+    let step = 0.25 / SIDE as f32;
+    // The far corner of a block is sqrt(3) away; walking that at a quarter
+    // of a cell is a bounded, branch-free loop.
+    let steps = (3.0f32.sqrt() / step).ceil() as i32 + 1;
+    for taken in 0..steps {
+        let along = entry_distance + taken as f32 * step;
+        let point = [
+            origin[0] + direction[0] * along,
+            origin[1] + direction[1] * along,
+            origin[2] + direction[2] * along,
+        ];
+        let cell = [
+            ((point[0] - block.x as f32) * SIDE as f32).floor() as i32,
+            ((point[1] - block.y as f32) * SIDE as f32).floor() as i32,
+            ((point[2] - block.z as f32) * SIDE as f32).floor() as i32,
+        ];
+        // Left the block without meeting anything: the ray is through.
+        if cell.iter().any(|c| !(0..SIDE).contains(c)) {
+            // Only give up once we have actually entered and left; the first
+            // sample can land a hair outside on the entry face.
+            if taken > 0 {
+                return None;
+            }
+            continue;
+        }
+        if crate::micro::has(mask, cell[0], cell[1], cell[2]) {
+            return Some(along);
+        }
+    }
+    None
 }
 
 /// The face crossed when stepping `step` along `axis`.
@@ -160,6 +231,128 @@ pub fn raycast_solid(
         direction,
         max_distance,
     )
+}
+
+#[cfg(test)]
+mod wound_tests {
+    use super::*;
+    use crate::micro::{self, Mask};
+    use vx_core::BlockRegistry as Registry;
+
+    /// One block of stone at the origin, with a wound in it.
+    struct WoundedBlock {
+        mask: Mask,
+    }
+
+    impl BlockView for WoundedBlock {
+        fn block_at(&self, x: i32, y: i32, z: i32) -> BlockId {
+            if (x, y, z) == (0, 0, 0) {
+                BlockId(1)
+            } else {
+                BlockId::AIR
+            }
+        }
+        fn mask_at(&self, x: i32, y: i32, z: i32) -> Option<Mask> {
+            ((x, y, z) == (0, 0, 0)).then_some(self.mask)
+        }
+    }
+
+    fn registry() -> Registry {
+        let mut registry = Registry::new();
+        registry
+            .register(vx_core::BlockDef::uniform("test:stone", 0))
+            .unwrap();
+        registry
+    }
+
+    /// A ray straight along +x at the centre of the cell row `(y, z)`.
+    fn along_x(view: &WoundedBlock, y: i32, z: i32) -> Option<RayHit> {
+        let at = |cell: i32| (cell as f32 + 0.5) / micro::SIDE as f32;
+        raycast_solid(
+            view,
+            &registry(),
+            Vec3::new(-2.0, at(y), at(z)),
+            Vec3::new(1.0, 0.0, 0.0),
+            8.0,
+        )
+    }
+
+    #[test]
+    fn an_intact_block_still_stops_everything() {
+        // The floor this round must not move: a block nobody has shot at
+        // behaves exactly as it did before micro existed.
+        let view = WoundedBlock { mask: micro::FULL };
+        for y in 0..micro::SIDE {
+            for z in 0..micro::SIDE {
+                assert!(along_x(&view, y, z).is_some(), "clear line through intact rock");
+            }
+        }
+    }
+
+    #[test]
+    fn a_ray_passes_through_a_cleared_channel_and_nothing_else() {
+        // The note's headline test. Clear one row of cells end to end and
+        // that row — and only that row — lets a ray through.
+        let (open_y, open_z) = (2, 1);
+        let mut mask = micro::FULL;
+        for x in 0..micro::SIDE {
+            mask &= !micro::bit(x, open_y, open_z);
+        }
+        let view = WoundedBlock { mask };
+
+        assert!(
+            along_x(&view, open_y, open_z).is_none(),
+            "the channel did not let the ray through"
+        );
+        for y in 0..micro::SIDE {
+            for z in 0..micro::SIDE {
+                if (y, z) == (open_y, open_z) {
+                    continue;
+                }
+                assert!(
+                    along_x(&view, y, z).is_some(),
+                    "the wound leaked at {y},{z} — a peephole is not a doorway"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn one_intact_cell_in_the_channel_blocks_it_again() {
+        // A firing hole is only a hole while every cell along it is gone.
+        let (open_y, open_z) = (2, 1);
+        let mut mask = micro::FULL;
+        for x in 0..micro::SIDE {
+            mask &= !micro::bit(x, open_y, open_z);
+        }
+        // Put one cell back in the middle of the channel.
+        mask |= micro::bit(2, open_y, open_z);
+        let view = WoundedBlock { mask };
+        assert!(
+            along_x(&view, open_y, open_z).is_some(),
+            "a plugged channel still let the ray through"
+        );
+    }
+
+    #[test]
+    fn a_wounded_block_reports_the_distance_to_the_material_it_met() {
+        // Not the block boundary: the cell. A hit two cells deep is half a
+        // metre further along than the face, and cover that has been chewed
+        // should read as thinner, not merely as damaged.
+        let (y, z) = (1, 1);
+        let mut mask = micro::FULL;
+        mask &= !micro::bit(0, y, z);
+        mask &= !micro::bit(1, y, z);
+        let view = WoundedBlock { mask };
+        let hit = along_x(&view, y, z).expect("the ray should have met the third cell");
+        // Entry at x = 0 is two metres along; the third cell begins half a
+        // metre into the block.
+        assert!(
+            (hit.distance - 2.5).abs() < 0.1,
+            "met material at {} rather than half a metre in",
+            hit.distance
+        );
+    }
 }
 
 #[cfg(test)]

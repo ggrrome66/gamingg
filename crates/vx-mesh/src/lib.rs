@@ -12,6 +12,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use vx_core::{BlockId, BlockRegistry, Face, Shape, CHUNK_HEIGHT, CHUNK_SIZE};
+use vx_world::micro::{self, SIDE};
 use vx_world::BlockView;
 
 /// Size of the volume being meshed, per axis.
@@ -75,6 +76,16 @@ pub struct PackedQuad {
 /// The four crossed quads a plant emits, in the order the mesher pushes them.
 pub const CROSS_KINDS: [u32; 4] = [6, 7, 8, 9];
 
+/// Where the micro face kinds begin. `kind` is four bits and cube faces plus
+/// plants took 0..=9, so 10..=15 were sitting free: a micro face is the same
+/// six faces again, measured in quarter metres.
+///
+/// This is why micro-on-damage needed no second vertex stream, no second
+/// pipeline and no scale uniform. A wounded block's cells ride the terrain
+/// buffer beside everything else, and every quad that existed before this
+/// round packs to the identical eight bytes it always did.
+pub const MICRO_KIND: u32 = 10;
+
 impl PackedQuad {
     /// Pack a cube face. `plane` is the position along the face's own axis;
     /// `iu`/`iv` and `w`/`h` are the rectangle in the other two. `light` is
@@ -84,7 +95,10 @@ impl PackedQuad {
     /// bundling them into a struct would just move the same list.
     #[allow(clippy::too_many_arguments)]
     pub fn face(kind: u32, plane: i32, iu: i32, iv: i32, w: i32, h: i32, tile: u32, light: u32) -> Self {
-        debug_assert!(kind < 10, "quad kind {kind} is not a face or a cross");
+        debug_assert!(
+            kind < 16,
+            "quad kind {kind} is not a face, a cross or a micro face"
+        );
         debug_assert!(light < 16, "light {light} does not fit its nibble");
         let bits = (kind as u64)
             | ((plane as u64 & 0x1ff) << 4)
@@ -98,6 +112,56 @@ impl PackedQuad {
             low: bits as u32,
             high: (bits >> 32) as u32,
         }
+    }
+
+    /// Pack one quarter-metre face of a wounded block's cell.
+    ///
+    /// `plane`/`iu`/`iv` stay in *block* coordinates, exactly as a full face
+    /// records them; where the face sits inside the block rides in the bits
+    /// `w` and `h` no longer need. A micro rectangle spans at most four
+    /// cells, so three bits of each nine-bit field carry the size and the
+    /// rest carry the sub-cell offsets:
+    ///
+    /// ```text
+    /// w field: [ w_cells:3 | sub_u:2 | sub_plane:3 ]
+    /// h field: [ h_cells:3 | sub_v:2 ]
+    /// ```
+    ///
+    /// `sub_plane` runs 0..=4 rather than 0..=3 because a face may sit on
+    /// the far side of the last cell — four quarters is the whole block.
+    #[allow(clippy::too_many_arguments)]
+    pub fn micro(
+        face: u32,
+        plane: i32,
+        iu: i32,
+        iv: i32,
+        sub_plane: u32,
+        sub_u: u32,
+        sub_v: u32,
+        cells_u: u32,
+        cells_v: u32,
+        tile: u32,
+        light: u32,
+    ) -> Self {
+        debug_assert!(face < 6, "micro face {face} is not a cube face");
+        debug_assert!(sub_plane <= 4, "sub-plane {sub_plane} is off the block");
+        debug_assert!(sub_u < 4 && sub_v < 4, "sub-cell offset off the block");
+        debug_assert!(
+            (1..=4).contains(&cells_u) && (1..=4).contains(&cells_v),
+            "a micro rectangle spans one to four cells"
+        );
+        let w = cells_u | (sub_u << 3) | (sub_plane << 5);
+        let h = cells_v | (sub_v << 3);
+        PackedQuad::face(
+            MICRO_KIND + face,
+            plane,
+            iu,
+            iv,
+            w as i32,
+            h as i32,
+            tile,
+            light,
+        )
     }
 
     /// Pack one of a plant's crossed quads at a block.
@@ -390,7 +454,118 @@ pub fn build_mesh(view: &impl BlockView, registry: &BlockRegistry, chunk_origin:
         mesh_face_direction(&mut mesh, view, registry, chunk_origin, face, &roofs);
     }
     mesh_cross_blocks(&mut mesh, view, registry, chunk_origin, &roofs);
+    mesh_wounds(&mut mesh, view, registry, chunk_origin, &roofs);
     mesh
+}
+
+/// Emit the quarter-metre faces of every wounded block in the chunk.
+///
+/// One quad per exposed cell face. No greedy merge here on purpose: wounds
+/// are rare by construction, and the cheap thing to do with a rare case is
+/// the simple thing. If a measurement ever says otherwise, the note's intern
+/// table is the answer — each distinct mask meshes once, ever — and it can
+/// arrive without this function's callers changing.
+fn mesh_wounds(
+    mesh: &mut Mesh,
+    view: &impl BlockView,
+    registry: &BlockRegistry,
+    origin: [i32; 3],
+    roofs: &ColumnRoofs,
+) {
+    for y in 0..CHUNK_HEIGHT {
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let world = [origin[0] + x, origin[1] + y, origin[2] + z];
+                let Some(mask) = view.mask_at(world[0], world[1], world[2]) else {
+                    continue;
+                };
+                let block = view.block_at(world[0], world[1], world[2]);
+                if block.is_air() {
+                    continue;
+                }
+                let def = registry.get_or_air(block);
+                // A cell face takes the light of whatever it looks into —
+                // the same rule the metre-scale sweep uses. A face on the
+                // block's skin looks at outside air and is lit like the wall
+                // around it; a face lining a crater looks into the block's
+                // own buried column and comes out dim, which is what makes a
+                // wound read as depth rather than as a hole punched through.
+                // Faces lining a cavity take the block's own column light,
+                // knocked down a few steps. Without the knock-down a wound
+                // in a thin wall reads as a hole punched clean through: the
+                // column is near the surface, so its light is nearly full
+                // daylight, and a brightly lit crater floor is indis-
+                // tinguishable from sky. This is the one deliberately
+                // unphysical line in the round, and it is what makes damage
+                // legible.
+                const CAVITY_SHADE: u32 = 5;
+                let inside_light = roofs
+                    .light_at(world[0], world[1], world[2])
+                    .saturating_sub(CAVITY_SHADE);
+
+                for (index, face) in Face::ALL.into_iter().enumerate() {
+                    let axis = face.axis();
+                    let step = face.offset();
+                    let tile = def.texture(face) as u32;
+                    // The neighbouring block decides whether cells on this
+                    // block's own boundary are exposed at all.
+                    let outside_open = !registry.is_opaque(view.block_at(
+                        world[0] + step[0],
+                        world[1] + step[1],
+                        world[2] + step[2],
+                    ));
+                    let outside_light =
+                        roofs.light_at(world[0] + step[0], world[1] + step[1], world[2] + step[2]);
+
+                    for cell in 0..(SIDE * SIDE * SIDE) {
+                        let cx = cell % SIDE;
+                        let cz = (cell / SIDE) % SIDE;
+                        let cy = cell / (SIDE * SIDE);
+                        if !micro::has(mask, cx, cy, cz) {
+                            continue;
+                        }
+                        let (nx, ny, nz) = (cx + step[0], cy + step[1], cz + step[2]);
+                        let inside = (0..SIDE).contains(&nx)
+                            && (0..SIDE).contains(&ny)
+                            && (0..SIDE).contains(&nz);
+                        // Exposed when the cell beyond is gone, or when this
+                        // cell is on the block's skin and the block beyond
+                        // does not cover it.
+                        let (exposed, light) = if inside {
+                            (!micro::has(mask, nx, ny, nz), inside_light)
+                        } else {
+                            (outside_open, outside_light)
+                        };
+                        if !exposed {
+                            continue;
+                        }
+
+                        let local = [x, y, z];
+                        let cells = [cx, cy, cz];
+                        let u = (axis + 1) % 3;
+                        let v = (axis + 2) % 3;
+                        // The face sits on the far side of the cell for a
+                        // positive face, and on the near side otherwise.
+                        let sub_plane = cells[axis] + i32::from(face.is_positive());
+
+                        mesh.push_quad(PackedQuad::micro(
+                            index as u32,
+                            local[axis],
+                            local[u],
+                            local[v],
+                            sub_plane as u32,
+                            cells[u] as u32,
+                            cells[v] as u32,
+                            1,
+                            1,
+                            tile,
+                            light,
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Emit the crossed-quad plants.
@@ -477,7 +652,22 @@ fn mesh_face_direction(
                     world[2] + offset[2],
                 );
 
-                mask[(iv * du + iu) as usize] = face_is_visible(registry, block, neighbour)
+                // A wounded block has no full faces — the micro pass draws
+                // its cells — and it no longer hides the block behind it,
+                // because you can see through what has been chewed.
+                let wounded = view.mask_at(world[0], world[1], world[2]).is_some();
+                let neighbour_wounded = view
+                    .mask_at(
+                        world[0] + offset[0],
+                        world[1] + offset[1],
+                        world[2] + offset[2],
+                    )
+                    .is_some();
+
+                mask[(iv * du + iu) as usize] = (!wounded
+                    && (neighbour_wounded || face_is_visible(registry, block, neighbour))
+                    && !block.is_air()
+                    && registry.get_or_air(block).shape != Shape::Cross)
                     .then(|| {
                         let light = roofs.light_at(
                             world[0] + offset[0],
@@ -555,6 +745,246 @@ fn emit_merged_quads<K: Copy + PartialEq>(
             }
 
             iu += width;
+        }
+    }
+}
+
+#[cfg(test)]
+mod wound_tests {
+    use super::*;
+    use vx_core::{BlockDef, BlockId, BlockRegistry};
+
+    /// A single block at the chunk origin, optionally wounded, in open air.
+    struct OneBlock {
+        mask: Option<micro::Mask>,
+    }
+
+    impl BlockView for OneBlock {
+        fn block_at(&self, x: i32, y: i32, z: i32) -> BlockId {
+            if (x, y, z) == (0, 0, 0) {
+                BlockId(1)
+            } else {
+                BlockId::AIR
+            }
+        }
+        fn mask_at(&self, x: i32, y: i32, z: i32) -> Option<micro::Mask> {
+            ((x, y, z) == (0, 0, 0)).then_some(self.mask).flatten()
+        }
+    }
+
+    fn registry() -> BlockRegistry {
+        let mut registry = BlockRegistry::new();
+        registry.register(BlockDef::uniform("test:stone", 0)).unwrap();
+        registry
+    }
+
+    fn quads_by_kind(mask: Option<micro::Mask>) -> std::collections::BTreeMap<u32, usize> {
+        let mesh = build_mesh(&OneBlock { mask }, &registry(), [0, 0, 0]);
+        let mut counts = std::collections::BTreeMap::new();
+        for quad in &mesh.quads {
+            *counts.entry(quad.kind()).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    #[test]
+    fn an_intact_block_meshes_exactly_as_it_always_did() {
+        // The floor the whole round stands on: a world nobody has damaged
+        // produces the same six full faces and not one micro quad.
+        let counts = quads_by_kind(None);
+        assert_eq!(counts.values().sum::<usize>(), 6, "not six faces: {counts:?}");
+        assert!(
+            counts.keys().all(|kind| *kind < MICRO_KIND),
+            "an intact block emitted micro geometry: {counts:?}"
+        );
+    }
+
+    #[test]
+    fn a_wounded_block_draws_its_cells_and_no_full_faces() {
+        // An untouched *mask* still covers every side, so the block must
+        // show sixteen cell faces per side and nothing at metre scale.
+        let counts = quads_by_kind(Some(micro::FULL));
+        assert!(
+            counts.keys().all(|kind| *kind >= MICRO_KIND),
+            "a wounded block still drew a full face: {counts:?}"
+        );
+        for face in 0..6 {
+            assert_eq!(
+                counts.get(&(MICRO_KIND + face)).copied().unwrap_or(0),
+                16,
+                "face {face} did not draw its sixteen cells: {counts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn carving_removes_the_cells_it_took_and_opens_the_ones_behind() {
+        // Take the whole front layer, as a drill tick does. The face that
+        // pointed at the drill loses all sixteen cells; the layer behind it
+        // is now exposed and picks them up.
+        let face = 4u32; // NegZ, the layer at z = 0.
+        let mask = micro::carve(micro::FULL, micro::face_layer(face as usize));
+        let counts = quads_by_kind(Some(mask));
+        assert_eq!(
+            counts.get(&(MICRO_KIND + face)).copied().unwrap_or(0),
+            16,
+            "the drilled face should still show sixteen cells, one layer deeper"
+        );
+        // And the sides lost a column each: fifteen cells a side would be
+        // wrong, twelve is right — four cells of each side went with the
+        // layer.
+        for side in [0u32, 1, 2, 3] {
+            assert_eq!(
+                counts.get(&(MICRO_KIND + side)).copied().unwrap_or(0),
+                12,
+                "side {side} kept cells the drill took: {counts:?}"
+            );
+        }
+    }
+
+    /// The four corners a quad becomes, computed exactly as `shader.wgsl`
+    /// computes them. If this and the shader ever disagree the geometry
+    /// lands in the wrong place, which is a class of bug no unit test on the
+    /// mesher alone can see — so the arithmetic is mirrored here and pinned.
+    fn shader_corners(quad: PackedQuad) -> [[f32; 3]; 4] {
+        let raw_kind = quad.kind();
+        let mut plane = quad.plane() as f32;
+        let mut iu = quad.iu() as f32;
+        let mut iv = quad.iv() as f32;
+        let w_bits = quad.width() as u32;
+        let h_bits = quad.height() as u32;
+        let mut w = w_bits as f32;
+        let mut h = h_bits as f32;
+
+        let kind = if raw_kind >= MICRO_KIND {
+            let cells_u = (w_bits & 7) as f32;
+            let sub_u = ((w_bits >> 3) & 3) as f32;
+            let sub_plane = ((w_bits >> 5) & 7) as f32;
+            let cells_v = (h_bits & 7) as f32;
+            let sub_v = ((h_bits >> 3) & 3) as f32;
+            plane += sub_plane * 0.25;
+            iu += sub_u * 0.25;
+            iv += sub_v * 0.25;
+            w = cells_u * 0.25;
+            h = cells_v * 0.25;
+            raw_kind - MICRO_KIND
+        } else {
+            raw_kind
+        };
+
+        let axis = kind / 2;
+        let corners = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)];
+        corners.map(|(du, dv)| {
+            let a = iu + du;
+            let b = iv + dv;
+            match axis {
+                0 => [plane, a, b],
+                1 => [b, plane, a],
+                _ => [a, b, plane],
+            }
+        })
+    }
+
+    #[test]
+    fn micro_faces_land_exactly_on_the_cell_they_belong_to() {
+        // Walk every cell and every face of a wounded block and check the
+        // quad the mesher emits covers precisely that cell's quarter-metre
+        // face — the right plane, and the right square within it.
+        let mask = micro::FULL;
+        let mesh = build_mesh(&OneBlock { mask: Some(mask) }, &registry(), [0, 0, 0]);
+        let cell = 1.0 / micro::SIDE as f32;
+
+        for quad in &mesh.quads {
+            let face = (quad.kind() - MICRO_KIND) as usize;
+            let axis = face / 2;
+            let positive = face % 2 == 1;
+            let corners = shader_corners(*quad);
+
+            // Flat in its own axis, and on a quarter-metre plane.
+            let depth = corners[0][axis];
+            assert!(
+                corners.iter().all(|corner| corner[axis] == depth),
+                "face {face} is not flat: {corners:?}"
+            );
+            let quarters = depth / cell;
+            assert!(
+                (quarters - quarters.round()).abs() < 1.0e-4,
+                "face {face} sits at {depth}, off the cell grid"
+            );
+            // On the block's skin, on the correct side.
+            assert_eq!(
+                depth,
+                if positive { 1.0 } else { 0.0 },
+                "face {face} of an intact mask should sit on the block's skin"
+            );
+            // And a quarter of a metre square in the other two axes.
+            for other in 0..3 {
+                if other == axis {
+                    continue;
+                }
+                let low = corners.iter().map(|c| c[other]).fold(f32::MAX, f32::min);
+                let high = corners.iter().map(|c| c[other]).fold(f32::MIN, f32::max);
+                assert!(
+                    (high - low - cell).abs() < 1.0e-4,
+                    "face {face} spans {} on axis {other}, not a cell",
+                    high - low
+                );
+                assert!(
+                    (0.0..=1.0).contains(&low) && (0.0..=1.0).contains(&high),
+                    "face {face} left the block on axis {other}: {low}..{high}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_recessed_face_sits_where_the_material_actually_is() {
+        // Drill one layer off the front. The face the player now looks at
+        // must sit a quarter of a metre deeper, not on the old skin.
+        let face = 4usize; // NegZ
+        let mask = micro::carve(micro::FULL, micro::face_layer(face));
+        let mesh = build_mesh(&OneBlock { mask: Some(mask) }, &registry(), [0, 0, 0]);
+        let fronts: Vec<f32> = mesh
+            .quads
+            .iter()
+            .filter(|quad| quad.kind() == MICRO_KIND + face as u32)
+            .map(|quad| shader_corners(*quad)[0][2])
+            .collect();
+        assert_eq!(fronts.len(), 16);
+        for depth in fronts {
+            assert!(
+                (depth - 0.25).abs() < 1.0e-4,
+                "the drilled face drew at {depth} rather than one cell in"
+            );
+        }
+    }
+
+    #[test]
+    fn every_micro_quad_round_trips_through_the_packing() {
+        // The packing steals bits from `w`/`h`, so a mistake there is a
+        // silently misplaced face rather than an error. Check the fields
+        // come back out as they went in.
+        for face in 0..6u32 {
+            for sub_plane in 0..=4u32 {
+                for sub in 0..4u32 {
+                    let quad =
+                        PackedQuad::micro(face, 9, 3, 7, sub_plane, sub, 3 - sub, 2, 4, 5, 11);
+                    assert_eq!(quad.kind(), MICRO_KIND + face);
+                    assert_eq!(quad.plane(), 9);
+                    assert_eq!(quad.iu(), 3);
+                    assert_eq!(quad.iv(), 7);
+                    assert_eq!(quad.tile(), 5);
+                    assert_eq!(quad.light(), 11);
+                    // The sub-cell fields, unpacked the way the shader does.
+                    let w = quad.width() as u32;
+                    let h = quad.height() as u32;
+                    assert_eq!(w & 7, 2, "cells_u");
+                    assert_eq!((w >> 3) & 3, sub, "sub_u");
+                    assert_eq!((w >> 5) & 7, sub_plane, "sub_plane");
+                    assert_eq!(h & 7, 4, "cells_v");
+                    assert_eq!((h >> 3) & 3, 3 - sub, "sub_v");
+                }
+            }
         }
     }
 }

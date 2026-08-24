@@ -208,6 +208,52 @@ impl World {
         Some(previous)
     }
 
+    /// This block's wound, if violence has given it one.
+    pub fn mask(&self, pos: BlockPos) -> Option<crate::micro::Mask> {
+        let local = pos.local()?;
+        self.chunks.get(&pos.chunk())?.mask(local)
+    }
+
+    /// Take a shape out of a block, and say what became of it.
+    ///
+    /// The block gains an interior the first time it is hit and loses
+    /// exactly the cells the shape removed; when too little is left it
+    /// becomes air, which is the only outcome the rest of the game already
+    /// knew how to have. Everything here is integer arithmetic on one
+    /// register, so two runs fed the same carves agree bit for bit — which
+    /// is what lets wounds ride the replay oracle without the journal ever
+    /// learning they exist.
+    pub fn carve(&mut self, pos: BlockPos, shape: crate::micro::Mask) -> Carved {
+        let Some(local) = pos.local() else {
+            return Carved::Nothing;
+        };
+        let Some(chunk) = self.chunks.get_mut(&pos.chunk()) else {
+            return Carved::Nothing;
+        };
+        if chunk.get(local).is_air() {
+            return Carved::Nothing;
+        }
+        let before = chunk.mask(local).unwrap_or(crate::micro::FULL);
+        let after = crate::micro::carve(before, shape);
+        if after == before {
+            return Carved::Nothing;
+        }
+        if crate::micro::dead(after) {
+            // What is left is rubble, not cover. The block goes, by the same
+            // path every other break takes.
+            let previous = chunk.set(local, BlockId::AIR);
+            self.dirty_touching_neighbours(pos);
+            self.edit_count += 1;
+            return Carved::Broke(previous);
+        }
+        chunk.set_mask(local, after);
+        // A wound on a chunk edge changes what the neighbour draws along the
+        // seam, exactly as a broken block does.
+        self.dirty_touching_neighbours(pos);
+        self.edit_count += 1;
+        Carved::Wounded(after)
+    }
+
     /// Mark neighbouring chunks dirty when `pos` sits on a shared edge.
     fn dirty_touching_neighbours(&mut self, pos: BlockPos) {
         let own = pos.chunk();
@@ -256,6 +302,21 @@ impl BlockView for World {
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockId {
         self.block(BlockPos::new(x, y, z))
     }
+
+    fn mask_at(&self, x: i32, y: i32, z: i32) -> Option<crate::micro::Mask> {
+        self.mask(BlockPos::new(x, y, z))
+    }
+}
+
+/// What a carve did to a block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Carved {
+    /// Nothing there to damage, or the shape took nothing this block still had.
+    Nothing,
+    /// Still standing, with this much of it left.
+    Wounded(crate::micro::Mask),
+    /// Too little left to be a block: it is air now, and this is what it was.
+    Broke(BlockId),
 }
 
 #[cfg(test)]

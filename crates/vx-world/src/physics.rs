@@ -513,6 +513,85 @@ pub fn supported(world: &World, aabb: &Aabb) -> bool {
 }
 
 #[cfg(test)]
+mod wound_tests {
+    use super::*;
+    use crate::micro;
+    use vx_core::{BlockPos, ChunkPos, LocalPos};
+
+    use crate::world::World;
+
+    /// The asymmetry the micro round rests on: rays read a block's cells,
+    /// feet never do. You can shoot through a peephole; you can never fall
+    /// through one, and that is what leaves physics, `supported`, the flow
+    /// fields and every footing untouched by damage.
+    #[test]
+    fn a_wounded_block_is_still_a_solid_floor() {
+        let mut world = World::new(7);
+        world.load_around(ChunkPos::new(0, 0), 1);
+        let stone = world.registry().id_of("engine:stone").unwrap();
+
+        let floor = BlockPos::new(2, 80, 2);
+        for x in 0..6 {
+            for z in 0..6 {
+                for y in 60..=80 {
+                    world.set_block(
+                        BlockPos::new(x, y, z),
+                        if y == 80 { stone } else { vx_core::BlockId::AIR },
+                    );
+                }
+            }
+        }
+
+        let standing = Aabb::standing_on(
+            Vec3::new(floor.x as f32 + 0.5, 81.0, floor.z as f32 + 0.5),
+            0.6,
+            1.8,
+        );
+        assert!(
+            supported(&world, &standing),
+            "the test never stood the body on the floor to begin with"
+        );
+
+        // Now chew the floor block most of the way through — far more than
+        // any single hit does — and stand on it again.
+        let mut mask = micro::FULL;
+        for cell in 0..micro::SIDE * micro::SIDE * micro::SIDE {
+            let x = cell % micro::SIDE;
+            let z = (cell / micro::SIDE) % micro::SIDE;
+            let y = cell / (micro::SIDE * micro::SIDE);
+            if micro::remaining(mask) <= micro::DEATH_CELLS + 1 {
+                break;
+            }
+            mask &= !micro::bit(x, y, z);
+        }
+        world
+            .chunk_mut(ChunkPos::new(0, 0))
+            .unwrap()
+            .set_mask(LocalPos::new(floor.x, floor.y, floor.z).unwrap(), mask);
+
+        assert!(
+            world.mask(floor).is_some(),
+            "the test did not actually wound the floor"
+        );
+        assert!(
+            supported(&world, &standing),
+            "feet fell through a wound — physics must read composites as full boxes"
+        );
+        assert!(
+            collides(
+                &world,
+                &Aabb::standing_on(
+                    Vec3::new(floor.x as f32 + 0.5, floor.y as f32, floor.z as f32 + 0.5),
+                    0.6,
+                    0.8,
+                )
+            ),
+            "a body could stand inside a wounded block"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use vx_core::{BlockId, ChunkPos};

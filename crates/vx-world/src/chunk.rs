@@ -1,5 +1,7 @@
 //! A single chunk column and its access helpers.
 
+use std::collections::BTreeMap;
+
 use vx_core::{BlockId, ChunkPos, LocalPos, CHUNK_HEIGHT, CHUNK_SIZE, CHUNK_VOLUME};
 
 use crate::storage::PalettedStorage;
@@ -9,6 +11,10 @@ use crate::storage::PalettedStorage;
 pub struct Chunk {
     pos: ChunkPos,
     blocks: PalettedStorage,
+    /// Wounds: the blocks in this chunk that violence has given an interior,
+    /// by local index. Sparse by construction — a chunk nobody has shot at
+    /// carries an empty map and costs nothing.
+    composites: BTreeMap<u16, crate::micro::Mask>,
     /// Set when the contents change, cleared once a mesh has been rebuilt.
     dirty: bool,
     /// Set when the chunk no longer matches what generation would produce, and
@@ -26,6 +32,7 @@ impl Chunk {
         Chunk {
             pos,
             blocks: PalettedStorage::empty_chunk(),
+            composites: BTreeMap::new(),
             dirty: false,
             modified: false,
         }
@@ -36,6 +43,7 @@ impl Chunk {
         Chunk {
             pos,
             blocks,
+            composites: BTreeMap::new(),
             dirty: true,
             // Loaded chunks came from disk, so they are already saved.
             modified: false,
@@ -50,12 +58,54 @@ impl Chunk {
         self.blocks.get(local.index())
     }
 
+    /// This block's wound, if it has one.
+    pub fn mask(&self, local: LocalPos) -> Option<crate::micro::Mask> {
+        self.composites.get(&(local.index() as u16)).copied()
+    }
+
+    /// Every wound in this chunk, for saving and for the mesher.
+    pub fn composites(&self) -> impl Iterator<Item = (u16, crate::micro::Mask)> + '_ {
+        self.composites.iter().map(|(index, mask)| (*index, *mask))
+    }
+
+    /// How many wounds this chunk carries.
+    pub fn composite_count(&self) -> usize {
+        self.composites.len()
+    }
+
+    /// Give a block a wound, or take one away.
+    ///
+    /// An intact mask removes the entry rather than storing sixty-four set
+    /// bits: "no wound" has exactly one representation, which is what keeps
+    /// the save small and the mesher's fast path honest.
+    pub fn set_mask(&mut self, local: LocalPos, mask: crate::micro::Mask) {
+        let index = local.index() as u16;
+        let changed = if mask == crate::micro::FULL {
+            self.composites.remove(&index).is_some()
+        } else {
+            self.composites.insert(index, mask) != Some(mask)
+        };
+        if changed {
+            self.dirty = true;
+            self.modified = true;
+        }
+    }
+
+    /// Restore the wounds a save file was holding.
+    pub fn load_composites(&mut self, wounds: impl IntoIterator<Item = (u16, crate::micro::Mask)>) {
+        self.composites = wounds.into_iter().collect();
+    }
+
     /// Write a block, returning the block that was there.
     pub fn set(&mut self, local: LocalPos, block: BlockId) -> BlockId {
         let index = local.index();
         let previous = self.blocks.get(index);
         if previous != block {
             self.blocks.set(index, block);
+            // A block replaced is a block made whole: whatever was chewed
+            // out of the old one has nothing to do with the new one, and a
+            // stale mask here would haunt the block that replaced it.
+            self.composites.remove(&(index as u16));
             self.dirty = true;
             self.modified = true;
         }
@@ -144,6 +194,17 @@ impl Chunk {
 /// place — or vanishes.
 pub trait BlockView {
     fn block_at(&self, x: i32, y: i32, z: i32) -> BlockId;
+
+    /// The damage mask of a *composite* block, if this one has been wounded.
+    ///
+    /// Defaulted to `None` — an intact world — so every existing view keeps
+    /// working untouched and only the ones that actually hold wounds
+    /// override it. That default is the whole reason micro-on-damage reaches
+    /// the raycast, the mesher and every sight query without any of them
+    /// changing shape.
+    fn mask_at(&self, _x: i32, _y: i32, _z: i32) -> Option<crate::micro::Mask> {
+        None
+    }
 }
 
 /// A chunk meshed in isolation, treating everything outside it as air.

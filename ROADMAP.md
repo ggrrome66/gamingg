@@ -101,7 +101,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 23 | `58bc6ac` | The townsfolk: names, trades and temperaments per person, pure schedules with market days, a friendship ledger with gift tables and tier unlocks, and speech templated over the live simulation |
 | 24 | `89aa6b3` | The controller: native gamepad play synthesized into the keyboard and mouse seams, a SELECT-key control scheme overlay, and a one-command Steam Deck installer |
 | 25 | `c235ac7` | The workshop: upgrades printable in materials as well as bought in credits, three new lines (pack, press, lamp), and the rule that an upgrade may not change arithmetic the journal re-runs |
-| 26 | _this_ | Wear and recovery: machines age by the tick they work, the worst one sets the crew's pace, and spare parts printed at the workshop mend them — the first machine state that had to live inside the replayed simulation |
+| 26 | `23d8bea` | Wear and recovery: machines age by the tick they work, the worst one sets the crew's pace, and spare parts printed at the workshop mend them — the first machine state that had to live inside the replayed simulation |
+| 27 | _this_ | Micro-on-damage: a block gains a 4³ interior only when violence touches it, one `u64` a wound, so walls chew where they are shot, rays pass through the holes and feet never do |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1364,6 +1365,83 @@ maintenance costume.
 
 ---
 
+## Shipped — Stage 27: micro-on-damage
+
+**Detail allocated by damage.** The world is still one metre. Worldgen, the
+lattice, blueprints, forts, bunkers, flow fields, footings and every
+block-denominated constant are untouched — a *composite* is a wound on the
+existing grid, not a resolution increase. A block gains a 4³ interior the
+first time something hits it and loses exactly the cells the hit removed, so
+detail costs nothing anywhere the player has not shot and is spent precisely
+where they are looking hardest.
+
+**A damaged block is one `u64`.** Sixty-four cells, one bit each, at bit
+`x + 4z + 16y` — each vertical layer a sixteen-bit slice, the whole wound one
+register. Single-material by decree: chewed stone is stone with pieces
+missing, because that is what damage *is*. Every operation is register
+arithmetic — a carve is one `AND`, the death check is one `popcnt`, the
+mesher's face set is six shifts and six ANDs, and even connectivity runs in
+registers (dilate-and-mask to a fixpoint, ten iterations being a proof
+rather than a guess, because the longest path in a 4³ is nine steps).
+
+**SWAR, not `PEXT` — the Deck is Zen 2.** The obvious instructions for
+bit-plane surgery are microcoded on Van Gogh, tens to hundreds of cycles,
+fixed only in Zen 3. Everything here is plain shifts, ANDs and `popcnt`,
+single-cycle everywhere this game will run — and, being integer arithmetic,
+identical on every machine, which is what lets wounds ride the replay oracle
+for free.
+
+**Rays read micro; feet never do.** The DDA descends into a composite and
+walks its cells, so `sight::obstruction`, projectiles and every cover query
+see the hole: chip a wall long enough and a firing hole opens. Movement
+collision stays coarse — a composite is a full box until it dies. You can
+shoot through a peephole; you can never fall through one. That single
+asymmetry is what leaves physics, `supported`, the flow fields and every
+footing byte-for-byte untouched, and it is the reason this was one round
+rather than four. Both halves are pinned by tests.
+
+**The arsenal grew the mechanic by itself.** A slug bites instead of
+deleting, and which cell it bites comes from where the round actually
+stopped. Nobody wrote "make a hole": fire twice down one line and the second
+round flies through the cells the first one took. That behaviour is now an
+arsenal test, and so is its complement — spread fire still demolishes, so
+the launcher stays a weapon rather than a chisel. Drilling carves the layer
+nearest the bit each quarter of the way through: the same total work, the
+same finishing tick, visible at last.
+
+**No second vertex stream was needed.** The note budgeted for one, at
+quarter-metre scale with its own uniform. It turned out `PackedQuad`'s
+`kind` field had six unused values and micro faces need only three of `w`
+and `h`'s nine bits, so cell faces ride the terrain buffer with their
+sub-cell offsets in the freed bits — no new pipeline, no new buffer, and
+every quad that existed before this round packs to the identical eight
+bytes. A test mirrors the shader's own arithmetic in Rust and checks each
+face lands on the cell it belongs to, which is a class of bug no test on the
+mesher alone can see.
+
+**Wounds converge; battlefields do not accumulate.** Below `DEATH_CELLS` the
+block becomes air by the same path every other break takes; a mask above
+`HEAL_CELLS` is nearly whole. Carving drops anything it knocks loose, so a
+wound is always one connected component — asserted exhaustively, every shape
+at every cell and face. Region saves carry the masks (**format version 2**),
+raw rather than interned, because the note is explicit that saved masks are
+a cache of what replay would recompute and a cache gets pragmatic
+compression, not optimal compression.
+
+**Found and fixed on the way:** the gold panel indexed a four-entry stock
+array with five goods and had done since HHO landed in stage 20 — it only
+crashes under `--features gold`, and recent rounds ran the no-default-feature
+suite. The array is now sized by the catalogue, so the next good cannot
+repeat it.
+
+**Deliberately not in 27:** the intern table and its quad cache (the note's
+own advice is measure first); consolidation's seasonal repair; the distant
+LOD majority vote, which is written and tested (`lod_solid`) but not yet
+wired to a range; multi-material wounds at a two-block seam; and gravel that
+tumbles, which is physics this round refuses to buy.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -1447,10 +1525,10 @@ part has to attach to, which maps onto the arc as it now stands:
 
 | Part | Stage | Why there |
 |---|---|---|
-| `belief.rs`, the occupancy search, the watchdog | 27 | lands with the first hostile — there is nothing to hold a belief until then |
-| Fire discipline and lane costs | 27–28 | needs a *pair* of hostiles before "do not shoot your friend" can be violated |
-| The director and its pacing budget | 28 | arrives with the occupied bunkers it paces |
-| The stalker, and noise-weighted hints | 30 | waits until the deep caves have somewhere worth being afraid of |
+| `belief.rs`, the occupancy search, the watchdog | 28 | lands with the first hostile — there is nothing to hold a belief until then |
+| Fire discipline and lane costs | 28–29 | needs a *pair* of hostiles before "do not shoot your friend" can be violated |
+| The director and its pacing budget | 29 | arrives with the occupied bunkers it paces |
+| The stalker, and noise-weighted hints | 31 | waits until the deep caves have somewhere worth being afraid of |
 
 Its tests come with it, and one is a house rule restated: **all of it
 replays** — a firefight's journal reproduces every mode transition at the
@@ -1552,21 +1630,23 @@ if the traffic it produces reads as dull.
 ## The arc beyond
 
 Renumbered again after the townsfolk (23), the controller (24), the
-workshop (25) and wear (26) took their slots: the plans kept their order,
-the stages moved down to make room. The hunt note above supplies the engine
-for 27 and 28; the stalker waits for 30.
+workshop (25), wear (26) and micro-on-damage (27) took their slots: the
+plans kept their order, the stages moved down to make room. The hunt note
+above supplies the engine for 28 and 29; the stalker waits for 31 — and it
+now arrives into a world where cover already degrades, which is exactly why
+the micro note asked to land before the hostiles rather than after them.
 
 | Stage | What | Why here |
 |---|---|---|
-| 27 | Hostiles and health | The half of combat stage 13 leaves out — and where the hunt note's belief, occupancy search and stuck watchdog land, alongside the people note's combat half: policies emitting `MoveCommand` through the player integrator, composure driven off the `nerve` stage 23 already derived, modes from Fight down to Surrender, cover as occlusion sampled at three eye heights |
-| 28 | Bunkers, occupied | Mobs and military, and the hunt note's director with its pacing budget and zone-grade hints. Held until here because both attack you, and that needs the health model stage 27 brings. Squads bounded on purpose: pairs move alternately, a pair that loses its partner takes the ally-down composure hit — suppression and command layers explicitly out of scope. Surrender feeds the arrest verb, the jailhouse and capture contracts |
-| 29 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
-| 30 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore. The hunt note's stalker lands here too: it waits until the deep places are worth being afraid of, and hunts by the noise a working mine makes |
-| 31 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 28 | Hostiles and health | The half of combat stage 13 leaves out — and where the hunt note's belief, occupancy search and stuck watchdog land, alongside the people note's combat half: policies emitting `MoveCommand` through the player integrator, composure driven off the `nerve` stage 23 already derived, modes from Fight down to Surrender, cover as occlusion sampled at three eye heights |
+| 29 | Bunkers, occupied | Mobs and military, and the hunt note's director with its pacing budget and zone-grade hints. Held until here because both attack you, and that needs the health model stage 28 brings. Squads bounded on purpose: pairs move alternately, a pair that loses its partner takes the ally-down composure hit — suppression and command layers explicitly out of scope. Surrender feeds the arrest verb, the jailhouse and capture contracts |
+| 30 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
+| 31 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore. The hunt note's stalker lands here too: it waits until the deep places are worth being afraid of, and hunts by the noise a working mine makes |
+| 32 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 26.
+The whole game at a glance, as of stage 27.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1625,6 +1705,10 @@ an upgrade may not touch arithmetic the journal re-runs);
 wear and recovery (machines age by the tick they work, the worst one sets
 the crew's pace, printed spare parts mend them, and the ledger lives inside
 the replayed simulation because it decides how much ground gets cut);
+micro-on-damage (blocks gain a 4³ interior only where violence touches them,
+one `u64` a wound, carved with register arithmetic, drawn as quarter-metre
+faces riding the existing quad stream, with rays reading the cells and feet
+never doing);
 a Steam Deck dist build every round.
 
 **Planned, in arc order:** hostiles and health

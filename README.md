@@ -685,6 +685,38 @@ compiled in. It needs **glibc 2.39 or newer** (SteamOS 3.7+ is fine, 3.6 is not)
 ./dist/gamingg-linux-x86_64
 ```
 
+### Walls remember being shot
+
+Blocks are still one metre, right up until something hits them. Then that
+block — only that block — grows a 4×4×4 interior and loses exactly the cells
+the hit took out. A slug leaves a bite where it actually struck; a blast
+leaves a crater; the drill takes the layer nearest the bit each quarter of
+the way through, so a rock face being worked visibly gets worked. Nothing
+else in the world changes scale: the terrain, the towns, the forts and the
+bunkers are the same one-metre grid they always were, and a block nobody has
+damaged costs exactly what it always cost.
+
+The good part is what falls out of it. **Rays read the cells; your feet do
+not.** Shoot the same spot twice and the second round goes through the hole
+the first one made — nobody wrote that, it is just that the cells stopped
+being there and the ray noticed. Chip away at cover and it stops being cover,
+a bit at a time, because every line-of-sight check in the game already runs
+through the same raycast. But you can never *walk* through a wound: for
+collision a damaged block is still a solid box until it dies outright. You
+can shoot through a peephole; you can never fall through one.
+
+Damage converges rather than piling up. Chew a block past the point where
+there is anything left to hold and it becomes air, dropping its yield like
+any other break — and anything a carve knocks loose goes with it, so you
+never get crumbs floating in mid-air. Fire enough rounds at one wall and you
+end up with a hole or a wall, never a museum of every shot you took.
+
+Under the hood a wound is a single 64-bit number, one bit per cell, and
+every operation on it is a shift or an AND or a population count — the sort
+of instruction that is one cycle on the Steam Deck's chip. That is why
+damage is cheap enough to be everywhere, and why two machines always agree
+about what a wall looks like after a firefight.
+
 ### Machines wear out
 
 Work costs machines. Every tick a drone actually digs or a flier actually
