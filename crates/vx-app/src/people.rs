@@ -105,6 +105,20 @@ pub struct Person {
     pub birthday: u32,
 }
 
+/// A temperament from a bare seed, for people who have no town roster to
+/// come from — the deputies a warrant sends, and whoever else turns up
+/// later. The same four properties off the same kind of stream, so a
+/// deputy's nerve means exactly what a shopkeeper's nerve means.
+pub fn temperament_from(seed: u64) -> Temperament {
+    let stream = |salt: u64| vx_world::seed::finalise(seed ^ salt.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    Temperament {
+        archetype: pick(&Archetype::ALL, stream(0x01)),
+        nerve: (stream(0x02) % 256) as u8,
+        warmth: (stream(0x03) % 256) as u8,
+        voice: (stream(0x04) % 256) as u8,
+    }
+}
+
 /// The person's own hash stream, salted per property.
 fn hash(site: &TownSite, index: usize, salt: u64) -> u64 {
     vx_world::seed::finalise(

@@ -79,6 +79,11 @@ pub struct HudContent<'a> {
     pub optic: Option<&'static str>,
     /// What the fleet has left to burn, when there is a fleet to fuel.
     pub fuel: Option<String>,
+    /// Hits left, once anything has landed. Whole draws nothing: a bar that
+    /// is always there is a bar nobody reads.
+    pub condition: Option<String>,
+    /// Deputies still coming for you. Zero draws nothing.
+    pub deputies: usize,
 }
 
 /// What the HUD says about how the player is moving.
@@ -232,6 +237,22 @@ pub fn render_hud(content: &HudContent) -> Vec<u8> {
         font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, colour, line);
         y += LINE_HEIGHT as i32;
     }
+    // Your own condition and the law's attention outrank the kit lines:
+    // both are things you must act on now.
+    if let Some(condition) = &content.condition {
+        font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, WANTED, condition);
+        y += LINE_HEIGHT as i32;
+    }
+    if content.deputies > 0 {
+        let line = if content.deputies == 1 {
+            "ONE DEPUTY ON YOU".to_string()
+        } else {
+            format!("{} DEPUTIES ON YOU", content.deputies)
+        };
+        font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, WANTED, &line);
+        y += LINE_HEIGHT as i32;
+    }
+
     if let Some(optic) = content.optic {
         font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, ACCENT, optic);
         y += LINE_HEIGHT as i32;
@@ -300,6 +321,8 @@ mod tests {
             panicking: 0,
             kestrel: None,
             optic: None,
+            condition: None,
+            deputies: 0,
             fuel: None,
         }
     }

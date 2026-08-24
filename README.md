@@ -685,6 +685,44 @@ compiled in. It needs **glibc 2.39 or newer** (SteamOS 3.7+ is fine, 3.6 is not)
 ./dist/gamingg-linux-x86_64
 ```
 
+### The law comes for you
+
+Every crime you have ever been seen committing has been going on a tab. Push
+that tab past the warrant threshold and the town stops writing and starts
+sending: three deputies, fanned out, coming your way.
+
+They do not know where you are — they *believe* where you are. Each squad
+keeps a last-known position whose confidence fades, and spreads a map of
+where you might have got to across the ground you could have walked. They
+walk to the likeliest spot, and looking somewhere is what rules it out. So
+they sweep, they cover ground, they double back, and when they run out of
+places you could be they say so and go home. Break line of sight and the
+clock starts; run far enough and hiding genuinely works. Duck behind the
+nearest rock and it genuinely does not.
+
+What you are playing against is their **nerve**, not their aim. Wound one and
+their composure drops; miss one closely and it drops anyway, so you can pin
+somebody without hitting them; put one down in front of the others and it
+costs all of them badly. As it falls they stop fighting and start taking
+cover, then start running, and finally put their hands up — except the proud
+ones, who never surrender, and the nervous ones, who never bothered with
+cover in the first place. That temperament is the same one the townsfolk
+have had since they got names: the sheriff's steadiness and a drifter's
+nerve are the same number, rolled once.
+
+They will not shoot through each other, ever. If one ends up in another's
+line, they step aside instead. And they say what they are doing out loud —
+"check the far side", "taking cover", "trail is cold, spread out" — because
+a clever enemy nobody can *see* being clever may as well be a random one.
+Type `law` at the terminal for the roll call: what each deputy is doing, how
+their nerve is holding, and what sort of person they are.
+
+You can take six hits. There is no medkit: break contact, stay unhit for a
+few seconds, and you start mending — so getting *away* is the heal. Take all
+six and you go down, and going down in front of the law is an arrest, not a
+grave: they take what you can pay of the bounty, write off the rest, and you
+wake up at home with a clean sheet.
+
 ### Walls remember being shot
 
 Blocks are still one metre, right up until something hits them. Then that
@@ -856,7 +894,7 @@ Controls:
 | `[` / `]` | Zoom the minimap out / in |
 | `9` | The electrolyser, to place on a shore |
 | `E` | A word with the nearest townsperson when nothing solid is in reach — their line lands as a toast and in the terminal's transcript |
-| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine |
+| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `law` reads the deputies |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
 | `F5` | Save |

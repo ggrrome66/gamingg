@@ -102,7 +102,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 24 | `89aa6b3` | The controller: native gamepad play synthesized into the keyboard and mouse seams, a SELECT-key control scheme overlay, and a one-command Steam Deck installer |
 | 25 | `c235ac7` | The workshop: upgrades printable in materials as well as bought in credits, three new lines (pack, press, lamp), and the rule that an upgrade may not change arithmetic the journal re-runs |
 | 26 | `23d8bea` | Wear and recovery: machines age by the tick they work, the worst one sets the crew's pace, and spare parts printed at the workshop mend them — the first machine state that had to live inside the replayed simulation |
-| 27 | _this_ | Micro-on-damage: a block gains a 4³ interior only when violence touches it, one `u64` a wound, so walls chew where they are shot, rays pass through the holes and feet never do |
+| 27 | `6a2eeef` | Micro-on-damage: a block gains a 4³ interior only when violence touches it, one `u64` a wound, so walls chew where they are shot, rays pass through the holes and feet never do |
+| 28 | _this_ | Hostiles and health: a warrant sends deputies who believe rather than know, search an occupancy map, take cover, never fire through each other, and break or surrender on nerve |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1442,6 +1443,80 @@ tumbles, which is physics this round refuses to buy.
 
 ---
 
+## Shipped — Stage 28: hostiles, health, and the warrant
+
+**Combat had a reason to exist before it had any code.** Crime has raised
+bounty since stage 11, and bounty has crossed a warrant threshold that
+nothing ever answered. Now it does: cross it and the town sends deputies.
+That closes a loop five stages in the making — crime, bounty, warrant,
+posse, arrest — and it needed no new worldgen, which is why the occupied
+bunkers can still be their own round.
+
+**They believe rather than know.** Each squad holds a last-known position
+whose confidence decays, and an occupancy map that spreads probability
+across walkable ground from there. Searchers walk to the likeliest cell they
+can reach; everything they can see is zeroed. Sweeping a room, covering
+ground and doubling back all fall out of the arithmetic — the map cannot
+send anybody where the player provably is not, and when the mass runs out
+they say so and stand down. It is the same model the kestrel's marks give
+the *player*, which is the point: their intelligence about you ages exactly
+as fast as yours about them.
+
+**Nerve, not aim.** Composure is the variable the player reads and plays
+against. Hits wound it, near misses suppress it, and watching a partner go
+down costs more than either — so pinning a deputy is a verb with no new
+system behind it. Thresholds are shifted by the `nerve` byte derived back in
+stage 23, and archetype overrides the floor: a `Proud` deputy will not
+surrender and a `Craven` one never bothers with cover. Character was rolled
+once, at creation; this is the second thing to read it, exactly as the
+people note promised, and two tests watch temperament show up in *outcome*
+rather than in data.
+
+**Cover is a query, not an annotation layer.** Occlusion sampled at three
+eye heights — the same `sight::obstruction` call the roost uses to witness a
+crime. Blocked standing is a wall to fight from, blocked crouched is
+waist-high cover, blocked only prone is a last resort. It is re-scored every
+frame, so when the belief moves the old score is stale and they scramble:
+that *is* the flanking behaviour, with no flanking code in it.
+
+**Nobody fires through a friend.** One check at the shot, allies counted as
+blockers, and a deputy who finds themselves in a partner's lane sidesteps
+instead. It is an invariant rather than a tuning goal — a test fires from
+three hundred and sixty angles with an ally at the midpoint and never once
+gets a round through. Its absence is the thing that reads as contempt in
+other games.
+
+**Health is quiet-then-mend, and down is arrested.** Six hits, no medkit
+economy: break contact for eight seconds and the count climbs back, which
+makes *disengaging* the heal. Fall to zero in front of the law and the
+bounty is settled out of credits, the rest written off, and you wake at the
+homestead. Dying to something that is not the law waits for a round with
+something else in it.
+
+**Live-only, and the law does not shoot the scenery.** None of this reaches
+the replay oracle — deputies react to where the player is, and reactions are
+not orders, the same line villagers, the roost and contact marks have always
+drawn. Their rounds damage you and never the world, which is also the honest
+fiction, since property damage is precisely what they are billing you for.
+Combat therefore needed no journal version of its own.
+
+**Found on the way:** the composure constants were still unused after the
+first pass, which was clippy pointing out that the player could not shoot
+*back*. Wiring the return fire is what turned a chase into a fight. The
+deputies also walked in x and z alone and hovered off every bank until they
+were snapped to the ground.
+
+**Deliberately not in 28:** flow-field pathing, so deputies walk straight
+lines and the watchdog abandons blocked approaches rather than going around
+— visible the moment a callout happens inside a town, and the first thing
+stage 29 fixes; the note's paired movement (one moves while one watches);
+the arrest verb applied to *them*, since a surrendered deputy currently just
+stops; and the hunt note's stronger search claim, which is kept as a named
+ignored test because with one searcher it is not true, and its not being
+true is what makes running and hiding a real option.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -1525,8 +1600,8 @@ part has to attach to, which maps onto the arc as it now stands:
 
 | Part | Stage | Why there |
 |---|---|---|
-| `belief.rs`, the occupancy search, the watchdog | 28 | lands with the first hostile — there is nothing to hold a belief until then |
-| Fire discipline and lane costs | 28–29 | needs a *pair* of hostiles before "do not shoot your friend" can be violated |
+| `belief.rs`, the occupancy search, the watchdog | 28 — shipped | lands with the first hostile — there is nothing to hold a belief until then |
+| Fire discipline and lane costs | 28 — shipped | needs a *pair* of hostiles before "do not shoot your friend" can be violated |
 | The director and its pacing budget | 29 | arrives with the occupied bunkers it paces |
 | The stalker, and noise-weighted hints | 31 | waits until the deep caves have somewhere worth being afraid of |
 
@@ -1632,21 +1707,21 @@ if the traffic it produces reads as dull.
 Renumbered again after the townsfolk (23), the controller (24), the
 workshop (25), wear (26) and micro-on-damage (27) took their slots: the
 plans kept their order, the stages moved down to make room. The hunt note
-above supplies the engine for 28 and 29; the stalker waits for 31 — and it
+above supplied the engine for 28, which has shipped; its director lands with
+29 and the stalker waits for 31 — and it
 now arrives into a world where cover already degrades, which is exactly why
 the micro note asked to land before the hostiles rather than after them.
 
 | Stage | What | Why here |
 |---|---|---|
-| 28 | Hostiles and health | The half of combat stage 13 leaves out — and where the hunt note's belief, occupancy search and stuck watchdog land, alongside the people note's combat half: policies emitting `MoveCommand` through the player integrator, composure driven off the `nerve` stage 23 already derived, modes from Fight down to Surrender, cover as occlusion sampled at three eye heights |
-| 29 | Bunkers, occupied | Mobs and military, and the hunt note's director with its pacing budget and zone-grade hints. Held until here because both attack you, and that needs the health model stage 28 brings. Squads bounded on purpose: pairs move alternately, a pair that loses its partner takes the ally-down composure hit — suppression and command layers explicitly out of scope. Surrender feeds the arrest verb, the jailhouse and capture contracts |
+| 29 | Bunkers, occupied, and hostiles that path | Mobs and military, and the hunt note's director with its pacing budget and zone-grade hints. Held until here because both attack you, and that needs the health model stage 28 brought. Flow-field pathing for hostiles lands here too: stage 28's deputies walk straight lines, which is fine in the open and obvious in a town. Squads bounded on purpose: pairs move alternately, a pair that loses its partner takes the ally-down composure hit — suppression and command layers explicitly out of scope. Surrender feeds the arrest verb, the jailhouse and capture contracts |
 | 30 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
 | 31 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore. The hunt note's stalker lands here too: it waits until the deep places are worth being afraid of, and hunts by the noise a working mine makes |
 | 32 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 27.
+The whole game at a glance, as of stage 28.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1708,13 +1783,15 @@ the replayed simulation because it decides how much ground gets cut);
 micro-on-damage (blocks gain a 4³ interior only where violence touches them,
 one `u64` a wound, carved with register arithmetic, drawn as quarter-metre
 faces riding the existing quad stream, with rays reading the cells and feet
-never doing);
+never doing); hostiles and health (a warrant musters a posse who hold a
+decaying belief and search an occupancy map for you, score cover as
+occlusion at three eye heights, never fire through each other, and fight,
+hide, run or surrender on nerve derived back at the townsfolk round — with
+six hits, quiet-then-mend recovery, and an arrest that settles the bounty);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** hostiles and health
-(and with them bunkers occupied, and the people note's combat half — nerve,
-cover, surrender and the arrest verb);
-the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
+**Planned, in arc order:** bunkers occupied, and hostiles that path around
+a building instead of into it; the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
 B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket
 arcade.
 

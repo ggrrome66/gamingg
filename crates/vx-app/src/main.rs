@@ -13,6 +13,7 @@ mod audio;
 mod awareness;
 mod bank;
 mod beacon;
+mod belief;
 mod board;
 mod clock;
 mod controller;
@@ -22,7 +23,9 @@ mod economy;
 mod garage;
 #[cfg(feature = "gold")]
 mod gold;
+mod health;
 mod homestead;
+mod hostile;
 mod hud;
 mod intro;
 mod intrusion;
@@ -211,6 +214,8 @@ struct Options {
     wear: bool,
     /// Chew a wall in front of the camera, to show cells rather than boxes.
     wound: bool,
+    /// A warrant posse closing on the player, mid-callout.
+    posse: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -250,6 +255,7 @@ fn parse_args() -> Result<Options, String> {
         kit: false,
         wear: false,
         wound: false,
+        posse: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -328,6 +334,7 @@ fn parse_args() -> Result<Options, String> {
             "--kit" => options.kit = true,
             "--wear" => options.wear = true,
             "--wound" => options.wound = true,
+            "--posse" => options.posse = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -1193,6 +1200,8 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             panicking: 0,
             kestrel: None,
             fuel: options.hho.then(|| "HHO 12".to_string()),
+            condition: options.posse.then(|| "HITS 4/6".to_string()),
+            deputies: usize::from(options.posse) * 3,
             optic: options.optic.as_deref().and_then(|choice| match choice {
                 "lamp" => Some("LAMP"),
                 "nvg" => Some("NIGHT VISION"),
@@ -1301,6 +1310,130 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         camera.position = placed;
         renderer.update_camera(&context.queue, &camera);
         renderer.set_objects(&context.device, &context.queue, &objects);
+    }
+
+    // After the villagers' pass on purpose: that branch calls
+    // `set_objects` and would otherwise replace the deputies with the
+    // townsfolk, which is exactly what it did the first time.
+    if options.posse {
+        // A callout, stepped by the real `Posse::update` against the real
+        // world: the deputies below stand where the code put them, in the
+        // modes their own nerve chose.
+        let ground = world.surface_y(options.at.0, options.at.1).unwrap_or(80);
+        let player = glam::Vec3::new(
+            options.at.0 as f32 + 0.5,
+            ground as f32 + 1.0,
+            options.at.1 as f32 + 0.5,
+        );
+        let mut posse = hostile::Posse::default();
+        posse.call_out(
+            player,
+            |x, z| {
+                world
+                    .surface_y(x.floor() as i32, z.floor() as i32)
+                    .map_or(player.y, |top| (top + 1) as f32)
+            },
+            0xc0ffee,
+        );
+        // Run the callout for a few seconds so they close, take cover and
+        // settle into modes rather than standing where they spawned.
+        let mut lines = Vec::new();
+        for _ in 0..240 {
+            let report = posse.update(1.0 / 30.0, &world, player, false);
+            for bark in report.barks {
+                if !lines.contains(&bark) {
+                    lines.push(bark);
+                }
+            }
+        }
+        // Rattle one of them so the roll call shows a spread of nerve
+        // rather than three identical rows.
+        if let Some(deputy) = posse.deputies.get_mut(1) {
+            deputy.rattle(hostile::WOUNDED + hostile::ROUND_NEAR_COVER);
+        }
+        if let Some(deputy) = posse.deputies.get_mut(2) {
+            deputy.rattle(hostile::ALLY_DOWN * 3.0);
+        }
+
+        let rigs = Villagers::rigs();
+        let mut objects = Vec::new();
+        // Whoever was already on screen stays on screen.
+        let mut town = Villagers::new();
+        let alone = awareness::Surroundings::empty();
+        for _ in 0..900 {
+            town.update(1.0 / 60.0, TimeOfDay::new(options.time), &alone);
+        }
+        objects.extend(town.objects(&rigs));
+        for deputy in &posse.deputies {
+            let rig = &rigs[deputy.variant % rigs.len()];
+            objects.extend(rig.objects(deputy.position, deputy.yaw, 0.0));
+        }
+        objects.extend(Rig::player().objects(
+            player - glam::Vec3::Y,
+            std::f32::consts::PI,
+            0.0,
+        ));
+        renderer.set_objects(&context.device, &context.queue, &objects);
+
+        let mut console = terminal::Terminal::default();
+        console.toggle();
+        console.say(terminal::Kind::Warn, "A WARRANT IS OUT. DEPUTIES ARE COMING");
+        for line in lines.iter().take(4) {
+            console.say(terminal::Kind::Warn, line.clone());
+        }
+        console.say(terminal::Kind::Echo, "> LAW");
+        for row in posse.roll_call() {
+            console.say(terminal::Kind::Note, row);
+        }
+        if !options.close {
+            let pixels = terminal::render_terminal(&console, false);
+            let panel_width = terminal::TERM_WIDTH as f32 * shop::SHOP_SCALE;
+            let panel_height = terminal::TERM_HEIGHT as f32 * shop::SHOP_SCALE;
+            renderer.set_overlay(
+                TERM_SLOT,
+                &context.device,
+                &context.queue,
+                (terminal::TERM_WIDTH, terminal::TERM_HEIGHT),
+                &pixels,
+                vx_render::OverlayRect {
+                    x: (width as f32 - panel_width) / 2.0,
+                    y: (height as f32 - panel_height) / 2.0,
+                    width: panel_width,
+                    height: panel_height,
+                },
+            );
+        }
+
+        // `--close` frames the squad itself: over the player's shoulder,
+        // looking at whichever deputy got nearest.
+        if options.close {
+            // Frame the squad rather than guessing at an angle: stand off
+            // from their centre of mass, high enough to see all three.
+            let centre = posse
+                .deputies
+                .iter()
+                .fold(glam::Vec3::ZERO, |sum, deputy| sum + deputy.position)
+                / posse.deputies.len().max(1) as f32;
+            // Straight down over the squad. Every angled framing this
+            // fixture tried put a building, a mast or a hillside between the
+            // camera and the deputies; overhead cannot be blocked.
+            let _ = centre;
+            let overhead = posse
+                .deputies
+                .iter()
+                .fold(player, |sum, deputy| sum + deputy.position)
+                / (posse.deputies.len() + 1) as f32;
+            camera.position = glam::Vec3::new(overhead.x, overhead.y + 18.0, overhead.z + 0.1);
+            look_at(&mut camera, overhead);
+        } else {
+            camera.position = player + glam::Vec3::new(0.0, 6.0, 14.0);
+            look_at(&mut camera, player);
+        }
+        println!(
+            "posse capture: {} deputies, {} barks",
+            posse.deputies.len(),
+            lines.len()
+        );
     }
 
     if options.device {
@@ -2166,6 +2299,13 @@ struct Active {
     villagers: Villagers,
     /// Their bodies, built once per variant.
     villager_rigs: Vec<Rig>,
+    /// What you can take before you go down.
+    health: health::Health,
+    /// The squad the warrant sent, once it has been sent.
+    posse: hostile::Posse,
+    /// Seconds until the warrant is checked again — a callout starts on a
+    /// beat rather than the instant a bounty ticks over.
+    warrant_check: f32,
     /// A villager's freshly spoken line, shown on the HUD for a moment.
     greeting: Option<(String, Instant)>,
     /// Credits and bought upgrades.
@@ -2659,6 +2799,10 @@ impl App {
                 ));
             }
         }
+        // The law's own frame, once the borrow of the world that
+        // `Surroundings` holds has been let go.
+        Self::advance_law(active, dt);
+
         // An alarm that reaches the security office is a signed statement.
         let reports = active.villagers.take_reports();
         if reports > 0 {
@@ -2878,6 +3022,10 @@ impl App {
         // just refreshed.
         let mut objects = active.mining.objects();
         objects.extend(active.villagers.objects(&active.villager_rigs));
+        for deputy in &active.posse.deputies {
+            let rig = &active.villager_rigs[deputy.variant % active.villager_rigs.len()];
+            objects.extend(rig.objects(deputy.position, deputy.yaw, 0.0));
+        }
 
         // Trade traffic. A load in the air is not simulated — where it is now
         // is a sum — so drawing one costs a lerp and a height lookup, and only
@@ -3181,6 +3329,118 @@ impl App {
     /// startled. The world edits happen inside `arsenal::advance_shots`,
     /// which is the half replay re-runs; everything else here is live-only
     /// consequence, the same side of the line the economy lives on.
+    /// The law, one frame of it: mend, muster, and let the squad work.
+    ///
+    /// Live-only from top to bottom — nothing here touches a block, so the
+    /// replay oracle never learns a callout happened. That is the same line
+    /// villagers, the roost and contact marks draw, and it is why combat
+    /// needed no journal version of its own.
+    fn advance_law(active: &mut Active, dt: f32) {
+        if active.health.tick(dt) && active.health.readout().is_some() {
+            active.greeting = Some((
+                active.health.readout().unwrap_or_default(),
+                Instant::now(),
+            ));
+        }
+
+        // A warrant musters a squad, on a beat rather than the instant the
+        // counter ticks over.
+        active.warrant_check = (active.warrant_check - dt).max(0.0);
+        if active.warrant_check == 0.0 {
+            active.warrant_check = 5.0;
+            let wanted = active.permits.borrow().wanted();
+            if wanted && !active.posse.called_out() {
+                let seed = active.journal.tick() ^ 0x51ed_5eed;
+                let at = active.player.position;
+                let ground = |x: f32, z: f32| {
+                    active
+                        .world
+                        .surface_y(x.floor() as i32, z.floor() as i32)
+                        .map_or(at.y, |top| (top + 1) as f32)
+                };
+                active.posse.call_out(at, ground, seed);
+                active.greeting = Some((
+                    "A WARRANT IS OUT. DEPUTIES ARE COMING".into(),
+                    Instant::now(),
+                ));
+            }
+            if !wanted && active.posse.called_out() {
+                // Settle the bill and they lose interest.
+                active.posse.stand_down();
+                active.greeting = Some(("THE DEPUTIES HAVE STOOD DOWN".into(), Instant::now()));
+            }
+        }
+
+        if !active.posse.called_out() {
+            return;
+        }
+        let report = active.posse.update(
+            dt,
+            &active.world,
+            active.player.position,
+            !active.health.standing(),
+        );
+
+        for line in report.barks {
+            active.terminal.say(terminal::Kind::Warn, line.clone());
+            active.greeting = Some((line, Instant::now()));
+        }
+        if report.hits > 0 && active.health.standing() {
+            let downed = active.health.take(report.hits * health::ROUND_HITS);
+            active.shake = (active.shake + 0.35).min(1.0);
+            if downed {
+                active.greeting = Some(("YOU ARE DOWN".into(), Instant::now()));
+            } else if active.health.hits() == 1 {
+                active.greeting = Some((
+                    "ONE MORE AND YOU ARE DONE - BREAK CONTACT".into(),
+                    Instant::now(),
+                ));
+            } else if let Some(line) = active.health.readout() {
+                active.greeting = Some((line, Instant::now()));
+            }
+        }
+        if report.arrested {
+            Self::make_the_arrest(active);
+        }
+    }
+
+    /// Downed in front of the law: the bounty is settled out of credits,
+    /// whatever is left is written off, and you wake up whole.
+    ///
+    /// This is the end the crime systems have been building toward since
+    /// permits shipped — crime raises bounty, bounty crosses the threshold,
+    /// the warrant sends deputies, and the deputies close the loop.
+    fn make_the_arrest(active: &mut Active) {
+        let owed = active.permits.borrow().bounty;
+        let paid = owed.min(active.wallet.credits());
+        // Whatever they can pay, they pay; the refusal case cannot happen
+        // because `paid` is capped at the balance a line above.
+        let settled = active.wallet.spend(paid);
+        debug_assert!(settled, "the arrest charged more than the wallet held");
+        active.permits.borrow_mut().bounty = 0;
+        active.posse.stand_down();
+        active.health.revive();
+
+        // Put down at the homestead, which is where you wake up.
+        let home = vx_world::town::home_site();
+        let ground = active
+            .world
+            .surface_y(home.centre.0, home.centre.1)
+            .map_or(active.player.position.y, |top| (top + 1) as f32);
+        active.player.position =
+            glam::Vec3::new(home.centre.0 as f32 + 0.5, ground, home.centre.1 as f32 + 0.5);
+        active.player.velocity = glam::Vec3::ZERO;
+        active.resuming = true;
+
+        let line = if paid < owed {
+            format!("ARRESTED. {paid} PAID, THE REST WORKED OFF")
+        } else {
+            format!("ARRESTED. {paid} CREDITS TAKEN")
+        };
+        active.terminal.say(terminal::Kind::Warn, line.clone());
+        active.greeting = Some((line, Instant::now()));
+    }
+
     fn advance_gunfire(active: &mut Active, ticks: u32) {
         active.arsenal.cool(ticks);
         if active.shots.is_empty() {
@@ -3199,6 +3459,13 @@ impl App {
             let tick_at = now.saturating_sub(u64::from(ticks - 1 - step));
             for sweep in &sweeps {
                 Self::settle_caravan_hits(active, sweep, tick_at);
+                // The other half of the fight: a round of yours going past
+                // hits, suppresses or merely rattles whoever it went past.
+                let answer = active.posse.under_fire(sweep.from, sweep.to);
+                for line in answer.barks {
+                    active.terminal.say(terminal::Kind::Warn, line.clone());
+                    active.greeting = Some((line, Instant::now()));
+                }
                 let Some(impact) = &sweep.hit else { continue };
                 active.villagers.startled(impact.at);
                 let heard = (impact.at - active.player.eye_position()).length();
@@ -3474,6 +3741,16 @@ impl App {
                     }
                 }
                 lines
+            }
+            "law" => {
+                if !active.posse.called_out() {
+                    let bounty = active.permits.borrow().bounty;
+                    return vec![format!(
+                        "NO WARRANT OUT. BOUNTY {bounty} OF {}",
+                        permits::WARRANT_THRESHOLD
+                    )];
+                }
+                active.posse.roll_call()
             }
             "repair" => self.mend(args),
             "kit" => {
@@ -6668,6 +6945,8 @@ impl App {
             (at.elapsed().as_secs_f32() < 3.0).then(|| line.clone())
         });
         let content = hud::HudContent {
+            condition: active.health.readout(),
+            deputies: active.posse.active(),
             skills: &active.skills,
             time: active.clock,
             reconnecting: active.resuming,
@@ -7085,6 +7364,9 @@ impl App {
         if let Err(error) = active.mining.wear.save(save.root()) {
             log::error!("could not save the wear ledger: {error}");
         }
+        if let Err(error) = active.health.save(save.root()) {
+            log::error!("could not save the player's condition: {error}");
+        }
         if let Err(error) = active.banks.save(save.root()) {
             log::error!("could not save the town vaults: {error}");
         }
@@ -7275,6 +7557,7 @@ impl ApplicationHandler for App {
         let mut bath = electrolysis::Electrolyser::default();
         let mut tank = fuel::Tank::default();
         let mut crew_wear = wear::Wear::default();
+        let mut condition = health::Health::default();
         let mut vaults = bank::Bank::default();
         let mut friends = disposition::Disposition::default();
         if let Some(save) = &save {
@@ -7299,6 +7582,7 @@ impl ApplicationHandler for App {
             // journal says it did.
             tank.load(save.root());
             crew_wear.load(save.root());
+            condition.load(save.root());
             vaults.load(save.root());
             friends.load(save.root());
         }
@@ -7367,6 +7651,9 @@ impl ApplicationHandler for App {
             drill_spin: 0.0,
             villagers: Villagers::new(),
             villager_rigs: Villagers::rigs(),
+            health: condition,
+            posse: hostile::Posse::default(),
+            warrant_check: 0.0,
             greeting: None,
             wallet,
             shop: shop::Shop::new(),
