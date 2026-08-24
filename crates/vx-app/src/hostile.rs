@@ -36,6 +36,7 @@
 
 use glam::Vec3;
 
+use vx_core::BlockPos;
 use vx_world::World;
 
 use crate::belief::Belief;
@@ -163,7 +164,7 @@ pub const DEPUTY_HITS: u8 = 3;
 pub const HIT_RADIUS: f32 = 0.6;
 
 impl Deputy {
-    fn new(position: Vec3, temperament: Temperament, variant: usize) -> Self {
+    pub(crate) fn new(position: Vec3, temperament: Temperament, variant: usize) -> Self {
         Deputy {
             position,
             yaw: 0.0,
@@ -246,6 +247,69 @@ pub fn lane_is_clear(from: Vec3, at: Vec3, allies: &[Vec3]) -> bool {
     })
 }
 
+/// Seconds between route rebuilds. A route is a plan, not a reflex.
+pub const REPLAN_SECONDS: f32 = 1.5;
+
+/// How far around the goal a route is worth computing, in blocks.
+const ROUTE_REACH: i32 = 36;
+
+/// A squad's route toward wherever it believes the player is.
+///
+/// This is the flow field the drones have walked on since the first swarm,
+/// pointed at people — the hunt note's argument made code: navigation
+/// derives from the live grid on demand, so a dug wall or a new rampart is
+/// in the *next* field rather than in a navmesh three patches stale, and
+/// derived data cannot rot. The field chases the squad's *belief*, never
+/// the truth: a squad that has lost you routes toward where it thinks you
+/// are, which is exactly as lost as it deserves to be.
+#[derive(Debug, Default)]
+pub struct Pathing {
+    field: Option<vx_agent::FlowField>,
+    goal: Option<BlockPos>,
+    rebuild_in: f32,
+}
+
+impl Pathing {
+    /// Keep the route pointed at `goal`, rebuilding on a beat or when the
+    /// goal has genuinely moved. Building is a bounded breadth-first sweep;
+    /// doing it every frame would be waste, and doing it never would be a
+    /// navmesh.
+    pub fn steer(&mut self, dt: f32, world: &World, goal: Vec3) {
+        self.rebuild_in -= dt;
+        let cell = BlockPos::new(
+            goal.x.floor() as i32,
+            goal.y.floor() as i32,
+            goal.z.floor() as i32,
+        );
+        let moved = self
+            .goal
+            .is_none_or(|old| (old.x - cell.x).abs() + (old.z - cell.z).abs() > 3);
+        if self.rebuild_in > 0.0 && !moved {
+            return;
+        }
+        self.rebuild_in = REPLAN_SECONDS;
+        self.goal = Some(cell);
+        // The goal cell itself may be the player's body cell (air over
+        // solid) or something odd mid-jump; settle it onto footing first.
+        let footing = vx_agent::settle(world, cell);
+        let bounds = vx_agent::VoxelAabb::new(
+            BlockPos::new(footing.x - ROUTE_REACH, footing.y - 14, footing.z - ROUTE_REACH),
+            BlockPos::new(footing.x + ROUTE_REACH, footing.y + 14, footing.z + ROUTE_REACH),
+        );
+        self.field = Some(vx_agent::FlowField::build(world, bounds, [footing]));
+    }
+
+    /// The next cell on the route from `from`, when the route knows one.
+    fn step(&self, world: &World, from: Vec3) -> Option<BlockPos> {
+        let feet = BlockPos::new(
+            from.x.floor() as i32,
+            from.y.floor() as i32,
+            from.z.floor() as i32,
+        );
+        self.field.as_ref()?.step_from(world, feet)
+    }
+}
+
 /// What the posse did this frame that the rest of the game must know about.
 #[derive(Debug, Default, PartialEq)]
 pub struct Report {
@@ -275,6 +339,8 @@ pub struct Posse {
     /// somebody you cannot see is its own line in the composure table, and
     /// this is how `under_fire` knows which one applies.
     exposed: bool,
+    /// The squad's shared route toward its belief.
+    pub pathing: Pathing,
 }
 
 /// Seconds of sustained contact before the squad is made to back off.
@@ -357,74 +423,10 @@ impl Posse {
     /// spent faster than cover restores it, which hands the player *pinning*
     /// as a verb without a single new system.
     pub fn under_fire(&mut self, from: Vec3, to: Vec3) -> Report {
-        let mut report = Report::default();
         if !self.called_out() {
-            return report;
+            return Report::default();
         }
-        let along = to - from;
-        let travel = along.length();
-        if travel < 1.0e-3 {
-            return report;
-        }
-        let direction = along / travel;
-
-        let mut downed = 0;
-        for deputy in &mut self.deputies {
-            if !deputy.active() {
-                continue;
-            }
-            // Nearest approach of the round to this deputy's chest.
-            let chest = deputy.position + Vec3::Y;
-            let ahead = (chest - from).dot(direction).clamp(0.0, travel);
-            let miss = (chest - (from + direction * ahead)).length();
-
-            if miss <= HIT_RADIUS {
-                deputy.hits = deputy.hits.saturating_sub(1);
-                if deputy.hits == 0 {
-                    deputy.mode = Mode::Down;
-                    downed += 1;
-                    report.barks.push("DEPUTY: MAN DOWN".into());
-                } else if let Some(mode) = deputy.rattle(WOUNDED) {
-                    if let Some(line) = bark_for(mode) {
-                        report.barks.push(line);
-                    }
-                }
-            } else if miss <= SUPPRESS_NEAR {
-                // Pinned: near misses cost more nerve than cover gives back.
-                if let Some(mode) = deputy.rattle(ROUND_NEAR_COVER) {
-                    if let Some(line) = bark_for(mode) {
-                        report.barks.push(line);
-                    }
-                }
-            } else if (chest - from).length() < crate::awareness::SIGHT_RANGE * 2.0 {
-                // Heard, not felt — and worse when it comes from somewhere
-                // they cannot see, which is the note's "challenged from an
-                // unseen position" and the reason shooting from cover is
-                // worth more than shooting from the open.
-                let cost = if self.exposed {
-                    SHOT_HEARD * 0.25
-                } else {
-                    CHALLENGED_UNSEEN * 0.25
-                };
-                deputy.rattle(cost);
-            }
-        }
-
-        // Watching a partner go down is the worst thing that happens to a
-        // squad, and it happens to everyone still standing.
-        for _ in 0..downed {
-            for deputy in &mut self.deputies {
-                if !deputy.active() {
-                    continue;
-                }
-                if let Some(mode) = deputy.rattle(ALLY_DOWN) {
-                    if let Some(line) = bark_for(mode) {
-                        report.barks.push(line);
-                    }
-                }
-            }
-        }
-        report
+        rake(&mut self.deputies, self.exposed, from, to)
     }
 
     /// One frame of the callout.
@@ -536,6 +538,17 @@ impl Posse {
         let target = self.belief.search_target(player);
         let holding = self.backing_off > 0.0;
 
+        // The route chases the belief, never the truth: eyes on and it
+        // leads to the player, eyes lost and it leads to the search.
+        let goal = if self.exposed {
+            player
+        } else if let Some((x, z)) = target {
+            Vec3::new(x as f32 + 0.5, player.y, z as f32 + 0.5)
+        } else {
+            player
+        };
+        self.pathing.steer(dt, world, goal);
+
         for (index, sees) in seen_by.iter().copied().enumerate() {
             let allies: Vec<Vec3> = positions
                 .iter()
@@ -554,6 +567,7 @@ impl Posse {
                 outnumbering,
                 target,
                 holding,
+                &self.pathing,
                 &mut report,
             );
             if step {
@@ -576,6 +590,7 @@ impl Posse {
         outnumbering: usize,
         search: Option<(i32, i32)>,
         holding: bool,
+        route: &Pathing,
         report: &mut Report,
     ) -> bool {
         if !deputy.active() {
@@ -613,7 +628,7 @@ impl Posse {
                 report.arrested = true;
                 return false;
             }
-            Self::walk(deputy, dt, player, 3.4, world);
+            Self::walk(deputy, dt, player, 3.4, world, Some(route));
             return false;
         }
 
@@ -622,7 +637,7 @@ impl Posse {
                 let gap = (player - deputy.position).length();
                 deputy.face(player);
                 if gap > ENGAGE_RANGE {
-                    Self::walk(deputy, dt, player, 3.0, world);
+                    Self::walk(deputy, dt, player, 3.0, world, Some(route));
                     return false;
                 }
                 // Fire discipline, enforced at the shot: never through an
@@ -641,7 +656,9 @@ impl Posse {
                 // score is stale and they scramble — which *is* the flanking
                 // mechanic, with no flanking code in it.
                 if let Some(spot) = best_cover(world, deputy.position, player) {
-                    Self::walk(deputy, dt, spot, 2.6, world);
+                    // Cover is close by definition; a route to the player
+                    // would walk them the wrong way.
+                    Self::walk(deputy, dt, spot, 2.6, world, None);
                 }
                 deputy.face(player);
                 false
@@ -650,14 +667,14 @@ impl Posse {
                 let away = deputy.position - player;
                 if away.length() > 1.0e-3 {
                     let to = deputy.position + away.normalize() * 8.0;
-                    Self::walk(deputy, dt, to, 3.8, world);
+                    Self::walk(deputy, dt, to, 3.8, world, None);
                 }
                 false
             }
             Mode::Investigate | Mode::Patrol => {
                 if let Some((x, z)) = search {
                     let to = Vec3::new(x as f32 + 0.5, deputy.position.y, z as f32 + 0.5);
-                    Self::walk(deputy, dt, to, 2.4, world);
+                    Self::walk(deputy, dt, to, 2.4, world, Some(route));
                     deputy.face(to);
                 }
                 false
@@ -671,16 +688,39 @@ impl Posse {
     /// An agent that has closed no distance in [`STUCK_TICKS`] gives the
     /// approach up rather than moonwalking into a wall — the one failure
     /// players never forgive, bounded here to well under a second.
-    fn walk(deputy: &mut Deputy, dt: f32, to: Vec3, speed: f32, world: &World) {
-        let along = Vec3::new(to.x - deputy.position.x, 0.0, to.z - deputy.position.z);
+    pub(crate) fn walk(
+        deputy: &mut Deputy,
+        dt: f32,
+        to: Vec3,
+        speed: f32,
+        world: &World,
+        route: Option<&Pathing>,
+    ) {
+        // The immediate waypoint: the route's next cell when a route knows
+        // one, the destination itself when it does not. Straight lines are
+        // the *fallback* now, not the plan.
+        let waypoint = route
+            .and_then(|route| route.step(world, deputy.position))
+            .map(|cell| Vec3::new(cell.x as f32 + 0.5, cell.y as f32, cell.z as f32 + 0.5))
+            .unwrap_or(to);
+
+        let along = Vec3::new(
+            waypoint.x - deputy.position.x,
+            0.0,
+            waypoint.z - deputy.position.z,
+        );
         let gap = along.length();
-        if gap < 0.05 {
+        let total = Vec3::new(to.x - deputy.position.x, 0.0, to.z - deputy.position.z).length();
+        if total < 0.05 {
             deputy.stuck = 0;
             return;
         }
-        if gap < deputy.last_gap - 0.01 {
+        // The watchdog measures progress toward the *destination*, not the
+        // waypoint — a route that shuffles someone between two cells is as
+        // stuck as a wall.
+        if total < deputy.last_gap - 0.01 {
             deputy.stuck = 0;
-            deputy.last_gap = gap;
+            deputy.last_gap = total;
         } else {
             deputy.stuck += 1;
             if deputy.stuck > STUCK_TICKS {
@@ -691,15 +731,26 @@ impl Posse {
             }
         }
         deputy.going = Some(to);
-        deputy.position += along / gap * speed * dt;
-        // Stay on the ground. Walking in x and z alone leaves a deputy
-        // hovering off a bank or buried in a rise the moment the terrain
-        // stops being flat, which is the first thing anybody notices.
-        if let Some(top) = world.surface_y(
+        if gap > 1.0e-3 {
+            deputy.position += along / gap * speed * dt;
+        }
+        // Height. A routed step carries its own floor — stairs, bunker
+        // decks, cave ledges — so follow it. Unrouted walking snaps to the
+        // open-air surface, but only when already near it: snapping an
+        // underground holder to the meadow overhead was this function's
+        // second-worst idea.
+        if route.and_then(|route| route.step(world, deputy.position)).is_some() {
+            let target_y = waypoint.y;
+            let climb = (target_y - deputy.position.y).clamp(-6.0 * dt, 6.0 * dt);
+            deputy.position.y += climb;
+        } else if let Some(top) = world.surface_y(
             deputy.position.x.floor() as i32,
             deputy.position.z.floor() as i32,
         ) {
-            deputy.position.y = (top + 1) as f32;
+            let surface = (top + 1) as f32;
+            if (surface - deputy.position.y).abs() <= 3.0 {
+                deputy.position.y = surface;
+            }
         }
         deputy.face(to);
     }
@@ -725,7 +776,7 @@ impl Mode {
 }
 
 impl Deputy {
-    fn face(&mut self, at: Vec3) {
+    pub(crate) fn face(&mut self, at: Vec3) {
         if let Some(yaw) = crate::rig::yaw_towards(at.x - self.position.x, at.z - self.position.z) {
             self.yaw = yaw;
         }
@@ -734,7 +785,7 @@ impl Deputy {
 
 /// The line a deputy says on entering a mode. Deterministic, like
 /// everything else — the same transition always sounds the same.
-fn bark_for(mode: Mode) -> Option<String> {
+pub(crate) fn bark_for(mode: Mode) -> Option<String> {
     match mode {
         Mode::Engage => Some("DEPUTY: CONTACT - HOLD IT RIGHT THERE".into()),
         Mode::Hide => Some("DEPUTY: TAKING COVER".into()),
@@ -775,6 +826,79 @@ pub fn best_cover(world: &World, from: Vec3, threat: Vec3) -> Option<Vec3> {
     }
     best.map(|(at, _, _)| at)
 }
+
+/// Rake a squad with one passing round: hits wound, near misses suppress,
+/// and an ally going down costs everyone still standing. Shared by the
+/// posse and the bunker garrisons, because a bullet does not care whose
+/// squad it crosses.
+pub(crate) fn rake(deputies: &mut [Deputy], exposed: bool, from: Vec3, to: Vec3) -> Report {
+    let mut report = Report::default();
+    let along = to - from;
+    let travel = along.length();
+    if travel < 1.0e-3 {
+        return report;
+    }
+    let direction = along / travel;
+
+    let mut downed = 0;
+    for deputy in deputies.iter_mut() {
+        if !deputy.active() {
+            continue;
+        }
+        // Nearest approach of the round to this deputy's chest.
+        let chest = deputy.position + Vec3::Y;
+        let ahead = (chest - from).dot(direction).clamp(0.0, travel);
+        let miss = (chest - (from + direction * ahead)).length();
+
+        if miss <= HIT_RADIUS {
+            deputy.hits = deputy.hits.saturating_sub(1);
+            if deputy.hits == 0 {
+                deputy.mode = Mode::Down;
+                downed += 1;
+                report.barks.push("DEPUTY: MAN DOWN".into());
+            } else if let Some(mode) = deputy.rattle(WOUNDED) {
+                if let Some(line) = bark_for(mode) {
+                    report.barks.push(line);
+                }
+            }
+        } else if miss <= SUPPRESS_NEAR {
+            // Pinned: near misses cost more nerve than cover gives back.
+            if let Some(mode) = deputy.rattle(ROUND_NEAR_COVER) {
+                if let Some(line) = bark_for(mode) {
+                    report.barks.push(line);
+                }
+            }
+        } else if (chest - from).length() < crate::awareness::SIGHT_RANGE * 2.0 {
+            // Heard, not felt — and worse when it comes from somewhere
+            // they cannot see, which is the note's "challenged from an
+            // unseen position" and the reason shooting from cover is
+            // worth more than shooting from the open.
+            let cost = if exposed {
+                SHOT_HEARD * 0.25
+            } else {
+                CHALLENGED_UNSEEN * 0.25
+            };
+            deputy.rattle(cost);
+        }
+    }
+
+    // Watching a partner go down is the worst thing that happens to a
+    // squad, and it happens to everyone still standing.
+    for _ in 0..downed {
+        for deputy in deputies.iter_mut() {
+            if !deputy.active() {
+                continue;
+            }
+            if let Some(mode) = deputy.rattle(ALLY_DOWN) {
+                if let Some(line) = bark_for(mode) {
+                    report.barks.push(line);
+                }
+            }
+        }
+    }
+    report
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -876,6 +1000,76 @@ mod tests {
                 "a shot from {step} degrees crossed an ally"
             );
         }
+    }
+
+    #[test]
+    fn a_routed_deputy_walks_around_a_wall_a_straight_line_cannot() {
+        // The pathing debt stage 28 documented, paid and pinned. A wall
+        // stands between the deputy and the goal; the straight-line walker
+        // grinds its watchdog against it, the routed one arrives.
+        let mut world = vx_world::World::new(2024);
+        world.load_around(vx_core::ChunkPos::new(0, 0), 1);
+        let stone = world.registry().id_of("engine:stone").unwrap();
+
+        // A flat floor with a long wall through the middle, gap at one end.
+        let ground = 80;
+        for x in -14..14 {
+            for z in -14..14 {
+                world.set_block(BlockPos::new(x, ground, z), stone);
+                for y in ground + 1..ground + 6 {
+                    world.set_block(BlockPos::new(x, y, z), vx_core::BlockId::AIR);
+                }
+            }
+        }
+        // Taller than the walker's three-block step tolerance, or the
+        // surface snap politely mantles them over the top — which is how
+        // the first version of this test caught nothing.
+        for z in -14..10 {
+            for y in ground + 1..ground + 6 {
+                world.set_block(BlockPos::new(0, y, z), stone);
+            }
+        }
+
+        let start = Vec3::new(-6.5, (ground + 1) as f32, 0.5);
+        let goal = Vec3::new(6.5, (ground + 1) as f32, 0.5);
+
+        let mut route = Pathing::default();
+        route.steer(0.1, &world, goal);
+
+        // NPCs have no collision of their own — the unrouted walker simply
+        // glides through the wall, which is precisely the embarrassment this
+        // round retires. So the claim to pin is stronger than "arrives": the
+        // routed deputy arrives *and never once stands inside the rock*.
+        let run = |route: Option<&Pathing>, world: &World| {
+            let mut deputy = Deputy::new(start, temperament(Archetype::Steady, 128), 0);
+            let mut clipped = false;
+            let mut arrived = false;
+            for _ in 0..2_400 {
+                Posse::walk(&mut deputy, 1.0 / 30.0, goal, 3.0, world, route);
+                let feet = BlockPos::new(
+                    deputy.position.x.floor() as i32,
+                    deputy.position.y.floor() as i32,
+                    deputy.position.z.floor() as i32,
+                );
+                if world.is_solid(feet) {
+                    clipped = true;
+                }
+                if (deputy.position - goal).length() < 1.2 {
+                    arrived = true;
+                    break;
+                }
+            }
+            (arrived, clipped)
+        };
+
+        let (arrived, clipped) = run(Some(&route), &world);
+        assert!(arrived, "the routed deputy never made it around the wall");
+        assert!(!clipped, "the routed deputy walked through the wall");
+        let (_, unrouted_clipped) = run(None, &world);
+        assert!(
+            unrouted_clipped,
+            "the wall did not intersect the straight line, so this test proves nothing"
+        );
     }
 
     #[test]

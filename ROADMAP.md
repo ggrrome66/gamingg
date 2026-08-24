@@ -103,7 +103,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 25 | `c235ac7` | The workshop: upgrades printable in materials as well as bought in credits, three new lines (pack, press, lamp), and the rule that an upgrade may not change arithmetic the journal re-runs |
 | 26 | `23d8bea` | Wear and recovery: machines age by the tick they work, the worst one sets the crew's pace, and spare parts printed at the workshop mend them — the first machine state that had to live inside the replayed simulation |
 | 27 | `6a2eeef` | Micro-on-damage: a block gains a 4³ interior only when violence touches it, one `u64` a wound, so walls chew where they are shot, rays pass through the holes and feet never do |
-| 28 | _this_ | Hostiles and health: a warrant sends deputies who believe rather than know, search an occupancy map, take cover, never fire through each other, and break or surrender on nerve |
+| 28 | `4665d04` | Hostiles and health: a warrant sends deputies who believe rather than know, search an occupancy map, take cover, never fire through each other, and break or surrender on nerve |
+| 29 | _this_ | Bunkers occupied: every shelter holds a squad derived from its own seed, hostiles route on the drones' flow fields, noise reaches them as 32-metre zones, pairs move under overwatch, and a surrendered holder can be taken in for the board's pay |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1517,6 +1518,69 @@ true is what makes running and hiding a real option.
 
 ---
 
+## Shipped — Stage 29: the shelters are held
+
+**The loot loop grows teeth.** Bunkers have been free salvage since stage
+19: find the hatch, walk down, strip the caches. Now every shelter is
+*held* — a squad derived from the bunker's own seed, raised at its hatch
+the moment the player comes near, running the very machinery the warrant's
+deputies run: composure, cover scored at three eye heights, fire discipline
+at the shot. Same bunker, same holders, every session; the roster is
+worldgen like everything else about a shelter. A cleared shelter stays
+cleared for the session — no watch respawning behind your back.
+
+**Hostiles path now.** The debt stage 28 documented is paid the way the
+hunt note predicted: not with a navmesh but with the flow fields the drones
+have walked since the first swarm, pointed at people. A shared `Pathing`
+rebuilds a bounded field on a beat toward the squad's *belief* — never the
+truth — so a squad that has lost you routes toward where it thinks you are,
+which is exactly as lost as it deserves to be. A test builds a wall taller
+than the mantle and pins that the routed deputy arrives without ever
+standing inside rock; its first draft caught two things instead — that
+unrouted walkers glide through walls, and that the old ground-snap politely
+mantled them over anything three blocks tall. The snap now applies only
+near the surface, so an underground holder no longer teleports to the
+meadow overhead.
+
+**The director never tells the truth.** The stalker's discipline from the
+hunt note, landed early: what a garrison learns from *noise* is a
+32-metre zone centre, never a position, asserted at the interface. A shot
+landing rings every shelter in earshot; a running drill rings them on a
+beat — the dinner bell, attached to the core mining loop exactly as the
+note wanted. Run the swarm loud and rich, or slow and quiet, or dig decoy
+noise a valley over and work in the shadow of your own diversion. A hint
+never overwrites fresh eyes, and noise past the leash is nobody's business.
+
+**Pairs, bounded on purpose.** Squad tactics are exactly two rules: pairs
+alternate — one moves while one watches, on a two-second clock — and a
+pair that loses its partner takes the ally-down hit `rake` already
+charges. Suppression arcs and command layers stay out of scope; the morale
+system generates enough behaviour to read without them.
+
+**The quiet track pays out.** Break a holder's nerve and their hands go
+up; walk over and press E and they are *taken in* — the board pays by the
+shelter's tier, 80/120/180 credits a head. A shelter can be cleared
+without a single body if you can break everyone's nerve, which is the
+payoff the people note promised the surrender machinery. Holders flee
+*into* the shelter — the hatch is the bolt-hole — and a downed player is
+not theirs to arrest: the shelter got what it wanted, which is you not
+coming down the stairs.
+
+**Found on the way:** neither stage 28 capture fixture ever uploaded its
+camera — the posse's overhead framing had silently rendered from the
+default camera all along, and the held-shelter fixture is what exposed it.
+Both upload now.
+
+**Deliberately not in 29:** garrisons *inside* the works — holders fight
+around the hatch and bolt down it, but room-to-room interior fighting
+wants the mini-DDA's cover queries against bunker geometry proven first;
+the stalker itself, which waits for the deep resources round; capture
+contracts as board postings with names and prices (the pay is flat by
+tier this round); and any journal change at all — held shelters are
+live-only, like every reaction to the player.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -1602,7 +1666,7 @@ part has to attach to, which maps onto the arc as it now stands:
 |---|---|---|
 | `belief.rs`, the occupancy search, the watchdog | 28 — shipped | lands with the first hostile — there is nothing to hold a belief until then |
 | Fire discipline and lane costs | 28 — shipped | needs a *pair* of hostiles before "do not shoot your friend" can be violated |
-| The director and its pacing budget | 29 | arrives with the occupied bunkers it paces |
+| The director and its pacing budget | 29 — the zone-hint half shipped; interior pacing waits for room fighting | arrives with the occupied bunkers it paces |
 | The stalker, and noise-weighted hints | 31 | waits until the deep caves have somewhere worth being afraid of |
 
 Its tests come with it, and one is a house rule restated: **all of it
@@ -1714,14 +1778,13 @@ the micro note asked to land before the hostiles rather than after them.
 
 | Stage | What | Why here |
 |---|---|---|
-| 29 | Bunkers, occupied, and hostiles that path | Mobs and military, and the hunt note's director with its pacing budget and zone-grade hints. Held until here because both attack you, and that needs the health model stage 28 brought. Flow-field pathing for hostiles lands here too: stage 28's deputies walk straight lines, which is fine in the open and obvious in a town. Squads bounded on purpose: pairs move alternately, a pair that loses its partner takes the ally-down composure hit — suppression and command layers explicitly out of scope. Surrender feeds the arrest verb, the jailhouse and capture contracts |
 | 30 | Factions and reputation | Bounty (stage 13) is per-town standing; factions are that standing shared between towns — and what a bunker's military garrison belongs to. The spoofers stage 15 taught arrive in their hands |
 | 31 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore. The hunt note's stalker lands here too: it waits until the deep places are worth being afraid of, and hunts by the noise a working mine makes |
 | 32 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 28.
+The whole game at a glance, as of stage 29.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1788,10 +1851,13 @@ decaying belief and search an occupancy map for you, score cover as
 occlusion at three eye heights, never fire through each other, and fight,
 hide, run or surrender on nerve derived back at the townsfolk round — with
 six hits, quiet-then-mend recovery, and an arrest that settles the bounty);
+held shelters (every bunker garrisoned from its own seed, hostiles routing
+on the drones' flow fields toward their belief, noise heard as 32-metre
+zones with the drill as dinner bell, paired overwatch, and surrendered
+holders taken in for the board's tier-scaled pay);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** bunkers occupied, and hostiles that path around
-a building instead of into it; the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
+**Planned, in arc order:** the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
 B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket
 arcade.
 

@@ -685,6 +685,30 @@ compiled in. It needs **glibc 2.39 or newer** (SteamOS 3.7+ is fine, 3.6 is not)
 ./dist/gamingg-linux-x86_64
 ```
 
+### The shelters are held
+
+The bunkers stopped being free real estate. Come near a hatch and its
+holders muster — two, three or four of them by the shelter's size, the same
+squad every time because they are rolled from the bunker's own seed. They
+run everything the deputies run: nerve, cover, fire discipline, the
+searching. And they *path* now — hostiles route on the same flow fields the
+mining drones drive on, so they come around the rockfall instead of
+moonwalking into it, and an underground holder no longer teleports to the
+meadow above.
+
+What they hear is a zone, never a spot. A shot, or your drill running, tells
+every shelter in earshot which 32-metre cell the noise came from — and
+nothing finer, so they still have to come and look. Your drill is a dinner
+bell: run the swarm loud and rich, run it slow and quiet, or dig decoy noise
+a valley over and raid in the shadow of your own diversion. They move in
+pairs, one walking while one watches.
+
+Break a holder's nerve instead of their body and their hands go up — walk
+over, press `E`, and they are taken in: the board pays 80 to 180 credits a
+head by the shelter's size. A whole shelter can be cleared without a single
+shot landing, if you can scare everyone in it. Clear it however you like and
+it stays cleared: the caches below are yours.
+
 ### The law comes for you
 
 Every crime you have ever been seen committing has been going on a tab. Push
@@ -893,7 +917,7 @@ Controls:
 | `N` | Toggle the minimap |
 | `[` / `]` | Zoom the minimap out / in |
 | `9` | The electrolyser, to place on a shore |
-| `E` | A word with the nearest townsperson when nothing solid is in reach — their line lands as a toast and in the terminal's transcript |
+| `E` | A word with the nearest townsperson when nothing solid is in reach — or, if somebody nearby has their hands up, take them in for the board's pay |
 | `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `law` reads the deputies |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
