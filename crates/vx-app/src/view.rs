@@ -232,6 +232,54 @@ mod tests {
     }
 
     #[test]
+    fn the_orbit_camera_stays_clear_of_solids_over_positions_and_angles() {
+        // The single-pivot sweep above, widened into the property test the
+        // polish round asked for: many stand points, every boom angle. A
+        // clamped camera that lands inside a hillside is a frame of looking
+        // through the world. The pivots are lifted well into open air so the
+        // wall is never inside `MIN_ORBIT_DISTANCE` — the one case where the
+        // pull-in's own floor can seat the camera in rock — which keeps the
+        // guarantee here the strong one: the placed cell is always air.
+        let world = world();
+        for &(x, z) in &[
+            (2, 2),
+            (5, 3),
+            (8, 8),
+            (11, 6),
+            (13, 12),
+            (3, 13),
+            (14, 2),
+            (7, 10),
+            (10, 14),
+        ] {
+            let Some(ground) = world.surface_y(x, z) else {
+                continue;
+            };
+            for lift in [5.0f32, 8.0, 12.0] {
+                let pivot = Vec3::new(x as f32 + 0.5, ground as f32 + lift, z as f32 + 0.5);
+                for step in 0..48 {
+                    let yaw = step as f32 * std::f32::consts::TAU / 48.0;
+                    for pitch in [-1.2f32, -0.6, 0.0, 0.6, 1.2] {
+                        let camera = camera_looking(yaw, pitch);
+                        let placed =
+                            camera_placement(&world, &camera, pivot, ViewMode::ThirdPerson);
+                        let cell = BlockPos::new(
+                            placed.x.floor() as i32,
+                            placed.y.floor() as i32,
+                            placed.z.floor() as i32,
+                        );
+                        assert!(
+                            !world.is_solid(cell),
+                            "camera inside geometry at ({x},{z}) lift {lift}, \
+                             yaw {yaw}, pitch {pitch}: {placed:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn cycling_the_view_returns_to_first_person() {
         assert_eq!(ViewMode::FirstPerson.cycled(), ViewMode::ThirdPerson);
         assert_eq!(ViewMode::FirstPerson.cycled().cycled(), ViewMode::FirstPerson);

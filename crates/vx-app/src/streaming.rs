@@ -559,4 +559,208 @@ mod tests {
         let world = World::new(1);
         assert!(ChunkStreamer::build_meshes(&world, &[]).is_empty());
     }
+
+    /// The neighbouring chunks that share a *face* with a block on the perimeter
+    /// column `(x, z)` of the centre chunk, paired with the offset of the block
+    /// across that seam. In this column world only the ±X / ±Z borders cross a
+    /// chunk; a corner column shares a face with two neighbours at once.
+    fn seam_neighbours(x: i32, z: i32) -> Vec<(ChunkPos, i32, i32)> {
+        let last = vx_core::CHUNK_SIZE - 1;
+        let mut seams = Vec::new();
+        if x == 0 {
+            seams.push((ChunkPos::new(-1, 0), -1, 0));
+        }
+        if x == last {
+            seams.push((ChunkPos::new(1, 0), 1, 0));
+        }
+        if z == 0 {
+            seams.push((ChunkPos::new(0, -1), 0, -1));
+        }
+        if z == last {
+            seams.push((ChunkPos::new(0, 1), 0, 1));
+        }
+        seams
+    }
+
+    #[test]
+    fn every_boundary_removal_dirties_the_seam_neighbour() {
+        // The oldest voxel bug there is: a block removed on a chunk border
+        // exposes a face that belongs to the *neighbour's* mesh. If only the
+        // edited chunk re-meshes, the neighbour keeps culling a face against a
+        // block that no longer exists — a window into the void. This walks
+        // every boundary cell of a chunk and asserts the neighbour is marked
+        // dirty whenever the removal exposes one of its faces.
+        use std::collections::HashSet;
+        use vx_core::{BlockId, CHUNK_HEIGHT, CHUNK_SIZE};
+
+        let mut world = World::new(31337);
+        world.load_around(ChunkPos::new(0, 0), 1);
+        let loaded: Vec<ChunkPos> = world.loaded_chunks().collect();
+        let last = CHUNK_SIZE - 1;
+
+        // Every perimeter column of the centre chunk. Local == world here,
+        // since the centre chunk's origin is (0, 0).
+        let perimeter: Vec<(i32, i32)> = (0..CHUNK_SIZE)
+            .flat_map(|i| [(0, i), (last, i), (i, 0), (i, last)])
+            .collect();
+
+        let mut exercised = 0usize;
+        for (x, z) in perimeter {
+            let seams = seam_neighbours(x, z);
+            for y in 0..CHUNK_HEIGHT {
+                let cell = BlockPos::new(x, y, z);
+                if !world.is_solid(cell) {
+                    continue;
+                }
+
+                // Measure only this edit's effect.
+                for pos in &loaded {
+                    world.clear_dirty(*pos);
+                }
+                let prev = world.block(cell);
+                world.set_block(cell, BlockId::AIR);
+                let dirty: HashSet<ChunkPos> = world.dirty_chunks().collect();
+
+                for (seam, dx, dz) in &seams {
+                    let across = BlockPos::new(x + dx, y, z + dz);
+                    // The seam face becomes visible only if the block across it
+                    // is solid; that is exactly when the neighbour must remesh.
+                    if world.is_solid(across) {
+                        assert!(
+                            dirty.contains(seam),
+                            "removing {cell:?} exposed a face of {seam:?} \
+                             but that chunk was not marked dirty"
+                        );
+                        exercised += 1;
+                    }
+                }
+                world.set_block(cell, prev);
+            }
+        }
+        assert!(
+            exercised > 200,
+            "only {exercised} seam faces exercised — terrain too sparse to trust"
+        );
+    }
+
+    #[test]
+    fn a_boundary_carve_dirties_the_seam_neighbour() {
+        // The drill wounds blocks with `carve`, not a clean break. A wound on a
+        // seam changes what the neighbour draws along that seam just as a full
+        // removal does, so the same neighbour-dirty rule has to fire.
+        use std::collections::HashSet;
+        use vx_core::{BlockPos, CHUNK_HEIGHT, CHUNK_SIZE};
+
+        let mut world = World::new(9);
+        world.load_around(ChunkPos::new(0, 0), 1);
+
+        // A solid block on the -X seam whose neighbour is also solid.
+        let mut target = None;
+        'search: for z in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_HEIGHT {
+                let cell = BlockPos::new(0, y, z);
+                if world.is_solid(cell) && world.is_solid(BlockPos::new(-1, y, z)) {
+                    target = Some(cell);
+                    break 'search;
+                }
+            }
+        }
+        let cell = target.expect("generated terrain has a solid seam block");
+
+        for pos in world.loaded_chunks().collect::<Vec<_>>() {
+            world.clear_dirty(pos);
+        }
+
+        // A single-cell bite leaves the block alive — a wound, not a break.
+        let bite = vx_world::micro::bit(0, 0, 0);
+        let outcome = world.carve(cell, bite);
+        assert!(
+            matches!(outcome, vx_world::Carved::Wounded(_)),
+            "expected a wound from a one-cell bite, got {outcome:?}"
+        );
+
+        let dirty: HashSet<ChunkPos> = world.dirty_chunks().collect();
+        assert!(
+            dirty.contains(&ChunkPos::new(-1, 0)),
+            "a wound on the seam did not dirty the neighbour"
+        );
+    }
+
+    #[test]
+    fn boundary_edits_keep_the_joined_mesh_watertight() {
+        // The guarantee in geometry rather than in flags: an incremental
+        // re-mesh (only the chunks the edit dirtied) must produce the exact
+        // same joined geometry as a full re-mesh of the whole neighbourhood
+        // from scratch. A neighbour left stale shows up here as a missing face
+        // — the joined meshes stop being watertight.
+        use std::collections::{HashMap, HashSet};
+        use vx_core::{BlockId, CHUNK_SIZE};
+
+        let mut world = World::new(77);
+        world.load_around(ChunkPos::new(0, 0), 1);
+        let loaded: Vec<ChunkPos> = world.loaded_chunks().collect();
+
+        let mesh_of = |world: &World, pos: ChunkPos| {
+            let origin = pos.origin();
+            build_mesh(world, world.registry(), [origin.x, 0, origin.z])
+        };
+
+        // Baseline geometry for the whole neighbourhood, all correct.
+        let baseline: HashMap<ChunkPos, Mesh> =
+            loaded.iter().map(|pos| (*pos, mesh_of(&world, *pos))).collect();
+
+        // Representative boundary cells: the four edge mid-points and all four
+        // corners, each sampled over a short band of near-surface depths — the
+        // zone a drill actually breaks through.
+        let last = CHUNK_SIZE - 1;
+        let columns = [
+            (0, 8),
+            (last, 8),
+            (8, 0),
+            (8, last),
+            (0, 0),
+            (0, last),
+            (last, 0),
+            (last, last),
+        ];
+        let mut checked = 0usize;
+        for (x, z) in columns {
+            let Some(surface) = world.surface_y(x, z) else {
+                continue;
+            };
+            for y in (0..=surface).rev().take(4) {
+                let cell = BlockPos::new(x, y, z);
+                if !world.is_solid(cell) {
+                    continue;
+                }
+                for pos in &loaded {
+                    world.clear_dirty(*pos);
+                }
+                let prev = world.block(cell);
+                world.set_block(cell, BlockId::AIR);
+                let dirty: HashSet<ChunkPos> = world.dirty_chunks().collect();
+
+                // Incremental: keep every baseline mesh, rebuild only the ones
+                // the edit marked dirty — exactly what the streamer uploads.
+                let mut incremental = baseline.clone();
+                for pos in &dirty {
+                    if loaded.contains(pos) {
+                        incremental.insert(*pos, mesh_of(&world, *pos));
+                    }
+                }
+
+                // Ground truth: rebuild the whole neighbourhood from scratch.
+                for pos in &loaded {
+                    let full = mesh_of(&world, *pos);
+                    assert_eq!(
+                        incremental[pos], full,
+                        "chunk {pos:?} carries stale geometry after editing {cell:?}"
+                    );
+                }
+                checked += 1;
+                world.set_block(cell, prev);
+            }
+        }
+        assert!(checked > 8, "only {checked} boundary edits exercised");
+    }
 }
