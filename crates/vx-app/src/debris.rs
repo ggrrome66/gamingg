@@ -53,9 +53,44 @@ pub const CHIP_GRAVITY: f32 = 22.0;
 /// half-second of detail; at forty metres nobody can see one anyway.
 pub const CHIP_CULL: f32 = 40.0;
 
+/// Dust puffs thrown per drill tick, at the contact point.
+pub const PUFFS_PER_TICK: usize = 4;
+/// Dust hangs far longer than chips: it is what says "this spot, right here",
+/// and a mark that faded with the chips would not be marking anything.
+///
+/// The floor sits deliberately above [`CHIP_LIFE_MAX`], so *every* puff
+/// outlives *every* chip rather than the two merely overlapping on average —
+/// a property the tests assert, and the reason these are not simply "a bit
+/// longer".
+pub const DUST_LIFE_MIN: f32 = CHIP_LIFE_MAX + 0.1;
+pub const DUST_LIFE_MAX: f32 = 2.0;
+/// Dust drifts rather than flies.
+pub const DUST_SPEED: f32 = 0.9;
+/// And it rises, because hot rock powder does.
+pub const DUST_RISE: f32 = 0.8;
+/// Barely any gravity: dust hangs.
+pub const DUST_GRAVITY: f32 = 1.2;
+/// A puff starts around a third of a cell and swells as it disperses.
+pub const DUST_SIZE: f32 = CHIP_SIZE * 1.4;
+
+/// What a particle is: a thrown chip of rock, or the dust the bit raises.
+///
+/// One pool rather than two, because they differ only in how they move and
+/// how big they are — and a second pool would be a second cap, a second
+/// advance and a second chance for the two to disagree about determinism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A thrown fragment: fast, ballistic, cell-sized.
+    Chip,
+    /// The cloud at the bit: slow, rising, hangs. This is the one that says
+    /// *which block* is being cut, which is the whole point of it.
+    Dust,
+}
+
 /// One flying chip.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Chip {
+    pub kind: Kind,
     pub position: Vec3,
     pub velocity: Vec3,
     /// Seconds left to live. Zero or below means the slot is free.
@@ -136,6 +171,14 @@ impl Debris {
         }
     }
 
+    /// Raise a tick's worth of dust at the point the bit is cutting.
+    pub fn dust(&mut self, contact: Vec3, face: Face, tile: u32, tick: u64) {
+        for index in 0..PUFFS_PER_TICK {
+            let puff = spawn_dust(contact, face, tile, tick, index);
+            self.push(puff);
+        }
+    }
+
     /// Put one chip in the pool, recycling the oldest slot once full.
     fn push(&mut self, chip: Chip) {
         if self.chips.len() < CHIP_POOL {
@@ -158,7 +201,11 @@ impl Debris {
             if !chip.alive() {
                 continue;
             }
-            chip.velocity.y -= CHIP_GRAVITY * dt;
+            let gravity = match chip.kind {
+                Kind::Chip => CHIP_GRAVITY,
+                Kind::Dust => DUST_GRAVITY,
+            };
+            chip.velocity.y -= gravity * dt;
             chip.position += chip.velocity * dt;
             chip.angle += chip.spin * dt;
             chip.life -= dt;
@@ -179,10 +226,19 @@ impl Debris {
         self.chips()
             .filter(|chip| (chip.position - eye).length_squared() <= cull)
             .map(|chip| {
-                // Shrinking as it dies, so a chip leaves rather than blinking
-                // out. The alpha channel is not ours to use here — the object
-                // pipeline is opaque — so size carries the fade.
-                let size = CHIP_SIZE * (1.0 - chip.age() * 0.5);
+                // The alpha channel is not ours to use here — the object
+                // pipeline is opaque — so size carries the whole story. A chip
+                // shrinks as it dies, so it leaves rather than blinking out;
+                // dust does the opposite, swelling as it disperses and then
+                // thinning to nothing, which is what a cloud does.
+                let size = match chip.kind {
+                    Kind::Chip => CHIP_SIZE * (1.0 - chip.age() * 0.5),
+                    Kind::Dust => {
+                        let swell = 1.0 + chip.age() * 1.6;
+                        let thin = (1.0 - chip.age()).max(0.0);
+                        DUST_SIZE * swell * thin
+                    }
+                };
                 let model = glam::Mat4::from_scale_rotation_translation(
                     Vec3::splat(size),
                     glam::Quat::from_euler(
@@ -236,6 +292,7 @@ fn spawn(block: BlockPos, face: Face, tile: u32, tick: u64, index: usize) -> Chi
     );
 
     Chip {
+        kind: Kind::Chip,
         position,
         velocity,
         life,
@@ -244,6 +301,62 @@ fn spawn(block: BlockPos, face: Face, tile: u32, tick: u64, index: usize) -> Chi
         spin,
         angle: Vec3::ZERO,
     }
+}
+
+/// One puff of dust at the point the bit is actually touching.
+///
+/// `contact` is the spot on the face the ray struck, not the block's centre:
+/// the dust marks *where you are cutting*, which is the difference between
+/// knowing which block you are about to take and guessing.
+fn spawn_dust(contact: Vec3, face: Face, tile: u32, tick: u64, index: usize) -> Chip {
+    // A stream of its own so dust and chips from one tick do not share draws.
+    let seed = mix_at(contact, tick, index ^ 0x5eed);
+
+    let step = face.offset();
+    let normal = Vec3::new(step[0] as f32, step[1] as f32, step[2] as f32);
+    let (across_a, across_b) = face_axes(normal);
+
+    // Tight to the contact point: a cloud spread over the whole face would
+    // point at the block rather than at the cut.
+    let position = contact
+        + normal * 0.04
+        + across_a * (unit(seed, 0) - 0.5) * 0.22
+        + across_b * (unit(seed, 1) - 0.5) * 0.22;
+
+    let drift = (normal
+        + across_a * (unit(seed, 2) - 0.5) * 1.4
+        + across_b * (unit(seed, 3) - 0.5) * 1.4)
+        .normalize_or_zero()
+        * DUST_SPEED
+        * (0.5 + unit(seed, 4) * 0.9);
+    let velocity = drift + Vec3::Y * DUST_RISE * (0.6 + unit(seed, 5) * 0.8);
+
+    let life = DUST_LIFE_MIN + unit(seed, 6) * (DUST_LIFE_MAX - DUST_LIFE_MIN);
+    Chip {
+        kind: Kind::Dust,
+        position,
+        velocity,
+        life,
+        span: life,
+        tile,
+        // Dust does not tumble; it is a cloud, not a fragment.
+        spin: Vec3::ZERO,
+        angle: Vec3::ZERO,
+    }
+}
+
+/// The seed for a puff, from a point rather than a block.
+///
+/// Quantised to a tenth of a block first: the contact point is a float from a
+/// raycast, and hashing it raw would make the dust depend on the exact camera
+/// angle, which no two runs of a replay need agree on to the last bit.
+fn mix_at(contact: Vec3, tick: u64, index: usize) -> u64 {
+    let quantised = BlockPos::new(
+        (contact.x * 10.0).floor() as i32,
+        (contact.y * 10.0).floor() as i32,
+        (contact.z * 10.0).floor() as i32,
+    );
+    mix(quantised, tick, index)
 }
 
 /// Two unit axes spanning the plane of `normal`.
@@ -286,6 +399,55 @@ fn unit(seed: u64, stream: u32) -> f32 {
     z ^= z >> 31;
     // The top 24 bits, which is more precision than an f32 mantissa holds.
     ((z >> 40) as f32) / ((1u32 << 24) as f32)
+}
+
+/// How far outside the block the outline sits, so it does not fight the
+/// block's own faces for depth.
+pub const HIGHLIGHT_INFLATE: f32 = 0.006;
+/// Thickness of an outline edge, in metres.
+pub const HIGHLIGHT_EDGE: f32 = 0.022;
+
+/// The twelve edges of the block under the crosshair, as drawable boxes.
+///
+/// Precision is the whole point: drilling is a per-block commitment, and
+/// without a mark on the block you are aiming at, the honest way to find out
+/// which one you had was to destroy it. Every voxel game solves this with a
+/// selection box, and it is the cheapest possible fix — twelve thin boxes
+/// through the instanced object path that drones already use, no new pipeline.
+///
+/// `tile` decides the colour, which is the caller's to pick: the drill marks
+/// its target one way and a placement preview could mark it another.
+pub fn block_outline(block: vx_core::BlockPos, tile: u32) -> Vec<vx_render::Object> {
+    let min = Vec3::new(block.x as f32, block.y as f32, block.z as f32)
+        - Vec3::splat(HIGHLIGHT_INFLATE);
+    let max = min + Vec3::splat(1.0 + HIGHLIGHT_INFLATE * 2.0);
+    let edge = HIGHLIGHT_EDGE;
+
+    let mut edges = Vec::with_capacity(12);
+    // Four edges along each axis, each a long thin box spanning that axis and
+    // pinned to a corner in the other two.
+    for (a, b) in [(min.y, min.z), (min.y, max.z), (max.y, min.z), (max.y, max.z)] {
+        edges.push(vx_render::Object::box_between(
+            Vec3::new(min.x, a - edge, b - edge),
+            Vec3::new(max.x, a + edge, b + edge),
+            tile,
+        ));
+    }
+    for (a, b) in [(min.x, min.z), (min.x, max.z), (max.x, min.z), (max.x, max.z)] {
+        edges.push(vx_render::Object::box_between(
+            Vec3::new(a - edge, min.y, b - edge),
+            Vec3::new(a + edge, max.y, b + edge),
+            tile,
+        ));
+    }
+    for (a, b) in [(min.x, min.y), (min.x, max.y), (max.x, min.y), (max.x, max.y)] {
+        edges.push(vx_render::Object::box_between(
+            Vec3::new(a - edge, b - edge, min.z),
+            Vec3::new(a + edge, b + edge, max.z),
+            tile,
+        ));
+    }
+    edges
 }
 
 #[cfg(test)]
@@ -522,6 +684,114 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dust_rises_at_the_contact_point_rather_than_flying_off() {
+        // The whole job of the dust is to mark *where you are cutting*, so it
+        // has to start tight to the contact point and stay near it. Chips are
+        // the ones that leave.
+        let contact = Vec3::new(4.5, 62.0, -6.3);
+        let mut debris = Debris::new();
+        debris.dust(contact, Face::PosY, TILE, 5);
+
+        assert_eq!(debris.live_count(), PUFFS_PER_TICK);
+        for puff in debris.chips() {
+            assert_eq!(puff.kind, Kind::Dust);
+            assert!(
+                (puff.position - contact).length() < 0.3,
+                "a puff started {} m from the cut",
+                (puff.position - contact).length()
+            );
+            assert!(puff.velocity.y > 0.0, "dust sank instead of rising");
+        }
+    }
+
+    #[test]
+    fn dust_hangs_longer_than_chips_fly() {
+        // A cloud that vanished as fast as the chips would not mark anything.
+        let mut chips = Debris::new();
+        chips.drill(block(), Face::PosY, TILE, 1);
+        let chip_life = chips.chips().map(|c| c.span).fold(0.0f32, f32::max);
+
+        let mut dust = Debris::new();
+        dust.dust(Vec3::new(0.5, 60.0, 0.5), Face::PosY, TILE, 1);
+        let dust_life = dust.chips().map(|c| c.span).fold(f32::MAX, f32::min);
+
+        assert!(
+            dust_life > chip_life,
+            "the shortest-lived puff ({dust_life}) outlives no chip ({chip_life})"
+        );
+    }
+
+    #[test]
+    fn dust_is_deterministic_and_moves_slower_than_chips() {
+        let puff = || {
+            let mut debris = Debris::new();
+            debris.dust(Vec3::new(1.25, 40.0, 2.75), Face::NegZ, TILE, 808);
+            debris.chips().copied().collect::<Vec<_>>()
+        };
+        assert_eq!(puff(), puff(), "the same cut raised different dust");
+
+        let dust_speed = puff()[0].velocity.length();
+        let mut chips = Debris::new();
+        chips.drill(block(), Face::NegZ, TILE, 808);
+        let chip_speed = chips.chips().map(|c| c.velocity.length()).fold(0.0f32, f32::max);
+        assert!(
+            dust_speed < chip_speed,
+            "dust ({dust_speed}) is not slower than the chips ({chip_speed})"
+        );
+    }
+
+    #[test]
+    fn dust_from_a_slightly_different_aim_is_the_same_dust() {
+        // The contact point comes off a raycast, so it is a float that two
+        // runs need not agree on to the last bit. Quantising before hashing is
+        // what keeps a replay's dust identical; this is that guarantee.
+        let a = Vec3::new(4.512_345, 62.0, -6.3);
+        let b = Vec3::new(4.512_9, 62.0, -6.3);
+        let raise = |at| {
+            let mut debris = Debris::new();
+            debris.dust(at, Face::PosY, TILE, 11);
+            debris.chips().map(|c| c.velocity).collect::<Vec<_>>()
+        };
+        assert_eq!(raise(a), raise(b), "a hair of aim changed the dust");
+    }
+
+    #[test]
+    fn dust_and_chips_share_one_pool_and_one_cap() {
+        let mut debris = Debris::new();
+        for tick in 0..(CHIP_POOL as u64) {
+            debris.drill(block(), Face::PosY, TILE, tick);
+            debris.dust(Vec3::new(0.5, 60.0, 0.5), Face::PosY, TILE, tick);
+        }
+        assert_eq!(debris.capacity_used(), CHIP_POOL, "the shared cap was exceeded");
+    }
+
+    #[test]
+    fn the_block_outline_has_twelve_edges_around_the_right_block() {
+        let at = vx_core::BlockPos::new(3, 70, -2);
+        let edges = block_outline(at, 42);
+        assert_eq!(edges.len(), 12, "a box has twelve edges");
+
+        // Every edge lies within a whisker of the block it marks.
+        let low = Vec3::new(at.x as f32, at.y as f32, at.z as f32) - Vec3::splat(0.1);
+        let high = low + Vec3::splat(1.2);
+        for edge in &edges {
+            assert!(edge.bounds_min.cmpge(low).all(), "an edge escaped: {:?}", edge.bounds_min);
+            assert!(edge.bounds_max.cmple(high).all(), "an edge escaped: {:?}", edge.bounds_max);
+            assert!(edge.tile == 42, "the outline ignored its tile");
+        }
+    }
+
+    #[test]
+    fn the_outline_moves_with_the_block() {
+        let first = block_outline(vx_core::BlockPos::new(0, 60, 0), 42);
+        let second = block_outline(vx_core::BlockPos::new(1, 60, 0), 42);
+        assert_ne!(
+            first[0].bounds_min, second[0].bounds_min,
+            "the outline stayed put when the aimed block changed"
+        );
     }
 
     #[test]

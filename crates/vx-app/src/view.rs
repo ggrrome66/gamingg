@@ -89,6 +89,56 @@ pub fn camera_placement(world: &World, camera: &Camera, pivot: Vec3, mode: ViewM
     }
 }
 
+/// How far in front of the eye the tool sits when nothing is in the way.
+pub const VIEWMODEL_REACH: f32 = 0.85;
+/// Clearance kept between the tool and the wall it has been pushed against.
+pub const VIEWMODEL_SKIN: f32 = 0.35;
+/// How far the tool drops, in metres, when fully stowed against a wall.
+pub const VIEWMODEL_DROP: f32 = 0.30;
+/// How far it swings down, in radians, when fully stowed.
+pub const VIEWMODEL_TILT: f32 = 0.85;
+/// How quickly the tool stows and comes back, in stow-fractions per second.
+/// A tenth of a second either way: fast enough not to feel like a delay,
+/// slow enough not to snap.
+pub const VIEWMODEL_EASE: f32 = 10.0;
+
+/// How much the tool in your hands must be stowed, 0 free .. 1 fully down.
+///
+/// Walk up to a hillside with the drill out and the barrel goes through it:
+/// the viewmodel is drawn most of a metre in front of the eye, and nothing was
+/// checking whether that metre was occupied. Every shooter that has met this
+/// problem solves it the same way — as you close on a wall, the weapon comes
+/// up and across rather than through — and the check is one ray, because the
+/// tool sits at a known offset from a camera that already knows where it is.
+///
+/// Returned as a fraction rather than a position so the caller decides what
+/// stowing *looks* like; the geometry of "how close is too close" lives here.
+pub fn viewmodel_stow(world: &World, camera: &Camera, eye: Vec3) -> f32 {
+    let ahead = camera.forward();
+    let wanted = VIEWMODEL_REACH + VIEWMODEL_SKIN;
+    let clear = vx_world::raycast_solid(world, world.registry(), eye, ahead, wanted)
+        .map(|hit| hit.distance)
+        .unwrap_or(wanted);
+    // Free at full reach, fully stowed once the wall is at the skin.
+    ((wanted - clear) / VIEWMODEL_REACH).clamp(0.0, 1.0)
+}
+
+/// Ease the stow fraction toward its target by one frame.
+///
+/// Frame time rather than the sim tick, and deliberately: this is the one
+/// piece of the round that has no effect a capture can see — the viewmodel is
+/// not drawn in the captures the oracle takes, which are third-person or
+/// headless — and tying it to the movement tick would make a tool held still
+/// against a wall in a paused game keep moving.
+pub fn eased_stow(current: f32, target: f32, dt: f32) -> f32 {
+    let step = VIEWMODEL_EASE * dt;
+    if current < target {
+        (current + step).min(target)
+    } else {
+        (current - step).max(target)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +327,135 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn placing_the_camera_repeatedly_from_its_own_eye_does_not_drift() {
+        // The fly-mode bug, in miniature. `camera_placement` returns a point
+        // metres behind the eye in third person, so a caller that feeds the
+        // result back in as the next frame's pivot adds the boom again every
+        // frame and the camera walks backwards through the world. The frame
+        // loop keeps the eye separately for exactly this reason; this pins
+        // the property that makes that necessary.
+        let world = world();
+        let camera = camera_looking(0.4, -0.1);
+        let eye = open_pivot(&world);
+
+        // Placed from a *fixed* eye, the answer is the same every time.
+        let first = camera_placement(&world, &camera, eye, ViewMode::ThirdPerson);
+        for _ in 0..30 {
+            let again = camera_placement(&world, &camera, eye, ViewMode::ThirdPerson);
+            assert_eq!(again, first, "placement is not a pure function of its eye");
+        }
+
+        // Fed its own output, it runs away — which is the bug, stated so that
+        // anyone tempted to simplify the frame loop back into one variable
+        // finds out here rather than in a playtest.
+        let mut drifting = eye;
+        for _ in 0..30 {
+            drifting = camera_placement(&world, &camera, drifting, ViewMode::ThirdPerson);
+        }
+        assert!(
+            (drifting - eye).length() > THIRD_PERSON_DISTANCE,
+            "feeding placement its own output should compound; it moved only {}",
+            (drifting - eye).length()
+        );
+    }
+
+    #[test]
+    fn the_tool_is_free_in_the_open_and_stowed_against_a_wall() {
+        // The complaint: walk up to a hillside with the drill out and the
+        // barrel goes through it.
+        let mut world = world();
+        let ground = world.surface_y(0, 0).unwrap();
+        let eye = Vec3::new(0.5, ground as f32 + 2.0, 0.5);
+        let stone = world.registry().id_of("engine:stone").unwrap();
+
+        // Looking -Z into open air.
+        let camera = camera_looking(0.0, 0.0);
+        assert_eq!(
+            viewmodel_stow(&world, &camera, eye),
+            0.0,
+            "the tool stowed with nothing in front of it"
+        );
+
+        // A wall one block ahead, well inside the tool's reach.
+        for dy in -1..=2 {
+            for dx in -1..=1 {
+                world.set_block(BlockPos::new(dx, ground + 2 + dy, -1), stone);
+            }
+        }
+        let stowed = viewmodel_stow(&world, &camera, eye);
+        assert!(stowed > 0.0, "the wall did not stow the tool");
+        assert!(stowed <= 1.0, "stow left its range: {stowed}");
+    }
+
+    #[test]
+    fn the_closer_the_wall_the_further_the_tool_stows() {
+        // A step-change would read as the tool snapping; it has to be gradual
+        // or walking slowly at a wall looks broken. Built as a cleared
+        // corridor with one wall in it, so the answer depends on the wall
+        // rather than on whatever the terrain happened to put nearby.
+        let mut world = world();
+        let ground = world.surface_y(0, 0).unwrap();
+        let air = vx_core::BlockId::AIR;
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let head = ground + 2;
+
+        for z in -1..=3 {
+            for dy in -1..=2 {
+                for dx in -1..=1 {
+                    world.set_block(BlockPos::new(dx, head + dy, z), air);
+                }
+            }
+        }
+        // The wall spans z in [-1, 0), so its near face is at z = 0.
+        for dy in -1..=2 {
+            for dx in -1..=1 {
+                world.set_block(BlockPos::new(dx, head + dy, -1), stone);
+            }
+        }
+
+        let camera = camera_looking(0.0, 0.0); // looking -Z, into the wall
+        let far = viewmodel_stow(&world, &camera, Vec3::new(0.5, head as f32, 1.1));
+        let near = viewmodel_stow(&world, &camera, Vec3::new(0.5, head as f32, 0.3));
+
+        assert!(far > 0.0, "the wall was not seen at all from 1.1 m");
+        assert!(
+            near > far,
+            "stowing did not increase as the wall closed: {far} then {near}"
+        );
+    }
+
+    #[test]
+    fn stowing_eases_rather_than_snapping() {
+        // Both directions, and both arrive.
+        let mut stow = 0.0;
+        for _ in 0..3 {
+            stow = eased_stow(stow, 1.0, 1.0 / 60.0);
+        }
+        assert!(stow > 0.0 && stow < 1.0, "stow snapped straight to {stow}");
+
+        for _ in 0..60 {
+            stow = eased_stow(stow, 1.0, 1.0 / 60.0);
+        }
+        assert_eq!(stow, 1.0, "stow never arrived");
+
+        for _ in 0..60 {
+            stow = eased_stow(stow, 0.0, 1.0 / 60.0);
+        }
+        assert_eq!(stow, 0.0, "the tool never came back up");
+    }
+
+    #[test]
+    fn a_tool_pointed_at_the_sky_is_never_stowed() {
+        // Looking up from open ground there is nothing to hit, and a tool that
+        // stowed itself in mid-air would be worse than the bug.
+        let world = world();
+        let ground = world.surface_y(0, 0).unwrap();
+        let eye = Vec3::new(0.5, ground as f32 + 3.0, 0.5);
+        let camera = camera_looking(0.0, 1.2);
+        assert_eq!(viewmodel_stow(&world, &camera, eye), 0.0);
     }
 
     #[test]

@@ -82,6 +82,16 @@ pub const LAUNCHER_COST: u64 = 600;
 pub const SLUG_COST: u64 = 40;
 pub const SLUG_BATCH: u32 = 8;
 
+/// Slugs the player starts a fresh world holding.
+///
+/// The game is a test build, and a weapon nobody can reach without first
+/// earning the credits to buy it is a weapon that goes untested. Four batches
+/// is enough to try the thing properly without being so much that running dry
+/// — which the HUD and the action bar both have opinions about — never
+/// happens. A world loaded from a save keeps whatever it had; this only
+/// applies where there is nothing to load.
+pub const STARTING_SLUGS: u32 = SLUG_BATCH * 4;
+
 /// How much the slung launcher weighs, in the same pack units the movement
 /// load byte speaks. Folded into the load *before* the command is journalled,
 /// so the weight replays without the oracle ever learning what a weapon is.
@@ -261,6 +271,20 @@ pub struct Arsenal {
 }
 
 impl Arsenal {
+    /// A fresh player's kit: the launcher, loaded, and in hand.
+    ///
+    /// Deliberately not `Default`, so the difference between "a new world" and
+    /// "an arsenal with nothing in it" stays visible at every call site — the
+    /// save loader wants the empty one and overwrites it.
+    pub fn starting_kit() -> Self {
+        Arsenal {
+            owned: true,
+            ammo: STARTING_SLUGS,
+            equipped: true,
+            ..Arsenal::default()
+        }
+    }
+
     /// Whether a shot may be fired right now.
     pub fn ready(&self) -> bool {
         self.owned && self.equipped && self.ammo > 0 && self.cooldown <= 0.0
@@ -429,6 +453,28 @@ pub fn segment_hits_box(from: Vec3, to: Vec3, centre: Vec3, half: Vec3) -> bool 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_starting_kit_is_armed_loaded_and_in_hand() {
+        // All three matter: owned but slung shows an empty pair of hands,
+        // and owned-and-equipped with no slugs cannot be fired.
+        let kit = super::Arsenal::starting_kit();
+        assert!(kit.owned, "the player spawned without a launcher");
+        assert!(kit.equipped, "the launcher spawned slung");
+        assert_eq!(kit.ammo, super::STARTING_SLUGS);
+        assert!(kit.ready(), "the starting kit cannot fire");
+    }
+
+    #[test]
+    fn a_default_arsenal_is_still_empty() {
+        // The save loader starts from `default` and reads over it, so the
+        // empty state has to stay empty or a loaded world would be handed a
+        // free launcher.
+        let empty = super::Arsenal::default();
+        assert!(!empty.owned);
+        assert_eq!(empty.ammo, 0);
+        assert!(!empty.ready());
+    }
+
     use super::*;
     use vx_core::ChunkPos;
 

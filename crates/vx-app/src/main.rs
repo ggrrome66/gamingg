@@ -8,6 +8,7 @@
 //!   display, so it works over SSH, in CI, and against a software Vulkan
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
+mod actionbar;
 mod arsenal;
 mod audio;
 mod awareness;
@@ -99,6 +100,8 @@ const PAD_SLOT: usize = 14;
 const DEBUG_SLOT: usize = 15;
 /// The pause menu.
 const PAUSE_SLOT: usize = 16;
+/// The action bar.
+const BAR_SLOT: usize = 17;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -2547,6 +2550,21 @@ struct Active {
     /// Chips thrown by the drill. Cosmetic and render-side, but advanced on
     /// the fixed tick like everything that has to replay — see `debris`.
     debris: debris::Debris,
+    /// How far the held tool is stowed against a wall, 0 free .. 1 down. See
+    /// `view::viewmodel_stow`: walk up to a hillside and the drill comes down
+    /// rather than through it.
+    tool_stow: f32,
+    /// Where the flying camera's *eye* is, as opposed to where the camera was
+    /// finally placed.
+    ///
+    /// These are the same thing in first person and are not in third, and
+    /// conflating them is a real bug: `camera.position` is the placement's
+    /// output, metres behind the eye along the boom, so flying from it adds
+    /// the boom's offset again every frame. The camera then walks backwards
+    /// through whatever is behind you, which is exactly what "you can see
+    /// through the map in third person while flying" looks like from the
+    /// inside.
+    fly_eye: glam::Vec3,
     /// Turns elapsed wall-clock into whole movement ticks, so the player runs
     /// on a fixed clock like everything else in the world.
     move_ticks: movement::Ticker,
@@ -2838,7 +2856,12 @@ impl App {
             MovementMode::Fly if trading => {}
             MovementMode::Walk if trading => {}
             MovementMode::Fly => {
+                // Fly from the eye. Last frame's placement left
+                // `camera.position` on the far end of the boom, and flying
+                // from there would add the boom again every frame.
+                active.camera.position = active.fly_eye;
                 self.fly.apply(&mut active.camera, &mut self.input, dt);
+                active.fly_eye = active.camera.position;
                 // Keep the body under the camera so switching to walk mode
                 // drops the player where they are looking from, not wherever
                 // they last stood.
@@ -2924,8 +2947,14 @@ impl App {
         // orientation (and, walking, the body); this decides first person
         // against over-the-shoulder, and pulls in past anything solid.
         let pivot = match active.mode {
-            MovementMode::Fly => active.camera.position,
-            MovementMode::Walk => active.player.eye_position(),
+            MovementMode::Fly => active.fly_eye,
+            MovementMode::Walk => {
+                // Kept in step while walking so that switching to fly mode
+                // starts from the body's own eye rather than from wherever
+                // the camera was last placed.
+                active.fly_eye = active.player.eye_position();
+                active.fly_eye
+            }
         };
         // The launcher's kick, worn by the camera. Offset the *pivot*, not
         // the body: the shake is theatre, the simulation never feels it, and
@@ -3490,24 +3519,40 @@ impl App {
             0.0
         };
         let recoil_back = active.shake * 0.16;
+
+        // Stow the tool when there is a wall where its barrel would be. The
+        // ray runs from the eye, not from the placed camera, so third person
+        // does not report the hillside four metres behind you as something the
+        // drill is about to go through.
+        let eye = match active.mode {
+            MovementMode::Fly => active.fly_eye,
+            MovementMode::Walk => active.player.eye_position(),
+        };
+        let wanted_stow = view::viewmodel_stow(&active.world, &active.camera, eye);
+        active.tool_stow = view::eased_stow(active.tool_stow, wanted_stow, dt);
+        let stow = active.tool_stow;
+
         let drill_position = active.camera.position
-            + camera_forward * (0.85 - recoil_back)
-            + camera_right * 0.42
-            + glam::Vec3::Y * (-0.38 + bob);
+            + camera_forward * (0.85 - recoil_back - stow * view::VIEWMODEL_REACH * 0.55)
+            + camera_right * (0.42 - stow * 0.10)
+            + glam::Vec3::Y * (-0.38 + bob - stow * view::VIEWMODEL_DROP);
         let drill_yaw = rig::yaw_towards(camera_forward.x, camera_forward.z).unwrap_or(0.0);
+        // Swung muzzle-down as it stows, the way a weapon is carried past a
+        // doorframe rather than pushed through it.
+        let stow_pitch = active.camera.pitch - stow * view::VIEWMODEL_TILT;
         if active.view.draws_viewmodel() {
             if active.arsenal.equipped {
                 objects.extend(active.launcher_rig.objects_pitched(
                     drill_position,
                     drill_yaw,
-                    active.camera.pitch + active.shake * 0.25,
+                    stow_pitch + active.shake * 0.25,
                     0.0,
                 ));
             } else {
                 objects.extend(active.hand_rig.objects_pitched(
                     drill_position,
                     drill_yaw,
-                    active.camera.pitch,
+                    stow_pitch,
                     active.drill_spin,
                 ));
             }
@@ -3540,6 +3585,33 @@ impl App {
             }
         }
 
+        // The block under the crosshair, outlined. Precision is the point:
+        // drilling is a per-block commitment, and without a mark the honest
+        // way to learn which block you had was to destroy it and find out.
+        // Drawn before the chips so it takes the same full-bright treatment
+        // they do — an outline that dimmed in a tunnel would be useless
+        // exactly where aiming is hardest.
+        if active.view.draws_viewmodel() || active.view.draws_body() {
+            let eye = match active.mode {
+                MovementMode::Fly => active.fly_eye,
+                MovementMode::Walk => active.player.eye_position(),
+            };
+            if let Some(aimed) = raycast_solid(
+                &active.world,
+                active.world.registry(),
+                eye,
+                active.camera.forward(),
+                Self::REACH,
+            ) {
+                let mut outline =
+                    debris::block_outline(aimed.block, vx_render::tiles::slot::HIGHLIGHT);
+                for edge in &mut outline {
+                    edge.light = 1.0;
+                }
+                objects.extend(outline);
+            }
+        }
+
         // Drill chips, after the lighting sweep above and lit by the same
         // rule: a chip thrown in a tunnel must not be the one bright thing
         // down there. Culled against the camera rather than the body, since
@@ -3558,6 +3630,7 @@ impl App {
             .renderer
             .set_objects(&active.context.device, &active.context.queue, &objects);
         self.refresh_hud();
+        self.refresh_action_bar();
         self.refresh_shop();
         self.refresh_home();
         self.refresh_permit();
@@ -5258,6 +5331,21 @@ impl App {
                     .debris
                     .drill(hit.block, hit.face, tile, active.journal.tick());
             }
+            // Dust rises the whole time the bit is down, not only when a layer
+            // comes off: it is the cloud at the contact point that says *this
+            // block, right here*, and a cloud that appeared four times a block
+            // would be a strobe rather than a mark.
+            if after < 1.0 && active.journal.tick().is_multiple_of(2) {
+                let tile = active
+                    .world
+                    .registry()
+                    .get_or_air(hit.id)
+                    .texture(hit.face) as u32;
+                let contact = active.camera.position + active.camera.forward() * hit.distance;
+                active
+                    .debris
+                    .dust(contact, hit.face, tile, active.journal.tick());
+            }
             if after < 1.0 {
                 return;
             }
@@ -6235,16 +6323,20 @@ impl App {
             | KeyCode::Digit8
             | KeyCode::Digit9 => {
                 if let Some(active) = &mut self.active {
-                    let slot = match code {
-                        KeyCode::Digit1 => 0,
-                        KeyCode::Digit2 => 1,
-                        KeyCode::Digit3 => 2,
-                        KeyCode::Digit4 => 3,
-                        KeyCode::Digit5 => 4,
-                        KeyCode::Digit6 => 5,
-                        KeyCode::Digit8 => 6,
-                        _ => 7,
+                    // Read from the action bar's table rather than a second
+                    // copy of it, so the key that picks a slot is always the
+                    // key drawn on it.
+                    let digit = match code {
+                        KeyCode::Digit1 => '1',
+                        KeyCode::Digit2 => '2',
+                        KeyCode::Digit3 => '3',
+                        KeyCode::Digit4 => '4',
+                        KeyCode::Digit5 => '5',
+                        KeyCode::Digit6 => '6',
+                        KeyCode::Digit8 => '8',
+                        _ => '9',
                     };
+                    let slot = actionbar::slot_of_key(digit).unwrap_or(0);
                     if slot < active.palette.len() {
                         active.selected = slot;
                         let name = &active.world.registry().get_or_air(active.palette[slot]).name;
@@ -7409,6 +7501,73 @@ impl App {
         }
     }
 
+    /// Rebuild and upload the action bar.
+    ///
+    /// Always on screen: the whole complaint it answers is that there was no
+    /// way to see what was in your hands, and a bar that appears only once you
+    /// press a key does not fix that.
+    fn refresh_action_bar(&mut self) {
+        let Some(active) = &mut self.active else { return };
+
+        let mut slots: Vec<actionbar::Slot> = active
+            .palette
+            .iter()
+            .enumerate()
+            .map(|(index, block)| {
+                let name = &active.world.registry().get_or_air(*block).name;
+                actionbar::Slot {
+                    key: actionbar::key_of_slot(index).unwrap_or('-'),
+                    short: actionbar::short_name(name),
+                    label: actionbar::full_name(name),
+                    count: None,
+                    usable: true,
+                }
+            })
+            .collect();
+
+        // The launcher sits on the end, on its own key. Its count is the
+        // satchel, and it goes dim when there is nothing to fire.
+        let launcher_index = slots.len();
+        slots.push(actionbar::Slot {
+            key: actionbar::LAUNCHER_KEY,
+            short: "SLUG".to_string(),
+            label: if active.arsenal.owned {
+                "SLUG LAUNCHER".to_string()
+            } else {
+                "NO LAUNCHER".to_string()
+            },
+            count: active.arsenal.owned.then_some(active.arsenal.ammo),
+            usable: active.arsenal.owned && active.arsenal.ammo > 0,
+        });
+
+        let content = actionbar::BarContent {
+            live: if active.arsenal.equipped {
+                launcher_index
+            } else {
+                active.selected
+            },
+            slots,
+        };
+        let pixels = actionbar::render_bar(&content);
+
+        let (screen_width, screen_height) = active.renderer.size();
+        let width = content.width() as f32 * actionbar::BAR_SCALE;
+        let height = content.height() as f32 * actionbar::BAR_SCALE;
+        active.renderer.set_overlay(
+            BAR_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (content.width(), content.height()),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (screen_width as f32 - width) / 2.0,
+                y: screen_height as f32 - height - 10.0,
+                width,
+                height,
+            },
+        );
+    }
+
     /// Rebuild and upload the pause menu while it is up.
     ///
     /// Redrawn every frame it is open rather than only when it changes: the
@@ -8334,7 +8493,11 @@ impl ApplicationHandler for App {
         let mut garage = garage::Garage::new();
         let mut homestead = homestead::Homestead::new();
         let mut town_permits = permits::Permits::new();
-        let mut rack = arsenal::Arsenal::default();
+        // Armed from the first frame. The game is a test build and the
+        // launcher is behind six hundred credits at a shop counter, which
+        // means it goes untested; a save that already has an arsenal
+        // overwrites this below.
+        let mut rack = arsenal::Arsenal::starting_kit();
         let mut kit = intrusion::Intrusions::default();
         let mut press = printer::Printer::default();
         let mut eyes = optics::Optics::default();
@@ -8398,6 +8561,8 @@ impl ApplicationHandler for App {
             // The console row is offered only where the console exists.
             pause: pause::Pause::new(self.gold_enabled, self.walk.sensitivity),
             debris: debris::Debris::new(),
+            fly_eye: camera.position,
+            tool_stow: 0.0,
             move_ticks: movement::Ticker::default(),
             last_move: None,
             window,

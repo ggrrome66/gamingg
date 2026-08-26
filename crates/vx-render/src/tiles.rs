@@ -73,7 +73,12 @@ pub mod slot {
     /// A building's foundation.
     pub const FOOTING: u32 = 41;
 
-    pub const COUNT: u32 = 42;
+    /// The selection outline drawn round the block under the crosshair. Flat
+    /// and bright on purpose: it is chrome, not a material, and the one tile
+    /// here that is meant to be obviously not part of the world.
+    pub const HIGHLIGHT: u32 = 42;
+
+    pub const COUNT: u32 = 43;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -404,6 +409,13 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                     } else {
                         shade([0.17, 0.18, 0.22], noise * 0.06)
                     }
+                }
+                slot::HIGHLIGHT => {
+                    // Deliberately flat — no jitter, no pattern. Everything
+                    // else in this atlas is trying to look like a material;
+                    // this one is trying to look like a line drawn on the
+                    // screen, and grain would only make it look like stone.
+                    shade([0.98, 0.98, 1.0], 0.0)
                 }
                 slot::FOOTING => {
                     // Poured footing: coarse aggregate, a shuttering seam and
