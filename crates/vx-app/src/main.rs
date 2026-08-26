@@ -36,6 +36,7 @@ mod journal;
 mod map;
 mod mining;
 mod people;
+mod pause;
 mod permits;
 mod electrolysis;
 mod fuel;
@@ -95,6 +96,8 @@ const TERM_SLOT: usize = 13;
 const PAD_SLOT: usize = 14;
 /// The F3 diagnostics readout.
 const DEBUG_SLOT: usize = 15;
+/// The pause menu.
+const PAUSE_SLOT: usize = 16;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -2536,6 +2539,9 @@ struct Active {
     /// rather than to the camera's current field of view, which would compound
     /// a little more open every frame until the world fisheyed.
     base_fov: f32,
+    /// `Esc`'s menu, and the owner of the feel toggles and look sensitivity.
+    /// While it is open the frame issues no ticks at all — see `pause`.
+    pause: pause::Pause,
     /// Turns elapsed wall-clock into whole movement ticks, so the player runs
     /// on a fixed clock like everything else in the world.
     move_ticks: movement::Ticker,
@@ -2705,6 +2711,11 @@ struct App {
     pad: gamepad::Pad,
     /// The left button is held: the drill is running.
     drill_held: bool,
+    /// The pause menu's Save & Quit was chosen. A flag rather than a direct
+    /// exit because the key handler has no event loop to call; the window
+    /// event that dispatched the press checks it and shuts down there, on the
+    /// same path a closed window takes.
+    quit_requested: bool,
     last_frame: Instant,
     // Frame timing for the title bar readout.
     frames: u32,
@@ -2734,6 +2745,7 @@ impl App {
             active: None,
             fly: FlyController::default(),
             drill_held: false,
+            quit_requested: false,
             walk: WalkController::default(),
             input: InputState::new(),
             pad: gamepad::Pad::new(),
@@ -2781,6 +2793,17 @@ impl App {
         // in place rather than through a copy.
         let Some(active) = &mut self.active else { return };
 
+        // The pause, and the whole of it. The simulation advances only when
+        // ticks are *issued*: movement runs off a ticker fed elapsed time, the
+        // fleet off its own rate, the day off this `dt`. Hand the frame a zero
+        // and every one of them simply does not advance — nothing is recorded,
+        // nothing drifts, and the journal never learns the player made coffee.
+        // There is no second mechanism to keep in step with this one, which is
+        // why `pause` is a menu and a `min` rather than a system.
+        //
+        // The frame still renders: the world is drawn frozen behind the menu.
+        let dt = if active.pause.open { 0.0 } else { dt };
+
         // Trading suspends walking and drilling: the shop owns the input
         // while it is open, and drifting away mid-deal would be silly.
         // The day rolls on. The dt above is already clamped, so a stalled
@@ -2799,6 +2822,7 @@ impl App {
             || active.printer.open
             || gold_open(active)
             || active.intro.open
+            || active.pause.open
             || feed.is_some();
         if busy || active.resuming {
             active.player.velocity = glam::Vec3::ZERO;
@@ -3519,6 +3543,7 @@ impl App {
         self.refresh_debug();
         #[cfg(feature = "gold")]
         self.refresh_gold();
+        self.refresh_pause();
         self.refresh_intro();
         self.refresh_board();
         self.refresh_device();
@@ -5932,6 +5957,14 @@ impl App {
             }
         }
 
+        // The pause menu, while up, owns the keyboard — and it sits below the
+        // console deliberately, so a panel opened *from* the menu still closes
+        // on its own key rather than being swallowed here.
+        if self.active.as_ref().is_some_and(|active| active.pause.open) {
+            self.pause_key(code);
+            return;
+        }
+
         // The lockbox panel, while open, owns the keyboard.
         if self.active.as_ref().is_some_and(|active| active.permit_panel.open) {
             let Some(active) = &mut self.active else { return };
@@ -6055,7 +6088,7 @@ impl App {
         }
 
         match code {
-            KeyCode::Escape => self.set_capture(false),
+            KeyCode::Escape => self.open_pause(),
             KeyCode::KeyE => self.interact(),
             KeyCode::KeyF => {
                 if let Some(active) = &mut self.active {
@@ -6991,6 +7024,85 @@ impl App {
     }
 
     /// One key into the operator's console.
+    /// Put the menu up: release the cursor, and let the frame's `dt` go to
+    /// zero from the next frame on.
+    fn open_pause(&mut self) {
+        self.set_capture(false);
+        if let Some(active) = &mut self.active {
+            active.pause.open();
+            // The body must not coast into a wall on the frame the menu goes
+            // up. Movement is suspended by `busy` from here, but the velocity
+            // it already had would be waiting on resume.
+            active.player.velocity = glam::Vec3::ZERO;
+        }
+    }
+
+    /// Take the menu down and hand the mouse back to the world.
+    fn resume_from_pause(&mut self) {
+        if let Some(active) = &mut self.active {
+            active.pause.close();
+            active.renderer.clear_overlay(PAUSE_SLOT);
+        }
+        self.set_capture(true);
+    }
+
+    /// Drive the pause menu.
+    fn pause_key(&mut self, code: KeyCode) {
+        let Some(active) = &mut self.active else { return };
+        let action = match code {
+            KeyCode::Escape => active.pause.back(),
+            KeyCode::ArrowUp | KeyCode::KeyW => {
+                active.pause.step(-1);
+                pause::Action::Handled
+            }
+            KeyCode::ArrowDown | KeyCode::KeyS => {
+                active.pause.step(1);
+                pause::Action::Handled
+            }
+            KeyCode::ArrowLeft | KeyCode::KeyA => {
+                active.pause.nudge(-1);
+                pause::Action::Handled
+            }
+            KeyCode::ArrowRight | KeyCode::KeyD => {
+                active.pause.nudge(1);
+                pause::Action::Handled
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => active.pause.activate(),
+            _ => pause::Action::Handled,
+        };
+
+        // The menu owns its own settings and nothing else; carrying an action
+        // out is this side's job.
+        match action {
+            pause::Action::Handled => {
+                // The toggles take effect immediately, so a player switching
+                // the bob off sees it stop rather than having to resume first.
+                active.feel.settings = active.pause.feel;
+                self.walk.sensitivity = active.pause.sensitivity;
+                self.fly.sensitivity = active.pause.sensitivity;
+            }
+            pause::Action::Resume => {
+                active.feel.settings = active.pause.feel;
+                self.walk.sensitivity = active.pause.sensitivity;
+                self.fly.sensitivity = active.pause.sensitivity;
+                self.resume_from_pause();
+            }
+            pause::Action::OperatorPanel => {
+                active.renderer.clear_overlay(PAUSE_SLOT);
+                #[cfg(feature = "gold")]
+                {
+                    active.gold.open = true;
+                }
+                // The console owns the cursor exactly as the menu did, so it
+                // stays released.
+            }
+            pause::Action::SaveAndQuit => {
+                self.save_world();
+                self.quit_requested = true;
+            }
+        }
+    }
+
     #[cfg(feature = "gold")]
     fn gold_key(&mut self, code: KeyCode) {
         let Some(active) = &mut self.active else { return };
@@ -7258,6 +7370,35 @@ impl App {
             tuning: &active.movement.tuning,
             world_hash: active.gold_hash,
         }
+    }
+
+    /// Rebuild and upload the pause menu while it is up.
+    ///
+    /// Redrawn every frame it is open rather than only when it changes: the
+    /// panel is three hundred pixels of text and the frame it sits on is
+    /// otherwise doing nothing at all, the simulation being stopped.
+    fn refresh_pause(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.pause.open {
+            return;
+        }
+        let pixels = pause::render_pause(&active.pause);
+        let (width, height) = active.renderer.size();
+        let panel_width = pause::PAUSE_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = pause::PAUSE_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            PAUSE_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (pause::PAUSE_WIDTH, pause::PAUSE_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
     }
 
     /// Rebuild and upload the console while it is open.
@@ -8216,6 +8357,8 @@ impl ApplicationHandler for App {
             movement: movement::Movement::default(),
             feel: feel::Feel::default(),
             base_fov: camera.fov_y,
+            // The console row is offered only where the console exists.
+            pause: pause::Pause::new(self.gold_enabled, self.walk.sensitivity),
             move_ticks: movement::Ticker::default(),
             last_move: None,
             window,
@@ -8403,6 +8546,13 @@ impl ApplicationHandler for App {
                         // state must ignore repeats or it flickers.
                         if !event.repeat {
                             self.handle_press(code);
+                        }
+                        // Save & Quit asked to shut down. The world is already
+                        // written by the time the flag is set, so this is only
+                        // the teardown half of `CloseRequested`.
+                        if self.quit_requested {
+                            event_loop.exit();
+                            return;
                         }
                         self.input.press(code);
                     }
