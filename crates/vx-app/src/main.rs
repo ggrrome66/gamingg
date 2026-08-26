@@ -18,6 +18,7 @@ mod board;
 mod clock;
 mod controller;
 mod debug;
+mod debris;
 mod device;
 mod disposition;
 mod economy;
@@ -874,6 +875,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             triangles: renderer.triangle_count(),
             edits: world.edit_count(),
             composites: world.composite_count(),
+            chips: 0,
             tick: 88_412,
             log_entries: 1_204,
             day: 9,
@@ -2542,6 +2544,9 @@ struct Active {
     /// `Esc`'s menu, and the owner of the feel toggles and look sensitivity.
     /// While it is open the frame issues no ticks at all — see `pause`.
     pause: pause::Pause,
+    /// Chips thrown by the drill. Cosmetic and render-side, but advanced on
+    /// the fixed tick like everything that has to replay — see `debris`.
+    debris: debris::Debris,
     /// Turns elapsed wall-clock into whole movement ticks, so the player runs
     /// on a fixed clock like everything else in the world.
     move_ticks: movement::Ticker,
@@ -2906,6 +2911,11 @@ impl App {
                         command.yaw(),
                         movement::MOVE_TICK,
                     );
+                    // Chips ride the same tick, for the same reason: a spray
+                    // that advanced on frame time would differ between two
+                    // runs of one journal and every capture of a drill would
+                    // be a race.
+                    active.debris.advance(movement::MOVE_TICK);
                 }
             }
         }
@@ -3529,6 +3539,21 @@ impl App {
                 object.light = vx_mesh::sky_light(depth) as f32 / vx_mesh::FULL_LIGHT as f32;
             }
         }
+
+        // Drill chips, after the lighting sweep above and lit by the same
+        // rule: a chip thrown in a tunnel must not be the one bright thing
+        // down there. Culled against the camera rather than the body, since
+        // the camera is what the frustum belongs to.
+        let mut chips = active.debris.objects(active.camera.position);
+        for chip in &mut chips {
+            let at = chip.model.transform_point3(glam::Vec3::ZERO);
+            if let Some(stand) = active.world.surface_y(at.x.floor() as i32, at.z.floor() as i32)
+            {
+                let depth = (stand - 1) - at.y.floor() as i32;
+                chip.light = vx_mesh::sky_light(depth) as f32 / vx_mesh::FULL_LIGHT as f32;
+            }
+        }
+        objects.extend(chips);
         active
             .renderer
             .set_objects(&active.context.device, &active.context.queue, &objects);
@@ -5220,6 +5245,18 @@ impl App {
                 active
                     .world
                     .carve(hit.block, vx_world::micro::Shape::DrillFace.cells(0, 0, 0, face));
+                // The bit took a layer, so the bit throws chips — in the
+                // drilled block's own colour, so dirt throws dirt and ore
+                // glints ore. Seeded by block and tick, which is what keeps a
+                // replay throwing the same spray.
+                let tile = active
+                    .world
+                    .registry()
+                    .get_or_air(hit.id)
+                    .texture(hit.face) as u32;
+                active
+                    .debris
+                    .drill(hit.block, hit.face, tile, active.journal.tick());
             }
             if after < 1.0 {
                 return;
@@ -7709,6 +7746,7 @@ impl App {
             triangles: active.renderer.triangle_count(),
             edits: active.world.edit_count(),
             composites: active.world.composite_count(),
+            chips: active.debris.live_count(),
             tick: now,
             log_entries: active.journal.entries().len(),
             day: (now / schedule::TICKS_PER_DAY) as u32,
@@ -8359,6 +8397,7 @@ impl ApplicationHandler for App {
             base_fov: camera.fov_y,
             // The console row is offered only where the console exists.
             pause: pause::Pause::new(self.gold_enabled, self.walk.sensitivity),
+            debris: debris::Debris::new(),
             move_ticks: movement::Ticker::default(),
             last_move: None,
             window,

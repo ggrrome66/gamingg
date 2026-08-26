@@ -47,6 +47,8 @@ pub struct DebugContent {
     pub triangles: u32,
     pub edits: u64,
     pub composites: usize,
+    /// Drill chips currently in the air.
+    pub chips: usize,
     /// The journal: current tick and entries in the log.
     pub tick: u64,
     pub log_entries: usize,
@@ -152,8 +154,8 @@ pub fn render_debug(content: &DebugContent) -> Vec<u8> {
     rows.line(
         "TRIS",
         &format!(
-            "{}   EDITS {}   WOUNDS {}",
-            content.triangles, content.edits, content.composites
+            "{}   EDITS {}   WOUNDS {}   CHIPS {}",
+            content.triangles, content.edits, content.composites, content.chips
         ),
         TEXT,
     );
@@ -244,6 +246,7 @@ mod tests {
             triangles: 142_924,
             edits: 5_512,
             composites: 37,
+            chips: 40,
             tick: 88_412,
             log_entries: 1_204,
             day: 9,
