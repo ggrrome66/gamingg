@@ -21,6 +21,7 @@ mod debug;
 mod device;
 mod disposition;
 mod economy;
+mod feel;
 mod garage;
 mod garrison;
 #[cfg(feature = "gold")]
@@ -2526,6 +2527,15 @@ struct Active {
     player: PlayerBody,
     /// Stance, stamina and the ledge verbs. See `movement`.
     movement: movement::Movement,
+    /// The sensations that ride on top of the movement above: lens kicks, the
+    /// landing dip, the walk cycle, the lean. Advanced on the same fixed ticks
+    /// and read only by the camera — see `feel` for why that separation is the
+    /// whole design.
+    feel: feel::Feel,
+    /// The lens at rest. The feel layer's kick is added to *this* each frame
+    /// rather than to the camera's current field of view, which would compound
+    /// a little more open every frame until the world fisheyed.
+    base_fov: f32,
     /// Turns elapsed wall-clock into whole movement ticks, so the player runs
     /// on a fixed clock like everything else in the world.
     move_ticks: movement::Ticker,
@@ -2859,6 +2869,19 @@ impl App {
                         command.mass(),
                         movement::MOVE_TICK,
                     );
+                    // The feel layer rides the same fixed tick, reading the
+                    // state the tick above just produced. Inside the loop, not
+                    // once per frame: that is what makes the sensations a
+                    // function of the journal rather than of the frame rate,
+                    // and it is why a capture with the effects on is still
+                    // byte-identical between runs. The command's yaw is the
+                    // quantised one, so the strafe split replays exactly.
+                    active.feel.advance(
+                        active.movement.stance,
+                        active.player.velocity,
+                        command.yaw(),
+                        movement::MOVE_TICK,
+                    );
                 }
             }
         }
@@ -2890,8 +2913,22 @@ impl App {
         } else {
             pivot
         };
+        // The feel layer, applied last and only to the camera. The dip moves
+        // the *pivot*, so in third person the orbit's wall raycast still runs
+        // from the dipped anchor and a landing cannot shove the camera into
+        // the floor; the lens and the lean are view-only and touch nothing the
+        // game aims with. In fly mode there is no walk cycle to speak of, so
+        // the offsets are simply not gathered.
+        let offsets = match active.mode {
+            MovementMode::Walk => active.feel.offsets(),
+            MovementMode::Fly => feel::FeelOffsets::default(),
+        };
+        let pivot = pivot - glam::Vec3::Y * offsets.eye_drop;
         active.camera.position =
             view::camera_placement(&active.world, &active.camera, pivot, active.view);
+        active.camera.fov_y = active.base_fov + offsets.fov;
+        active.camera.roll = offsets.roll;
+        active.camera.pitch_offset = offsets.pitch;
 
         // A live feed steers the machine and rides its camera. Mouse-look
         // belongs entirely to the drone while it is up; the body's own view is
@@ -2910,6 +2947,13 @@ impl App {
             if let Some(eye) = active.mining.machine_eye(machine) {
                 active.camera.position = eye;
             }
+            // A feed is bolted to a machine, so it does not inherit the body's
+            // sensations: the player's legs are somewhere else entirely, and a
+            // drone whose horizon leaned when its distant owner sidestepped
+            // would be a bug that looked like a feature.
+            active.camera.fov_y = active.base_fov;
+            active.camera.roll = 0.0;
+            active.camera.pitch_offset = 0.0;
         }
 
 
@@ -8170,6 +8214,8 @@ impl ApplicationHandler for App {
 
         self.active = Some(Active {
             movement: movement::Movement::default(),
+            feel: feel::Feel::default(),
+            base_fov: camera.fov_y,
             move_ticks: movement::Ticker::default(),
             last_move: None,
             window,

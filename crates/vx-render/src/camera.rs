@@ -19,6 +19,16 @@ pub struct Camera {
     pub aspect: f32,
     pub znear: f32,
     pub zfar: f32,
+    /// Roll about the view axis, radians, positive leaning right.
+    ///
+    /// Presentation only — a slide's tilt, a strafe's lean. Deliberately not
+    /// part of [`Camera::forward`]: that vector is what the game *aims* with,
+    /// and a shot that drifted with the walk cycle would be a bug wearing a
+    /// sensation's clothes. Only [`Camera::view_matrix`] reads this.
+    pub roll: f32,
+    /// Pitch added for the view alone, radians. Same contract as `roll`: the
+    /// walk cycle's swing moves the picture, never the aim.
+    pub pitch_offset: f32,
 }
 
 /// How close to vertical the pitch may get, in radians.
@@ -34,6 +44,8 @@ impl Default for Camera {
             aspect: 16.0 / 9.0,
             znear: 0.1,
             zfar: 1000.0,
+            roll: 0.0,
+            pitch_offset: 0.0,
         }
     }
 }
@@ -64,8 +76,31 @@ impl Camera {
         self.pitch = self.pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
 
+    /// The direction the *picture* faces: `forward`, plus whatever the feel
+    /// layer is adding this frame. Everything that aims uses `forward`; only
+    /// the view matrix comes through here.
+    pub fn view_direction(&self) -> Vec3 {
+        if self.pitch_offset == 0.0 {
+            return self.forward();
+        }
+        let pitch = (self.pitch + self.pitch_offset).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        let (sin_pitch, cos_pitch) = pitch.sin_cos();
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        Vec3::new(cos_pitch * sin_yaw, sin_pitch, -cos_pitch * cos_yaw).normalize()
+    }
+
+    /// Which way is up for the view, once roll is applied. Rolling about the
+    /// view axis keeps the direction fixed and turns the horizon, which is the
+    /// difference between leaning into a slide and steering into one.
+    pub fn view_up(&self) -> Vec3 {
+        if self.roll == 0.0 {
+            return Vec3::Y;
+        }
+        glam::Quat::from_axis_angle(self.view_direction(), self.roll) * Vec3::Y
+    }
+
     pub fn view_matrix(&self) -> Mat4 {
-        glam::camera::rh::view::look_to_mat4(self.position, self.forward(), Vec3::Y)
+        glam::camera::rh::view::look_to_mat4(self.position, self.view_direction(), self.view_up())
     }
 
     pub fn projection_matrix(&self) -> Mat4 {
@@ -213,6 +248,79 @@ mod tests {
             clip.z / clip.w
         };
         assert!(depth_of(near) < depth_of(far), "depth is inverted");
+    }
+
+    #[test]
+    fn roll_and_pitch_offset_never_move_the_aim() {
+        // The contract the feel pass rests on. `forward` is what the game
+        // shoots and digs along; if a walk cycle could nudge it, every effect
+        // in the feel layer would be a gameplay change in disguise.
+        let plain = Camera {
+            yaw: 0.9,
+            pitch: -0.3,
+            ..Camera::default()
+        };
+        let leaning = Camera {
+            roll: 0.25,
+            pitch_offset: 0.05,
+            ..plain
+        };
+
+        assert_eq!(plain.forward(), leaning.forward(), "roll moved the aim");
+        assert_eq!(plain.right(), leaning.right(), "roll moved the strafe axis");
+        assert_eq!(
+            plain.forward_level(),
+            leaning.forward_level(),
+            "roll moved the walk direction"
+        );
+        // But the picture did move, or the effect would be doing nothing.
+        assert_ne!(
+            plain.view_matrix(),
+            leaning.view_matrix(),
+            "the lean never reached the view"
+        );
+    }
+
+    #[test]
+    fn rolling_turns_the_horizon_without_turning_the_camera() {
+        let upright = Camera { yaw: 0.4, ..Camera::default() };
+        let rolled = Camera { roll: 0.5, ..upright };
+
+        // Same direction of view...
+        let direction = rolled.view_direction();
+        assert!(
+            (direction - upright.forward()).length() < 1e-6,
+            "rolling changed where the camera looks"
+        );
+        // ...but a tilted up vector, still perpendicular to it and still unit.
+        let up = rolled.view_up();
+        assert!((up.length() - 1.0).abs() < 1e-5, "up vector is not unit");
+        assert!(up.dot(direction).abs() < 1e-5, "up is not perpendicular to the view");
+        assert!(up.dot(Vec3::Y) < 0.9999, "the horizon did not tilt");
+    }
+
+    #[test]
+    fn a_default_camera_is_upright_and_unrolled() {
+        let camera = Camera::default();
+        assert_eq!(camera.roll, 0.0);
+        assert_eq!(camera.pitch_offset, 0.0);
+        assert_eq!(camera.view_up(), Vec3::Y);
+        assert_eq!(camera.view_direction(), camera.forward());
+    }
+
+    #[test]
+    fn a_view_pitch_offset_cannot_flip_the_camera_over_the_top() {
+        // The same clamp the real pitch gets. A bob applied at the top of a
+        // look-up would otherwise tip the view past vertical and spin the
+        // world round.
+        let camera = Camera {
+            pitch: PITCH_LIMIT,
+            pitch_offset: 1.0,
+            ..Camera::default()
+        };
+        let direction = camera.view_direction();
+        assert!(direction.y < 1.0, "the view went past vertical");
+        assert!((direction.length() - 1.0).abs() < 1e-5);
     }
 
     #[test]
