@@ -35,6 +35,11 @@ pub struct Part {
     pub size: Vec3,
     pub tile: u32,
     pub spin: Option<Spin>,
+    /// Does this part slide with the gaze?
+    ///
+    /// Pupils, and nothing else. A whole extra transform stack for two
+    /// cubes would be silly; a flag on the data is what a rig *is*.
+    pub follow: bool,
 }
 
 impl Part {
@@ -44,6 +49,7 @@ impl Part {
             size,
             tile,
             spin: None,
+            follow: false,
         }
     }
 
@@ -53,6 +59,74 @@ impl Part {
             size,
             tile,
             spin: Some(spin),
+            follow: false,
+        }
+    }
+
+    /// A part that tracks whatever the rig is looking at.
+    const fn following(centre: Vec3, size: Vec3, tile: u32) -> Self {
+        Part {
+            centre,
+            size,
+            tile,
+            spin: None,
+            follow: true,
+        }
+    }
+}
+
+/// How far a pupil may slide across the eye, in blocks. Small: the eye is a
+/// quarter of a block wide, and a pupil that leaves it is a googly toy.
+pub const EYE_TRAVEL: f32 = 0.035;
+
+/// How far off its own nose a rig will *look* before giving up and turning.
+///
+/// The clamp is the whole of "roughly": eyes do not swivel into the back of
+/// a head, so past this the gaze saturates and the body's own facing — which
+/// `villagers::react` already turns toward whatever has their attention —
+/// does the rest of the work.
+pub const GAZE_YAW: f32 = 0.6;
+pub const GAZE_PITCH: f32 = 0.4;
+
+/// Where a rig is looking, as an offset from straight ahead in radians.
+///
+/// Clamped on construction, so nothing downstream has to remember to.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Gaze {
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+impl Gaze {
+    /// Dead ahead: what everything that has no opinion looks at.
+    pub const AHEAD: Gaze = Gaze {
+        yaw: 0.0,
+        pitch: 0.0,
+    };
+
+    /// The gaze of a body at `from`, facing `facing`, looking at `at`.
+    pub fn towards(from: Vec3, facing: f32, at: Vec3) -> Gaze {
+        let to = at - from;
+        let flat = (to.x * to.x + to.z * to.z).sqrt();
+        if flat < 1.0e-3 {
+            return Gaze::AHEAD;
+        }
+        // The rig's nose is +X at yaw zero, which is the convention
+        // `yaw_towards` already sets; the difference of the two angles is
+        // how far the eyes have to go.
+        let bearing = (-to.z).atan2(to.x);
+        let mut yaw = bearing - facing;
+        // Into -PI..PI, so a target behind the left shoulder does not read
+        // as one nearly a full turn to the right.
+        while yaw > std::f32::consts::PI {
+            yaw -= std::f32::consts::TAU;
+        }
+        while yaw < -std::f32::consts::PI {
+            yaw += std::f32::consts::TAU;
+        }
+        Gaze {
+            yaw: yaw.clamp(-GAZE_YAW, GAZE_YAW),
+            pitch: (to.y / flat).atan().clamp(-GAZE_PITCH, GAZE_PITCH),
         }
     }
 }
@@ -100,8 +174,12 @@ impl Rig {
         }
     }
 
-    /// A villager: boots, trousers, jacket, arms and a head, with the
+    /// A villager: boots, trousers, jacket, arms, a head and a face, with the
     /// proportions nudged per variant so the town is not staffed by clones.
+    ///
+    /// The deputies and the shelters' holders wear this rig too, so they get
+    /// the face for nothing — with the gaze centred, because nobody has asked
+    /// them where they are looking yet.
     pub fn villager(variant: usize) -> Self {
         // Deterministic small nudges, one per variant.
         let stretch = match variant % 3 {
@@ -120,6 +198,9 @@ impl Rig {
         let leg = 0.62 * stretch;
         let torso_h = 0.52 * stretch;
         let torso_top = leg + torso_h;
+        /// The plane the face sits on: the front of the head, plus enough to
+        /// clear it.
+        const FACE: f32 = 0.125;
         Rig {
             parts: vec![
                 // Legs.
@@ -155,6 +236,43 @@ impl Rig {
                     Vec3::new(0.0, torso_top + 0.15, 0.0),
                     Vec3::new(0.24, 0.28, 0.24),
                     slot::SKIN,
+                ),
+                // The face, on the front of the head — five small cubes that
+                // do more for a town than any other five cubes in this game.
+                // A bare skin block for a head reads as a mannequin; two eyes
+                // and a mouth read as somebody who might have an opinion
+                // about you, which is what the whole townsfolk round was for.
+                //
+                // Whites first, standing a hair proud of the skin so they
+                // never z-fight with it.
+                Part::fixed(
+                    Vec3::new(FACE, torso_top + 0.19, 0.055),
+                    Vec3::new(0.03, 0.07, 0.07),
+                    slot::EYE,
+                ),
+                Part::fixed(
+                    Vec3::new(FACE, torso_top + 0.19, -0.055),
+                    Vec3::new(0.03, 0.07, 0.07),
+                    slot::EYE,
+                ),
+                // Pupils, which are the parts that move.
+                Part::following(
+                    Vec3::new(FACE + 0.012, torso_top + 0.19, 0.055),
+                    Vec3::new(0.02, 0.035, 0.035),
+                    slot::PUPIL,
+                ),
+                Part::following(
+                    Vec3::new(FACE + 0.012, torso_top + 0.19, -0.055),
+                    Vec3::new(0.02, 0.035, 0.035),
+                    slot::PUPIL,
+                ),
+                // And a mouth: one dark line, no expression. Anything more
+                // would be animation this game has no rig for, and a flat
+                // line at least never smiles at the wrong moment.
+                Part::fixed(
+                    Vec3::new(FACE, torso_top + 0.08, 0.0),
+                    Vec3::new(0.02, 0.015, 0.09),
+                    slot::PUPIL,
                 ),
             ],
         }
@@ -328,9 +446,22 @@ impl Rig {
         self.objects_pitched(position, yaw, 0.0, spin)
     }
 
+    /// [`Rig::objects`], with the eyes pointed somewhere.
+    ///
+    /// Only parts marked [`Part::follow`] move, so every rig without a face
+    /// draws exactly as it always did — which is why the plain `objects`
+    /// above is still the call almost everything makes.
+    pub fn objects_looking(&self, position: Vec3, yaw: f32, spin: f32, gaze: Gaze) -> Vec<Object> {
+        self.build(position, yaw, 0.0, spin, gaze)
+    }
+
     /// [`Rig::objects`] with the nose also pitched up (positive) or down.
     /// Ground rigs stay level; the handheld drill follows the player's gaze.
     pub fn objects_pitched(&self, position: Vec3, yaw: f32, pitch: f32, spin: f32) -> Vec<Object> {
+        self.build(position, yaw, pitch, spin, Gaze::AHEAD)
+    }
+
+    fn build(&self, position: Vec3, yaw: f32, pitch: f32, spin: f32, gaze: Gaze) -> Vec<Object> {
         let place = Mat4::from_translation(position)
             * Mat4::from_rotation_y(yaw)
             * Mat4::from_rotation_z(pitch);
@@ -342,9 +473,22 @@ impl Rig {
                     Some(Spin::Yaw) => Mat4::from_rotation_y(spin),
                     None => Mat4::IDENTITY,
                 };
+                // A following part slides across the face rather than
+                // rotating: the eye is flat, and a rotated pupil at this
+                // scale is one texel of difference and a lot of maths.
+                let centre = if part.follow {
+                    part.centre
+                        + Vec3::new(
+                            0.0,
+                            gaze.pitch / GAZE_PITCH * EYE_TRAVEL,
+                            -gaze.yaw / GAZE_YAW * EYE_TRAVEL,
+                        )
+                } else {
+                    part.centre
+                };
                 // Unit cube spans 0..1: centre it, scale it, spin it, place it.
                 let model = place
-                    * Mat4::from_translation(part.centre)
+                    * Mat4::from_translation(centre)
                     * turn
                     * Mat4::from_scale(part.size)
                     * Mat4::from_translation(Vec3::splat(-0.5));
@@ -367,6 +511,62 @@ pub fn yaw_towards(dx: f32, dz: f32) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gaze_saturates_rather_than_swivelling_into_the_back_of_a_head() {
+        // The clamp is the whole of "roughly". A target behind somebody has
+        // to read as "as far round as the eyes go", not as a pupil in an
+        // ear — and it must never wrap the wrong way round the circle.
+        let at = Vec3::new(0.0, 1.6, 0.0);
+        let ahead = Gaze::towards(at, 0.0, at + Vec3::new(4.0, 0.0, 0.0));
+        assert!(ahead.yaw.abs() < 1.0e-3, "looking down its own nose was {ahead:?}");
+
+        let behind = Gaze::towards(at, 0.0, at + Vec3::new(-4.0, 0.0, 0.0));
+        assert_eq!(behind.yaw.abs(), GAZE_YAW, "the gaze did not saturate");
+
+        for turn in [-3.0f32, -1.2, -0.3, 0.0, 0.7, 2.5, 3.1] {
+            for side in [-1.0f32, 1.0] {
+                let target = at + Vec3::new(turn.cos() * 5.0, 0.0, side * 5.0);
+                let gaze = Gaze::towards(at, 0.0, target);
+                assert!(gaze.yaw.abs() <= GAZE_YAW + 1.0e-6);
+                assert!(gaze.pitch.abs() <= GAZE_PITCH + 1.0e-6);
+            }
+        }
+
+        // And up is up: somebody on a roof pulls the eyes up, not down.
+        let above = Gaze::towards(at, 0.0, at + Vec3::new(2.0, 4.0, 0.0));
+        assert!(above.pitch > 0.0, "the eyes looked away from a target overhead");
+    }
+
+    #[test]
+    fn only_the_pupils_move_with_the_gaze() {
+        // The promise that lets every other rig in the game keep calling
+        // `objects` unchanged: a gaze moves two cubes and nothing else.
+        let rig = Rig::villager(0);
+        let still = rig.objects_looking(Vec3::ZERO, 0.0, 0.0, Gaze::AHEAD);
+        let looking = rig.objects_looking(
+            Vec3::ZERO,
+            0.0,
+            0.0,
+            Gaze {
+                yaw: GAZE_YAW,
+                pitch: GAZE_PITCH,
+            },
+        );
+        let moved = still
+            .iter()
+            .zip(&looking)
+            .filter(|(before, after)| before.model != after.model)
+            .count();
+        assert_eq!(moved, 2, "{moved} parts moved when the eyes did");
+
+        // A rig with no face is entirely unmoved by being asked to look.
+        let digger = Rig::digger();
+        assert_eq!(
+            digger.objects(Vec3::ZERO, 0.0, 0.0),
+            digger.objects_looking(Vec3::ZERO, 0.0, 0.0, Gaze { yaw: 0.5, pitch: 0.3 }),
+        );
+    }
 
     #[test]
     fn rig_shapes_are_pinned() {
@@ -399,8 +599,9 @@ mod tests {
 
         for variant in 0..3 {
             let villager = Rig::villager(variant);
-            assert_eq!(villager.parts.len(), 6);
+            assert_eq!(villager.parts.len(), 11, "six of body and five of face");
             assert!(villager.parts.iter().all(|part| part.spin.is_none()));
+            assert_eq!(villager.parts.iter().filter(|part| part.follow).count(), 2);
         }
         // The variants must actually look different.
         let a = Rig::villager(0).objects(Vec3::ZERO, 0.0, 0.0);

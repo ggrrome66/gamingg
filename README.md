@@ -685,6 +685,54 @@ compiled in. It needs **glibc 2.39 or newer** (SteamOS 3.7+ is fine, 3.6 is not)
 ./dist/gamingg-linux-x86_64
 ```
 
+### The townsfolk have faces
+
+Everybody in every town has eyes now, and the eyes go where their attention
+does. That is not a new system: the townsfolk have turned to look at things
+since stage 7, and the sighting the body turns toward is the same one the
+pupils use — one perception, two tells. Walk past somebody working and you
+will catch them tracking you without turning their head. Get far enough round
+behind them and the gaze *saturates* rather than swivelling into the back of
+their skull: past about thirty-five degrees the eyes give up and the body has
+to turn, which is what makes the whole thing read as a person rather than a
+pair of googly eyes.
+
+And if you walk straight into somebody, they grunt at you and shift out of the
+way. Three voices in a town rather than one recording, no line of sight
+needed — being trodden on is not something you have to *see* coming — and
+once per approach, with the same hysteresis a greeting uses. It says so on
+screen as well as out loud: a machine with no sound device is a supported
+machine here, so the tell had to survive one.
+
+### Every town is walled
+
+Stage 21 gave the big towns bastioned traces and left everybody else standing
+in a field. Now the floor is a **mini star**: four short bastions on a low,
+thin wall drawn in tight against the buildings, with the same ditch, the same
+four gates on the four roads, and the same lockbox on each gate. It is a wall
+a village could plausibly have built — and about a third of them have been let
+go, so you will find as many gaps as walls out there.
+
+Nothing on the frontier is unwalled any more. The `OPEN` trace is gone rather
+than left in the table unreachable: a variant that says "this place never
+bothered" is a story this world does not tell.
+
+### There is a hospital in every town
+
+Health has mended on a timer since the deputies arrived, and an arrest has
+always put you back on your feet. Neither of those is a *place*. Every town
+now has a clinic — a ward with two cots and a lockbox, claimed like any other
+building — and the cot is **free**. Lie down and you are whole again, and it
+**scrubs your radiation dose** with it, which is the answer to a uranium face
+that the last round deliberately left open.
+
+Free, because the cost is already the walk. A cot in town is worth nothing at
+the bottom of a shaft forty minutes away, and that is exactly what makes the
+**medkit** worth its forty-five credits: bought at the same counter, carried,
+and spent with `patch` at the terminal wherever you happen to be bleeding.
+Two hits back, five in a pocket, and a kit is never wasted on somebody who is
+already whole.
+
 ### Uranium, oil and gas
 
 Three new things are in the ground, and none of them behaves like copper.
@@ -1003,8 +1051,9 @@ Controls:
 | `[` / `]` | Zoom the minimap out / in |
 | `9` | The electrolyser, to place on a shore |
 | `E` | A word with the nearest townsperson when nothing solid is in reach — or, if somebody nearby has their hands up, take them in for the board's pay |
-| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `law` reads the deputies, `standing` your name with both peoples, `wells` every hole you have sunk |
+| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `patch` spends a medkit on you, `law` reads the deputies, `standing` your name with both peoples, `wells` every hole you have sunk |
 | `E` | A printed wellhead, once it is standing: the mud log says whether anything shows under this column, and `Enter` spuds the hole in |
+| `E` | A cot in any town's clinic: rest for nothing, or buy a medkit for the road |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
 | `F3` | The debug readout: FPS, position, chunks and triangles, journal tick, fleet and fuel, hostiles and their belief, your dose, your wells, how roused the deep is, your standings — diagnostics only, in every build, and it changes nothing it reports on |

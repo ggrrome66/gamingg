@@ -76,6 +76,8 @@ pub struct DebugContent {
     pub wells: (usize, usize),
     /// Rads a second at the body right now, and the dose carried.
     pub rads: (f32, f32),
+    /// Medkits in the pocket.
+    pub medkits: u8,
     /// How roused the deep is, 0 to 1, and what it is doing if anything.
     pub dark: (f32, &'static str),
 }
@@ -218,8 +220,8 @@ pub fn render_debug(content: &DebugContent) -> Vec<u8> {
     rows.line(
         "YOU",
         &format!(
-            "HITS {}/{}   BOUNTY {}",
-            content.hits.0, content.hits.1, content.bounty
+            "HITS {}/{}   BOUNTY {}   MEDKITS {}",
+            content.hits.0, content.hits.1, content.bounty, content.medkits
         ),
         TEXT,
     );
@@ -290,6 +292,7 @@ mod tests {
             wells: (4, 2),
             rads: (18.4, 132.0),
             dark: (0.8, "HUNTING"),
+            medkits: 3,
         }
     }
 

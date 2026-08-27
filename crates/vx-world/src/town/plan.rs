@@ -43,6 +43,8 @@ pub enum Cell {
     Roost,
     /// The bank's deposit box.
     Vault,
+    /// A ward cot: the whole of what a hospital is, mechanically.
+    Cot,
 }
 
 /// How hard a lockbox is to get past.
@@ -103,6 +105,9 @@ pub enum Role {
     /// other people's things, which is why it carries the heaviest lock the
     /// game has — and the first Tier Three ever stamped anywhere.
     Bank,
+    /// The clinic: two cots, a counter of sorts, and the only door on the
+    /// frontier that is worth walking a long way to.
+    Clinic,
 }
 
 impl Role {
@@ -110,7 +115,7 @@ impl Role {
     pub fn tier(self) -> Option<Tier> {
         match self {
             Role::Dwelling | Role::PlayerHouse => Some(Tier::One),
-            Role::Shop | Role::Security | Role::Civic => Some(Tier::Two),
+            Role::Shop | Role::Security | Role::Civic | Role::Clinic => Some(Tier::Two),
             Role::Bank => Some(Tier::Three),
             Role::Paving => None,
         }
@@ -132,7 +137,7 @@ pub fn strip_depth(role: Role) -> i32 {
     match role {
         Role::Paving => 0,
         Role::Dwelling | Role::PlayerHouse => 2,
-        Role::Shop | Role::Security => 3,
+        Role::Shop | Role::Security | Role::Clinic => 3,
         Role::Civic => 4,
         Role::Bank => 5,
     }
@@ -249,6 +254,57 @@ const RADIO_TOWER: Blueprint = Blueprint {
 
 /// The supply shed: a container with the trading counter along its back wall.
 /// `M` metal, `X` rusted, `G` roof decking, `C` counter.
+/// The clinic: a ward with two cots against the far wall and a lockbox by
+/// the door.
+///
+/// Same nine-by-seven container shell as the shop, because a frontier
+/// hospital *is* a shed with beds in it — and because the shell is already
+/// proven against the footing, claim and lock machinery. What makes it a
+/// hospital is the two `H` cells, which are the only thing in the building
+/// the player can use.
+const CLINIC: Blueprint = Blueprint {
+    role: Role::Clinic,
+    min: (10, 7),
+    layers: &[
+        &[
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+        ],
+        &[
+            "MMMM.MMMM",
+            "M.......M",
+            "X.......X",
+            "M.......M",
+            "X.......X",
+            "M2..H.H.M",
+            "MMMXMMMXM",
+        ],
+        &[
+            "MMMMMMMMM",
+            "M.......X",
+            "M.......M",
+            "X.......M",
+            "M.......X",
+            "M.......M",
+            "MXMMMXMMM",
+        ],
+        &[
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+        ],
+    ],
+};
+
 const SUPPLY_SHED: Blueprint = Blueprint {
     role: Role::Shop,
     min: (-4, 6),
@@ -507,6 +563,7 @@ const DEPOT_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
     BANK,
     SUPPLY_SHED,
+    CLINIC,
     Blueprint {
         role: Role::Dwelling,
         min: (-17, -3),
@@ -530,6 +587,7 @@ const MINE_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
     BANK,
     SUPPLY_SHED,
+    CLINIC,
     Blueprint {
         role: Role::Dwelling,
         min: (-17, -3),
@@ -548,6 +606,7 @@ const REFINERY_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
     BANK,
     SUPPLY_SHED,
+    CLINIC,
     Blueprint {
         role: Role::Dwelling,
         min: (-17, -3),
@@ -575,6 +634,7 @@ const HOME_TOWN: &[Blueprint] = &[
     RADIO_TOWER,
     BANK,
     SUPPLY_SHED,
+    CLINIC,
     Blueprint {
         role: Role::Dwelling,
         min: (-17, -3),
@@ -677,6 +737,7 @@ pub fn cell_at(site: &TownSite, x: i32, y: i32, z: i32) -> Option<Cell> {
             Some(b'3') => return Some(Cell::Permit(Tier::Three)),
             Some(b'R') => return Some(Cell::Roost),
             Some(b'V') => return Some(Cell::Vault),
+            Some(b'H') => return Some(Cell::Cot),
             _ => continue,
         }
     }
@@ -817,6 +878,7 @@ pub fn stamp(chunk: &mut Chunk, position: ChunkPos, sites: &[TownSite], blocks: 
                         Cell::Permit(Tier::Three) => blocks.permit_box_iii,
                         Cell::Roost => blocks.roost,
                         Cell::Vault => blocks.vault,
+                        Cell::Cot => blocks.ward_cot,
                     };
                     if let Some(local) = LocalPos::new(local_x, world_y, local_z) {
                         chunk.set(local, block);
@@ -1282,6 +1344,59 @@ mod tests {
             let here = cell_at(&home, dx, HOME_GROUND_Y + dy, dz);
             let there = cell_at(&moved, moved.centre.0 + dx, moved.ground + dy, moved.centre.1 + dz);
             assert_eq!(here, there, "offset ({dx},{dz},{dy}) differs between sites");
+        }
+    }
+
+    #[test]
+    fn every_town_has_a_ward_with_two_cots_in_it() {
+        // The building is the feature: a plan that stamps a clinic with no
+        // cot in it is a hospital you cannot use, and the failure would be
+        // invisible until somebody walked in bleeding.
+        for site in [
+            town::home_site(),
+            TownSite {
+                speciality: Speciality::Mine,
+                ..town::home_site()
+            },
+            TownSite {
+                speciality: Speciality::Depot,
+                ..town::home_site()
+            },
+            TownSite {
+                speciality: Speciality::Refinery,
+                ..town::home_site()
+            },
+        ] {
+            let mut cots = Vec::new();
+            for x in site.centre.0 - 40..site.centre.0 + 40 {
+                for z in site.centre.1 - 40..site.centre.1 + 40 {
+                    for layer in 0..4 {
+                        if cell_at(&site, x, site.ground + layer, z) == Some(Cell::Cot) {
+                            cots.push((x, site.ground + layer, z));
+                        }
+                    }
+                }
+            }
+            assert_eq!(cots.len(), 2, "{:?} ward has {cots:?}", site.speciality);
+
+            // And the ward is a claimed building like any other, so breaking
+            // into one is a crime rather than a shortcut.
+            let clinic = buildings(&site)
+                .into_iter()
+                .find(|building| building.role == Role::Clinic)
+                .expect("a town with cots and no clinic");
+            for (x, y, z) in &cots {
+                assert!(
+                    *x >= clinic.min.x
+                        && *x <= clinic.max.x
+                        && *z >= clinic.min.z
+                        && *z <= clinic.max.z
+                        && *y >= clinic.min.y
+                        && *y <= clinic.max.y,
+                    "a cot at {x},{y},{z} is outside its own building"
+                );
+            }
+            println!("{:?}: cots at {cots:?}", site.speciality);
         }
     }
 }

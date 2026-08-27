@@ -39,8 +39,15 @@ use crate::town::{Speciality, TownSite};
 /// Which trace a town has earned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trace {
-    /// No wall at all. Most places are not worth walling.
-    Open,
+    /// The frontier floor: four short bastions on a low, thin wall drawn in
+    /// tight against the buildings.
+    ///
+    /// Every settlement out here has one, and that is the point — a hamlet
+    /// that has not walled itself at all is a hamlet nobody has raided
+    /// twice. It is a *mini* star rather than a bad one: the geometry is
+    /// the same argument at a smaller scale, built by fewer people with
+    /// less earth to move.
+    MiniStar,
     /// A plain ring: earth and a walk, no bastions. Somewhere that wanted a
     /// wall before it knew what a wall was for.
     Palisade,
@@ -55,7 +62,7 @@ impl Trace {
     /// How many bastions the trace throws out.
     fn points(self) -> f32 {
         match self {
-            Trace::Open => 0.0,
+            Trace::MiniStar => 4.0,
             Trace::Palisade => 0.0,
             Trace::FourPoint => 4.0,
             Trace::SixPoint => 6.0,
@@ -65,16 +72,61 @@ impl Trace {
     /// How far a bastion reaches past the curtain, in blocks.
     fn bastion(self) -> f32 {
         match self {
-            Trace::Open => 0.0,
+            // Long enough to read as points from the air. Shorter bastions
+            // were geometrically fine and looked like a rounded square,
+            // which is not what the word "star" promises anybody.
+            Trace::MiniStar => 5.5,
             Trace::Palisade => 0.0,
             Trace::FourPoint => 7.0,
             Trace::SixPoint => 9.0,
         }
     }
 
+    /// How far out from the town core this trace runs.
+    ///
+    /// The mini star hugs the buildings — it is a wall a village could
+    /// actually have built — where the full traces stand off far enough to
+    /// keep their re-entrant angles clear of the market square.
+    fn standoff(self) -> i32 {
+        match self {
+            Trace::MiniStar => 9,
+            _ => STANDOFF,
+        }
+    }
+
+    /// How high the rampart stands above the plateau.
+    ///
+    /// Four rather than three for the mini star, and the reason is the gate:
+    /// a gateway is a four-block opening with the wall carrying on over it,
+    /// so a three-high wall would have to choose between a doorway you
+    /// cannot walk through and an arch that is not there. Four keeps every
+    /// rule the full traces already follow and still reads as low.
+    fn height(self) -> i32 {
+        match self {
+            Trace::MiniStar => 4,
+            _ => WALL_HEIGHT,
+        }
+    }
+
+    /// Half-thickness of the curtain.
+    fn half(self) -> f32 {
+        match self {
+            Trace::MiniStar => 1.5,
+            _ => WALL_HALF,
+        }
+    }
+
+    /// How wide the ditch outside it runs.
+    fn ditch(self) -> f32 {
+        match self {
+            Trace::MiniStar => 2.5,
+            _ => DITCH_WIDTH,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
-            Trace::Open => "OPEN",
+            Trace::MiniStar => "MINI STAR",
             Trace::Palisade => "PALISADE",
             Trace::FourPoint => "FOUR-POINT",
             Trace::SixPoint => "SIX-POINT",
@@ -143,10 +195,15 @@ fn hash01(seed: u64, salt: u64) -> f32 {
 
 /// What this town built, if anything.
 ///
-/// Tiered like everything else here: a hamlet stays open, the middling towns
-/// get a working four-point trace, and only the largest earns six with
-/// ravelins. A refinery is likelier to be walled than a depot for the obvious
-/// reason — it holds the valuable thing.
+/// Tiered like everything else here: a hamlet throws up a mini star, the
+/// middling towns get a working four-point trace, and only the largest earns
+/// six with ravelins. A refinery is likelier to be well walled than a depot
+/// for the obvious reason — it holds the valuable thing.
+///
+/// Nothing comes back unwalled. There used to be an `Open` case and it made
+/// most of the map read as sheds in a field; a variant that says "this place
+/// never bothered" is a story the frontier does not tell, so it is gone
+/// rather than left in the table unreachable.
 pub fn fort_for(site: &TownSite) -> Fort {
     let roll = hash01(site.seed, 0x0f_01);
     let big = site.core_half >= crate::town::MAX_CORE_HALF;
@@ -169,22 +226,28 @@ pub fn fort_for(site: &TownSite) -> Fort {
         } else if roll < 0.75 + inclined {
             Trace::Palisade
         } else {
-            Trace::Open
+            Trace::MiniStar
         }
     } else if roll < 0.30 + inclined {
         Trace::Palisade
     } else {
-        Trace::Open
+        Trace::MiniStar
     };
 
     Fort {
         trace,
-        radius: (site.core_half + STANDOFF) as f32,
+        radius: (site.core_half + trace.standoff()) as f32,
         phase: hash01(site.seed, 0x0f_02) * std::f32::consts::TAU,
-        // A quarter of the walled towns have let theirs go. Rarer than that
-        // and nobody ever finds a breach; commoner and a standing wall stops
-        // meaning anything.
-        ruined: hash01(site.seed, 0x0f_03) < 0.25,
+        // A quarter of the proper traces have been let go, and a third of
+        // the mini stars — a hamlet has fewer hands to keep a wall standing.
+        // Rarer than this and nobody ever finds a breach; commoner and a
+        // standing wall stops meaning anything.
+        ruined: hash01(site.seed, 0x0f_03)
+            < if matches!(trace, Trace::MiniStar) {
+                0.35
+            } else {
+                0.25
+            },
         seed: site.seed,
         centre: site.centre,
         ground: site.ground,
@@ -222,12 +285,9 @@ impl Fort {
     /// How far out this fort reaches — what a caller needs to know before
     /// deciding a chunk is clear of it.
     pub fn reach(&self) -> i32 {
-        (self.radius + self.trace.bastion() + WALL_HALF + DITCH_WIDTH).ceil() as i32 + 2
-    }
-
-    /// Does this fort put anything at all in the world?
-    pub fn stands(&self) -> bool {
-        self.trace != Trace::Open
+        (self.radius + self.trace.bastion() + self.trace.half() + self.trace.ditch()).ceil()
+            as i32
+            + 2
     }
 
     /// Is this angle inside a gateway?
@@ -272,14 +332,17 @@ impl Fort {
     /// touches a wall agrees about it without consulting a neighbour — the
     /// same contract the terrain, the ore and the towns already keep.
     pub fn part_at(&self, x: i32, y: i32, z: i32, ground: i32) -> Option<Part> {
-        if !self.stands() {
-            return None;
-        }
+        // Thickness, height and ditch all come off the trace now: a mini
+        // star is the same geometry built smaller, not a special case.
+        let half = self.trace.half();
+        let ditch = self.trace.ditch();
+        let height = self.trace.height();
+
         let (dx, dz) = ((x - self.centre.0) as f32, (z - self.centre.1) as f32);
         let distance = (dx * dx + dz * dz).sqrt();
         // Cheap reject before the trigonometry: most columns are nowhere near.
-        if distance > self.radius + self.trace.bastion() + WALL_HALF + DITCH_WIDTH + 1.0
-            || distance < self.radius - self.trace.bastion() - WALL_HALF - 1.0
+        if distance > self.radius + self.trace.bastion() + half + ditch + 1.0
+            || distance < self.radius - self.trace.bastion() - half - 1.0
         {
             return None;
         }
@@ -293,7 +356,7 @@ impl Fort {
         // that would answer it is a mechanism this game has not got.
         let gateway = self.in_gateway(angle, distance);
 
-        if signed.abs() <= WALL_HALF {
+        if signed.abs() <= half {
             // Below grade comes first, and it does not care about breaches or
             // gateways: the trace was founded along its whole circuit before
             // any of it fell down or was left open for a road.
@@ -306,28 +369,30 @@ impl Fort {
             if gateway {
                 // The lock stands at the gate's edge, on the inner face,
                 // where a door's lockbox would be.
-                let at_edge = (signed + WALL_HALF).abs() < 1.0;
+                let at_edge = (signed + half).abs() < 1.0;
                 if at_edge && y == ground + 1 {
                     return Some(Part::GateLock);
                 }
                 // Above the opening the wall carries on, so a gate reads as
                 // an arch rather than a missing tooth.
-                return (y >= ground + 4 && y <= ground + WALL_HEIGHT)
-                    .then_some(Part::Rampart);
+                // Above the opening the wall carries on, so a gate reads as
+                // an arch rather than a missing tooth — one course of it on
+                // a mini star, three on a full trace.
+                return (y >= ground + 4 && y <= ground + height).then_some(Part::Rampart);
             }
-            if y == ground + WALL_HEIGHT {
+            if y == ground + height {
                 // The outermost course of the top is the parapet; the rest is
                 // walkway a defender can actually stand on.
-                return Some(if signed > WALL_HALF - 1.0 {
+                return Some(if signed > half - 1.0 {
                     Part::Parapet
                 } else {
                     Part::Walk
                 });
             }
-            return (y >= ground && y < ground + WALL_HEIGHT).then_some(Part::Rampart);
+            return (y >= ground && y < ground + height).then_some(Part::Rampart);
         }
 
-        if signed > WALL_HALF && signed <= WALL_HALF + DITCH_WIDTH && !self.breached(angle) {
+        if signed > half && signed <= half + ditch && !self.breached(angle) {
             // A ditch is cut ground, not built ground: it only ever removes.
             return (y <= ground && y > ground - DITCH_DEPTH).then_some(Part::Ditch);
         }
@@ -337,9 +402,6 @@ impl Fort {
     /// The four gateways, as world columns on the trace. What a map pin or a
     /// road-builder would ask for.
     pub fn gateways(&self) -> Vec<(i32, i32)> {
-        if !self.stands() {
-            return Vec::new();
-        }
         [0.0f32, std::f32::consts::FRAC_PI_2, std::f32::consts::PI, -std::f32::consts::FRAC_PI_2]
             .into_iter()
             .map(|angle| {
@@ -367,9 +429,6 @@ pub fn stamp(
     let origin = position.origin();
     for site in sites {
         let fort = fort_for(site);
-        if !fort.stands() {
-            continue;
-        }
         let reach = fort.reach();
         if origin.x > site.centre.0 + reach
             || origin.z > site.centre.1 + reach
@@ -441,6 +500,70 @@ mod tests {
     }
 
     #[test]
+    fn nowhere_on_the_frontier_is_unwalled() {
+        // The floor, checked rather than asserted in a comment: every town a
+        // world can produce puts *something* around itself, and the smallest
+        // of them build the mini star.
+        let mut seen_mini = false;
+        for seed in [7, 909, 2024, 4242] {
+            let ground = |_: i32, _: i32| 90;
+            for site in town::towns_near(seed, (0, 0), 12_000, &ground) {
+                let fort = fort_for(&site);
+                assert!(
+                    fort.reach() > site.core_half,
+                    "the town at {:?} put nothing around itself",
+                    site.centre
+                );
+                if fort.trace == Trace::MiniStar {
+                    seen_mini = true;
+                    // A mini star is genuinely smaller on every axis that
+                    // matters, or the word is decoration.
+                    assert!(fort.trace.standoff() < STANDOFF);
+                    assert!(fort.trace.height() < WALL_HEIGHT);
+                    assert!(fort.trace.half() < WALL_HALF);
+                    assert!(fort.trace.bastion() > 0.0, "a star with no points");
+                }
+            }
+        }
+        assert!(seen_mini, "no hamlet anywhere built a mini star");
+    }
+
+    #[test]
+    fn a_mini_star_clears_the_buildings_and_keeps_its_gates() {
+        // The two things a tighter standoff could break: a wall drawn in
+        // close enough to sit on the town, and a gate too low to walk
+        // through. Both checked against the smallest core a world makes.
+        let site = TownSite {
+            core_half: town::MIN_CORE_HALF,
+            ..town::home_site()
+        };
+        let fort = Fort {
+            trace: Trace::MiniStar,
+            radius: (site.core_half + Trace::MiniStar.standoff()) as f32,
+            ruined: false,
+            ..fort_for(&site)
+        };
+        let steps = 360;
+        for step in 0..steps {
+            let angle = std::f32::consts::TAU * step as f32 / steps as f32;
+            let inner = fort.radius_at(angle) - Trace::MiniStar.half();
+            assert!(
+                inner > site.core_half as f32,
+                "the mini star cut into the town at {angle}"
+            );
+        }
+        for (x, z) in fort.gateways() {
+            for step in 0..3 {
+                assert_eq!(
+                    fort.part_at(x, site.ground + step, z, site.ground),
+                    None,
+                    "the mini star's gate is too low to walk through"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_bastioned_wall_has_no_dead_ground() {
         // The military claim, checked as geometry: every angle of the trace
         // is either wall or gateway or breach, and the radius never doubles
@@ -471,9 +594,6 @@ mod tests {
         // The fort may not eat the town it is protecting.
         for site in sample() {
             let fort = fort_for(&site);
-            if !fort.stands() {
-                continue;
-            }
             let steps = 360;
             for step in 0..steps {
                 let angle = std::f32::consts::TAU * step as f32 / steps as f32;
@@ -493,9 +613,6 @@ mod tests {
         // A wall with no gate is a wall around a town nobody can trade with.
         for site in sample() {
             let fort = fort_for(&site);
-            if !fort.stands() {
-                continue;
-            }
             let gates = fort.gateways();
             assert_eq!(gates.len(), 4);
             for (x, z) in gates {
@@ -554,9 +671,6 @@ mod tests {
         let mut ruins = 0;
         for site in &sites {
             let fort = fort_for(site);
-            if !fort.stands() {
-                continue;
-            }
             let mut gaps = 0;
             let steps = 240;
             for step in 0..steps {

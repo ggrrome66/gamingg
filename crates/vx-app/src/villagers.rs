@@ -28,6 +28,14 @@ pub const GREET_RANGE: f32 = 3.0;
 /// Metres beyond which the greeting re-arms.
 pub const REARM_RANGE: f32 = 5.0;
 
+/// Close enough that somebody grunts at you.
+///
+/// Well inside [`GREET_RANGE`], and deliberately not a *seeing* range: at
+/// under two blocks you are in somebody's space whether they were watching
+/// the street or not, and a person who did not see you coming is exactly the
+/// person who grunts.
+pub const GRUNT_RANGE: f32 = 1.7;
+
 /// Stroll speed, metres per second.
 const WALK_SPEED: f32 = 1.2;
 
@@ -188,6 +196,12 @@ struct Villager {
     pause: f32,
     /// Whether the current player approach has been greeted.
     greeted: bool,
+    /// Whether this approach has already earned a grunt. Same hysteresis as
+    /// `greeted`, one range in.
+    grunted: bool,
+    /// What their eyes are on, if anything. Set from the same sighting
+    /// `react` turns their body toward — one perception, two uses.
+    gaze: Option<Vec3>,
     /// What this villager can see and remembers.
     perception: Perception,
     /// Seconds left standing and watching rather than strolling.
@@ -222,6 +236,8 @@ impl Villager {
             waypoint: waypoint_in(index, 1, patch, site),
             pause: 0.0,
             greeted: false,
+            grunted: false,
+            gaze: None,
             perception: Perception::default(),
             attention: 0.0,
             panic: None,
@@ -726,11 +742,19 @@ impl Villagers {
     fn react(&mut self) {
         for villager in &mut self.folk {
             let Some(watched) = villager.perception.watching() else {
+                // Nothing to look at: the eyes go back to centre, which is
+                // the difference between a person and a mannequin whose
+                // pupils are stuck where they last saw somebody.
+                villager.gaze = None;
                 continue;
             };
             if watched.distance > awareness::NOTICE_RANGE {
+                villager.gaze = None;
                 continue;
             }
+            // The eyes go to the same sighting the body turns toward, at
+            // head height rather than at their feet.
+            villager.gaze = Some(watched.position + Vec3::new(0.0, 1.4, 0.0));
             // Face whatever has their attention — including the remembered
             // spot, which is what stops the head snapping away the instant
             // somebody steps behind a tree.
@@ -785,13 +809,49 @@ impl Villagers {
         spoken
     }
 
+    /// Somebody the player has just crowded, if anybody.
+    ///
+    /// Returns the variant, which is all the caller needs: it picks the
+    /// pitch of the grunt, so a town of nine is not one voice nine times.
+    ///
+    /// Deliberately not gated on line of sight, unlike [`Villagers::greeting_for`]:
+    /// a greeting is somebody choosing to speak to you and a grunt is
+    /// somebody discovering you are already too close.
+    pub fn grunt_for(&mut self, player: Vec3) -> Option<usize> {
+        let mut grunted = None;
+        for villager in &mut self.folk {
+            // Somebody running for their life is making a different noise.
+            if villager.panic.is_some() {
+                villager.grunted = true;
+                continue;
+            }
+            let gap = (player - villager.position).length();
+            if gap < GRUNT_RANGE && !villager.grunted {
+                villager.grunted = true;
+                if grunted.is_none() {
+                    grunted = Some(villager.variant);
+                }
+            } else if gap > REARM_RANGE {
+                villager.grunted = false;
+            }
+        }
+        grunted
+    }
+
     /// This frame's drawn bodies. `rigs` comes from [`Villagers::rigs`].
     pub fn objects(&self, rigs: &[Rig]) -> Vec<Object> {
         self.folk
             .iter()
             .flat_map(|villager| {
                 let rig = &rigs[villager.variant % rigs.len()];
-                rig.objects(villager.position, villager.yaw, 0.0)
+                // Head height matches the rig's own: the gaze is measured
+                // from the eyes, not from the boots, or everybody spends the
+                // day looking at the ground in front of them.
+                let eye = villager.position + Vec3::new(0.0, 1.4, 0.0);
+                let gaze = villager
+                    .gaze
+                    .map_or(rig::Gaze::AHEAD, |at| rig::Gaze::towards(eye, villager.yaw, at));
+                rig.objects_looking(villager.position, villager.yaw, 0.0, gaze)
             })
             .collect()
     }
@@ -1424,5 +1484,73 @@ mod witness_tests {
         let at = town.folk[0].position + Vec3::new(3.0, 0.0, 0.0);
         town.startled(at);
         assert_eq!(town.panicking(), 1, "a blast three metres away went unremarked");
+    }
+
+    #[test]
+    fn crowding_somebody_earns_one_grunt_and_then_re_arms() {
+        // The greeting's hysteresis, one range in: once per approach, not
+        // once per frame, and a step back is what buys the next one.
+        let mut town = Villagers::new();
+        let standing = town.folk[0].position;
+
+        assert_eq!(town.grunt_for(standing), Some(town.folk[0].variant));
+        assert_eq!(town.grunt_for(standing), None, "it grunted twice on one approach");
+
+        // Backing off past the re-arm range and returning earns another.
+        // Far enough out to be clear of *everybody*: the town stands about
+        // eight blocks apart, so a step of one re-arm range lands on the
+        // next person's toes instead.
+        let away = standing + Vec3::new(0.0, 0.0, 40.0);
+        assert_eq!(town.grunt_for(away), None);
+        assert!(town.grunt_for(standing).is_some(), "the grunt never re-armed");
+    }
+
+    #[test]
+    fn a_grunt_needs_no_line_of_sight_but_a_greeting_does() {
+        // The distinction the two ranges encode: a greeting is somebody
+        // choosing to speak to you, and a grunt is somebody discovering you
+        // are already standing on them. Nothing here has seen the player at
+        // all — `update` was never run with them in it.
+        let mut town = Villagers::new();
+        let standing = town.folk[0].position;
+        assert!(town.greeting_for().is_none(), "an unseen player was greeted");
+        assert!(town.grunt_for(standing).is_some(), "being trodden on went unremarked");
+    }
+
+    #[test]
+    fn a_villager_who_is_watching_you_looks_at_you() {
+        // The eyes come off the same sighting the body turns toward, so if
+        // somebody has noticed the player they have a gaze — and when the
+        // player leaves, the eyes go back to centre rather than staying
+        // stuck where somebody used to be.
+        let mut town = Villagers::new();
+        let watcher = town.folk[0].position;
+        let player = watcher + Vec3::new(2.0, 0.0, 1.0);
+        let seen = Surroundings {
+            player: Some(player),
+            ..Surroundings::empty()
+        };
+        for _ in 0..120 {
+            town.update(1.0 / 60.0, TimeOfDay::NOON, &seen);
+        }
+        assert!(
+            town.folk.iter().any(|villager| villager.gaze.is_some()),
+            "nobody in town looked at a player standing in front of them"
+        );
+
+        // And when the player leaves, nobody is left staring at the hole
+        // they left. Gazes do not have to be *empty* — the townsfolk watch
+        // each other, which is half of why a street looks alive — they have
+        // to stop being about somebody who is not there.
+        let alone = Surroundings::empty();
+        for _ in 0..900 {
+            town.update(1.0 / 60.0, TimeOfDay::NOON, &alone);
+        }
+        assert!(
+            town.folk.iter().all(|villager| villager
+                .gaze
+                .is_none_or(|at| (at - player).length() > 2.0)),
+            "somebody is still staring at where the player used to be"
+        );
     }
 }

@@ -58,6 +58,10 @@ pub struct TerrainBlocks {
     pub gas_cell: BlockId,
     /// The wellhead itself: printed, stood on the ground, and then patient.
     pub wellhead: BlockId,
+    /// A ward cot. Town furniture like the counter and the vault: not
+    /// something a drill gets to carry off, because a town with no hospital
+    /// is a town one bad afternoon from unplayable.
+    pub ward_cot: BlockId,
     pub container: BlockId,
     pub plank: BlockId,
     pub roof: BlockId,
@@ -238,6 +242,7 @@ impl TerrainBlocks {
             ),
             gas_cell: register(BlockDef::uniform("engine:gas_cell", 46).with_hardness(Some(0.8))),
             wellhead: register(BlockDef::uniform("engine:wellhead", 47).with_hardness(Some(1.5))),
+            ward_cot: register(BlockDef::uniform("engine:ward_cot", 50).with_hardness(None)),
         }
     }
 
@@ -285,6 +290,7 @@ impl TerrainBlocks {
             oil_barrel: registry.id_of("engine:oil_barrel")?,
             gas_cell: registry.id_of("engine:gas_cell")?,
             wellhead: registry.id_of("engine:wellhead")?,
+            ward_cot: registry.id_of("engine:ward_cot")?,
         })
     }
 }

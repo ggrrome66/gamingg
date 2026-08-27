@@ -28,6 +28,10 @@ pub enum Cue {
     Thud,
     /// The trigger on an empty satchel.
     Click,
+    /// Somebody you have walked straight into. The `usize` is the villager's
+    /// variant, which picks the pitch — a town of nine should not be one
+    /// voice recorded nine times.
+    Grunt(usize),
 }
 
 /// The speaker, if the machine has one.
@@ -76,6 +80,7 @@ fn play_into(mixer: &Mixer, cue: Cue, volume: f32) {
         Cue::DistantBoom => boom(1.2, 0.25),
         Cue::Thud => thud(),
         Cue::Click => click(),
+        Cue::Grunt(variant) => grunt(variant),
     };
     let gain = volume.clamp(0.0, 2.0);
     let scaled: Vec<f32> = samples.into_iter().map(|sample| sample * gain).collect();
@@ -131,6 +136,39 @@ fn thud() -> Vec<f32> {
     samples
 }
 
+/// A short, closed-mouth "hmf" — somebody registering that you are standing
+/// on their feet.
+///
+/// Synthesized like everything else here: a low fundamental with two
+/// harmonics under a fast attack and a quick decay, plus a breath of noise so
+/// it reads as a body rather than a beep. The harmonics are what make it a
+/// voice; a bare sine at this pitch is a fog horn.
+fn grunt(variant: usize) -> Vec<f32> {
+    // Three voices in the town, three pitches. Low enough to sound like a
+    // chest rather than a whistle.
+    let fundamental = match variant % 3 {
+        0 => 104.0,
+        1 => 128.0,
+        _ => 92.0,
+    };
+    let count = (RATE as f32 * 0.19) as usize;
+    let mut samples = Vec::with_capacity(count);
+    for index in 0..count {
+        let t = index as f32 / RATE as f32;
+        // Fast in, slower out, and a slight downward drift in pitch across
+        // the sound — a grunt falls away, it does not hold a note.
+        let attack = (1.0 - (-t * 90.0).exp()).clamp(0.0, 1.0);
+        let decay = (-t * 13.0).exp();
+        let envelope = attack * decay;
+        let sag = 1.0 - t * 0.55;
+        let angle = std::f32::consts::TAU * fundamental * sag * t;
+        let voice = angle.sin() + (angle * 2.0).sin() * 0.45 + (angle * 3.0).sin() * 0.2;
+        let breath = noise(index as u32 ^ 0x9c00) * (-t * 26.0).exp() * 0.12;
+        samples.push((voice * 0.34 + breath) * envelope);
+    }
+    samples
+}
+
 /// A dry metallic click for an empty weapon.
 fn click() -> Vec<f32> {
     let count = (RATE as f32 * 0.05) as usize;
@@ -148,7 +186,15 @@ mod tests {
 
     #[test]
     fn every_cue_synthesizes_finite_bounded_audio() {
-        for samples in [boom(0.9, 1.0), boom(1.2, 0.25), thud(), click()] {
+        for samples in [
+            boom(0.9, 1.0),
+            boom(1.2, 0.25),
+            thud(),
+            click(),
+            grunt(0),
+            grunt(1),
+            grunt(2),
+        ] {
             assert!(!samples.is_empty());
             for sample in &samples {
                 assert!(sample.is_finite());
@@ -184,5 +230,27 @@ mod tests {
         assert_eq!(first, second);
         let mean = first.iter().sum::<f32>() / first.len() as f32;
         assert!(mean.abs() < 0.1, "noise is biased: {mean}");
+    }
+
+    #[test]
+    fn the_town_grunts_in_three_voices() {
+        // One recording played nine times is what a town of clones sounds
+        // like. Three pitches is not many, but it is more than one.
+        let voices: Vec<Vec<f32>> = (0..3).map(grunt).collect();
+        assert_ne!(voices[0], voices[1]);
+        assert_ne!(voices[1], voices[2]);
+        // And it is a grunt, not a note held: the tail is far quieter than
+        // the front of it.
+        for samples in &voices {
+            let front: f32 = samples[..samples.len() / 6]
+                .iter()
+                .map(|sample| sample.abs())
+                .sum();
+            let tail: f32 = samples[samples.len() * 5 / 6..]
+                .iter()
+                .map(|sample| sample.abs())
+                .sum();
+            assert!(front > tail * 4.0, "the grunt does not fall away");
+        }
     }
 }

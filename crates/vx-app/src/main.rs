@@ -15,6 +15,7 @@ mod bank;
 mod beacon;
 mod belief;
 mod board;
+mod clinic;
 mod clock;
 mod controller;
 mod debug;
@@ -99,6 +100,8 @@ const PAD_SLOT: usize = 14;
 const DEBUG_SLOT: usize = 15;
 /// The wellhead's panel.
 const WELL_SLOT: usize = 16;
+/// The clinic's ward panel.
+const WARD_SLOT: usize = 17;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -238,6 +241,12 @@ struct Options {
     hot: bool,
     /// The thing in the deep, mid-hunt, in a gallery.
     dark: bool,
+    /// The townsfolk close up, with their eyes on the camera.
+    faces: bool,
+    /// A hamlet inside its mini star, from overhead.
+    ministar: bool,
+    /// The ward, with its panel open over the cots.
+    ward: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -284,6 +293,9 @@ fn parse_args() -> Result<Options, String> {
         well: false,
         hot: false,
         dark: false,
+        faces: false,
+        ministar: false,
+        ward: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -369,6 +381,9 @@ fn parse_args() -> Result<Options, String> {
             "--well" => options.well = true,
             "--hot" => options.hot = true,
             "--dark" => options.dark = true,
+            "--faces" => options.faces = true,
+            "--ministar" => options.ministar = true,
+            "--ward" => options.ward = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -908,6 +923,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             wells: (3, 1),
             rads: (12.5, 88.0),
             dark: (0.6, "HUNTING"),
+            medkits: 2,
         };
         let pixels = debug::render_debug(&content);
         let panel_width = debug::DEBUG_WIDTH as f32 * shop::SHOP_SCALE;
@@ -1085,7 +1101,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             .generator()
             .towns_near(options.at, 4_000)
             .into_iter()
-            .find(|site| vx_world::fort::fort_for(site).stands())
+            .find(|site| vx_world::fort::fort_for(site).trace != vx_world::fort::Trace::Palisade)
             .ok_or("no walled town within four kilometres of --at")?;
         let fort = vx_world::fort::fort_for(&site);
         println!(
@@ -2079,6 +2095,162 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         );
     }
 
+    // The townsfolk, close enough to see whether anybody is home behind the
+    // eyes. Late like the posse fixture: the villagers' own pass calls
+    // `set_objects` and would replace this one.
+    if options.faces {
+        let mut town = Villagers::new();
+        let ground = world.surface_y(options.at.0, options.at.1).unwrap_or(80);
+        let player = glam::Vec3::new(
+            options.at.0 as f32 + 0.5,
+            ground as f32 + 1.0,
+            options.at.1 as f32 + 0.5,
+        );
+
+        // Walk the town a while with the player standing there, so the ones
+        // who notice have noticed and the gaze is theirs rather than staged.
+        let watching = awareness::Surroundings {
+            player: Some(player),
+            ..awareness::Surroundings::empty()
+        };
+        for _ in 0..600 {
+            town.update(1.0 / 60.0, TimeOfDay::new(options.time), &watching);
+        }
+
+        // The three nearest, stood in a row facing the camera at a
+        // conversational distance — the variants differ, and a row is how
+        // you see that.
+        let mut folk = town.positions();
+        folk.sort_by(|left, right| {
+            (*left - player)
+                .length()
+                .total_cmp(&(*right - player).length())
+        });
+        let rigs = Villagers::rigs();
+
+        // The camera first: `set_objects` culls against the last uploaded
+        // frustum, which is the trap stage 31 found the hard way.
+        let front = player + glam::Vec3::new(0.0, 0.0, 3.2);
+        camera.position = front + glam::Vec3::new(0.0, 1.55, 0.0);
+        look_at(&mut camera, player + glam::Vec3::new(0.0, 1.45, 0.0));
+        renderer.update_camera(&context.queue, &camera);
+
+        let mut objects = Vec::new();
+        for (index, offset) in [-1.15f32, 0.0, 1.15].into_iter().enumerate() {
+            let at = player + glam::Vec3::new(offset, 0.0, 0.0);
+            let rig = &rigs[index % rigs.len()];
+            // Facing the camera, and looking at it: the gaze is computed by
+            // the same call the game makes every frame.
+            let yaw = rig::yaw_towards(0.0, camera.position.z - at.z).unwrap_or(0.0);
+            let eye = at + glam::Vec3::new(0.0, 1.4, 0.0);
+            let gaze = rig::Gaze::towards(eye, yaw, camera.position);
+            objects.extend(rig.objects_looking(at, yaw, 0.0, gaze));
+        }
+        renderer.set_objects(&context.device, &context.queue, &objects);
+        println!(
+            "faces capture: {} in town, three drawn looking at the camera",
+            folk.len()
+        );
+    }
+
+    // A hamlet inside the wall it finally has.
+    if options.ministar {
+        // A whole one for the picture: a third of them have been let go, and
+        // a ruin shows the rubble rather than the shape.
+        let near = world.generator().towns_near(options.at, 6_000);
+        let mini = |site: &&vx_world::town::TownSite| {
+            vx_world::fort::fort_for(site).trace == vx_world::fort::Trace::MiniStar
+        };
+        let site = near
+            .iter()
+            .filter(mini)
+            .find(|site| !vx_world::fort::fort_for(site).ruined)
+            .or_else(|| near.iter().find(mini))
+            .copied()
+            .ok_or("no mini star within six kilometres of --at")?;
+        let fort = vx_world::fort::fort_for(&site);
+
+        // Bring the ground with us: the hamlet may be kilometres from --at.
+        let centre = vx_core::BlockPos::new(site.centre.0, 0, site.centre.1).chunk();
+        world.load_around(centre, 8);
+        remesh_all(&context, &mut renderer, &mut world);
+
+        let middle = glam::Vec3::new(
+            site.centre.0 as f32,
+            site.ground as f32,
+            site.centre.1 as f32,
+        );
+        // Overhead, because a bastioned trace only reads as bastioned from a
+        // height — the same lesson the full fort fixture already learned.
+        // High enough that the whole ring fits: at a sixty-degree field of
+        // view the ground covered is about the height, so anything less than
+        // twice the radius crops the wall the picture is about.
+        camera.position = middle + glam::Vec3::new(0.0, fort.radius * 2.7, 0.1);
+        look_at(&mut camera, middle);
+        renderer.update_camera(&context.queue, &camera);
+        renderer.set_objects(&context.device, &context.queue, &[]);
+        println!(
+            "ministar capture: {} at {:?}, radius {:.0}, ruined {}",
+            site.name.head(),
+            site.centre,
+            fort.radius,
+            fort.ruined
+        );
+    }
+
+    // The ward, and the panel that is the whole of what it does.
+    if options.ward {
+        let content = clinic::ClinicContent {
+            town: vx_world::town::home_site().name.to_string(),
+            cursor: 0,
+            condition: (2, health::MAX_HITS),
+            rads: 143.0,
+            medkits: 1,
+            credits: 260,
+            feedback: Some("A DEPUTY GOT THREE OF THEM INTO YOU".into()),
+        };
+        let pixels = clinic::render_clinic(&content);
+        let panel_width = clinic::WARD_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = clinic::WARD_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            WARD_SLOT,
+            &context.device,
+            &context.queue,
+            (clinic::WARD_WIDTH, clinic::WARD_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+
+        // And frame the building behind it, so the panel is attached to a
+        // place rather than floating over a field.
+        //
+        // From outside, deliberately. A ward is a nine-by-seven shed with
+        // one block of headroom over the cots: a camera in there photographs
+        // a sheet of corrugated metal and whatever the panel does not cover,
+        // which is a worse picture than the door somebody walks through.
+        let site = vx_world::town::home_site();
+        let door = glam::Vec3::new(
+            site.centre.0 as f32 + 14.5,
+            site.ground as f32 + 1.0,
+            site.centre.1 as f32 + 7.0,
+        );
+        camera.position = door + glam::Vec3::new(-8.0, 9.0, -15.0);
+        look_at(&mut camera, door + glam::Vec3::new(1.0, 0.0, 3.0));
+        renderer.update_camera(&context.queue, &camera);
+        let cot = vx_core::BlockPos::new(site.centre.0 + 14, site.ground + 1, site.centre.1 + 12);
+        println!(
+            "ward capture: the clinic door at {:?}, cots at {:?} ({})",
+            (site.centre.0 + 14, site.centre.1 + 7),
+            (cot.x, cot.z),
+            world.registry().get_or_air(world.block(cot)).name
+        );
+    }
+
     if options.device {
         // The handheld's roster, over whatever the frame already shows.
         let mut mining = Mining::default();
@@ -3036,6 +3208,8 @@ struct Active {
     /// The wellhead panel: which head is open, and what it last said. The
     /// holes themselves live on `Mining`, where the oracle carries them.
     well_panel: well::Panel,
+    /// The ward, when its door is open.
+    clinic: clinic::Clinic,
     /// The deep, and whatever it has sent. Live-only like the posse: it
     /// reads the world, spends health and says things, and never writes a
     /// block or touches the pile.
@@ -3446,6 +3620,16 @@ impl App {
         }
         if let Some(line) = active.villagers.greeting_for() {
             active.greeting = Some((line.to_string(), Instant::now()));
+        }
+        // And standing on somebody's feet earns a noise rather than a line.
+        // Both the sound and the toast, because a machine with no speaker is
+        // a supported machine here and the tell has to survive one.
+        if let Some(variant) = active.villagers.grunt_for(active.player.position) {
+            active.audio.play(audio::Cue::Grunt(variant), 0.7);
+            active.greeting = Some((
+                "SOMEBODY GRUNTS AND SHIFTS OUT OF YOUR WAY".into(),
+                Instant::now(),
+            ));
         }
 
         // Carrying the launcher raised is menacing all by itself: anyone under
@@ -3864,6 +4048,7 @@ impl App {
         self.refresh_printer();
         self.refresh_electrolyser();
         self.refresh_well();
+        self.refresh_clinic();
         self.refresh_vault();
         self.refresh_terminal();
         self.refresh_debug();
@@ -4572,6 +4757,22 @@ impl App {
                 }
                 lines
             }
+            "patch" => {
+                // The field half of the ward: a medkit is what gets you out
+                // of a gallery, and the cot in town is what makes you whole.
+                match active.health.patch() {
+                    Ok(back) => vec![
+                        format!("PATCHED - {back} BACK"),
+                        format!(
+                            "HITS {}/{}   {} MEDKITS LEFT",
+                            active.health.hits(),
+                            health::MAX_HITS,
+                            active.health.medkits()
+                        ),
+                    ],
+                    Err(reason) => vec![reason, "THE CLINIC IN ANY TOWN SELLS THEM".into()],
+                }
+            }
             "wells" => {
                 // The roster the wellhead panel cannot give you: every hole
                 // at once, from wherever you happen to be standing.
@@ -5089,6 +5290,46 @@ impl App {
             }
             None => {}
         }
+    }
+
+    /// Take whichever row the ward's cursor is on.
+    ///
+    /// Nothing here is journalled: the bed spends nothing, the medkit spends
+    /// credits, and both of them only ever touch the player. The oracle has
+    /// no business in a hospital.
+    fn take_the_ward(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let row = active.clinic.row();
+        let credits = active.wallet.credits();
+        if let Some(reason) = clinic::refuse(row, &active.health, credits, active.dose.rads) {
+            active.clinic.feedback = Some(reason);
+            return;
+        }
+        let line = match row {
+            clinic::Row::Rest => {
+                active.health.revive();
+                // The half that matters after the deep resources: a ward is
+                // the only thing that takes a dose off you in a hurry.
+                let scrubbed = active.dose.rads;
+                active.dose.flush();
+                active.last_rads = 0.0;
+                if scrubbed > 1.0 {
+                    format!("PATCHED UP AND SCRUBBED - {scrubbed:.0} RADS OFF YOU")
+                } else {
+                    "PATCHED UP - YOU ARE WHOLE".to_string()
+                }
+            }
+            clinic::Row::Medkit => {
+                if !active.wallet.spend(clinic::MEDKIT_PRICE) {
+                    active.clinic.feedback = Some("SHORT CREDITS".into());
+                    return;
+                }
+                active.health.stock_medkit();
+                format!("ONE MEDKIT - {} IN THE BAG", active.health.medkits())
+            }
+        };
+        active.clinic.feedback = Some(line.clone());
+        active.greeting = Some((line, Instant::now()));
     }
 
     /// Sink a hole under the open wellhead.
@@ -6032,6 +6273,7 @@ impl App {
                 || active.printer.open
                 || active.electrolyser.open
                 || active.well_panel.open
+                || active.clinic.open
                 || active.banks.open
                 || active.intro.open
                 || active.terminal.open
@@ -6335,6 +6577,25 @@ impl App {
                     let Some(active) = &mut self.active else { return };
                     active.electrolyser.close();
                     active.renderer.clear_overlay(FUEL_SLOT);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // The ward: two rows, one key each.
+        if self.active.as_ref().is_some_and(|active| active.clinic.open) {
+            match code {
+                KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                    let Some(active) = &mut self.active else { return };
+                    let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
+                    active.clinic.move_cursor(delta);
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter => self.take_the_ward(),
+                KeyCode::KeyE | KeyCode::Escape => {
+                    let Some(active) = &mut self.active else { return };
+                    active.clinic.close();
+                    active.renderer.clear_overlay(WARD_SLOT);
                 }
                 _ => {}
             }
@@ -6969,6 +7230,9 @@ impl App {
             }
             "engine:wellhead" => {
                 active.well_panel.open_at(hit.block);
+            }
+            "engine:ward_cot" => {
+                active.clinic.open_at(hit.block);
             }
             "engine:vault" => {
                 // Which town's strongroom this is comes from where it stands,
@@ -8149,6 +8413,7 @@ impl App {
                 active.mining.wells.producing().count(),
             ),
             rads: (active.last_rads, active.dose.rads),
+            medkits: active.health.medkits(),
             dark: (
                 active.dark.heat(),
                 active
@@ -8276,6 +8541,52 @@ impl App {
             &active.context.device,
             &active.context.queue,
             (electrolysis::FUEL_WIDTH, electrolysis::FUEL_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
+    /// Draw the ward when its door is open.
+    fn refresh_clinic(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.clinic.open {
+            return;
+        }
+        let town = active
+            .clinic
+            .at
+            .and_then(|at| {
+                active
+                    .world
+                    .generator()
+                    .towns_near((at.x, at.z), vx_world::town::REACH)
+                    .into_iter()
+                    .next()
+            })
+            .map_or_else(|| "THE FRONTIER".to_string(), |site| site.name.to_string());
+        let content = clinic::ClinicContent {
+            town,
+            cursor: active.clinic.cursor,
+            condition: (active.health.hits(), health::MAX_HITS),
+            rads: active.dose.rads,
+            medkits: active.health.medkits(),
+            credits: active.wallet.credits(),
+            feedback: active.clinic.feedback.clone(),
+        };
+        let pixels = clinic::render_clinic(&content);
+        let (width, height) = active.renderer.size();
+        let panel_width = clinic::WARD_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = clinic::WARD_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            WARD_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (clinic::WARD_WIDTH, clinic::WARD_HEIGHT),
             &pixels,
             vx_render::OverlayRect {
                 x: (width as f32 - panel_width) / 2.0,
@@ -8923,6 +9234,7 @@ impl ApplicationHandler for App {
             optics: eyes,
             electrolyser: bath,
             well_panel: well::Panel::default(),
+            clinic: clinic::Clinic::default(),
             dark: stalker::TheDark::default(),
             dose: dose::Dose::default(),
             dose_check: 0.0,

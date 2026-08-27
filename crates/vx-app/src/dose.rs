@@ -145,6 +145,12 @@ impl Dose {
         Some(Told::Burned)
     }
 
+    /// Scrubbed clean. What a ward cot does, and the only thing in this game
+    /// that does it faster than walking away and waiting.
+    pub fn flush(&mut self) {
+        *self = Dose::default();
+    }
+
     /// Is this body carrying anything worth showing?
     pub fn showing(&self) -> bool {
         self.rads > 1.0

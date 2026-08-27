@@ -86,7 +86,14 @@ pub mod slot {
     /// The wellhead: the machine that stands over a field and waits.
     pub const WELLHEAD: u32 = 47;
 
-    pub const COUNT: u32 = 48;
+    /// The white of an eye.
+    pub const EYE: u32 = 48;
+    /// A pupil, and the line of a mouth: the two dark marks on a face.
+    pub const PUPIL: u32 = 49;
+    /// The ward cot: what a hospital is, mechanically.
+    pub const COT: u32 = 50;
+
+    pub const COUNT: u32 = 51;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -652,6 +659,40 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.62, 0.16, 0.12], noise * 0.06)
                     } else {
                         shade([0.28, 0.29, 0.31], noise * 0.06)
+                    }
+                }
+                slot::EYE => {
+                    // Off-white with the faintest warm cast, and no grain
+                    // worth the name: an eye that looks like weathered
+                    // stone reads as a hole in somebody's head.
+                    shade([0.90, 0.89, 0.85], noise * 0.02)
+                }
+                slot::PUPIL => {
+                    // Near-black with one bright texel of catchlight. The
+                    // catchlight is the whole trick — it is what turns two
+                    // dark squares into something that is looking at you.
+                    if x == 4 && y == 4 {
+                        shade([0.85, 0.88, 0.92], 0.0)
+                    } else {
+                        shade([0.07, 0.07, 0.09], noise * 0.03)
+                    }
+                }
+                slot::COT => {
+                    // A bed: pale sheeting with a folded blanket across the
+                    // foot and a rail at the head. It has to read as
+                    // "somewhere to lie down" from the doorway, because that
+                    // is the whole instruction the building gives.
+                    let rail = y < 3;
+                    let blanket = y >= TILE_SIZE - 5;
+                    let seam = blanket && (y == TILE_SIZE - 5 || x % 6 == 0);
+                    if rail {
+                        shade([0.62, 0.64, 0.68], noise * 0.04)
+                    } else if seam {
+                        shade([0.28, 0.42, 0.46], noise * 0.03)
+                    } else if blanket {
+                        shade([0.36, 0.54, 0.58], noise * 0.05)
+                    } else {
+                        shade([0.86, 0.87, 0.88], noise * 0.03)
                     }
                 }
                 // Unknown slots get magenta, the universal "missing texture".

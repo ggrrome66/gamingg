@@ -99,6 +99,7 @@ const VERBS: &[Verb] = &[
     Verb { name: "pile", help: "WHAT IS ON THE BASE PILE" },
     Verb { name: "kit", help: "EVERY UPGRADE LINE AND WHAT IS FITTED" },
     Verb { name: "repair", help: "MEND THE WORST MACHINE, OR REPAIR DIGGER 2" },
+    Verb { name: "patch", help: "SPEND A MEDKIT ON YOURSELF, WHEREVER YOU ARE" },
     Verb { name: "wells", help: "EVERY HOLE YOU HAVE SUNK, AND WHAT IT IS DOING" },
     Verb { name: "law", help: "WHAT THE DEPUTIES ARE DOING, AND HOW THEIR NERVE IS" },
     Verb { name: "standing", help: "YOUR NAME WITH THE TOWNS AND THE SHELTERS" },
@@ -157,7 +158,7 @@ pub fn parse(line: &str) -> Parsed {
         "lights" | "lamp" => Parsed::Run(Order::Lights),
         "save" => Parsed::Run(Order::Save),
         "status" | "fleet" | "where" | "bank" | "pile" | "who" | "talk" | "gift"
-        | "kit" | "repair" | "law" | "standing" | "wells" => Parsed::Ask(verb, rest),
+        | "kit" | "repair" | "law" | "standing" | "wells" | "patch" => Parsed::Ask(verb, rest),
         "scout" => match rest.first().map(String::as_str) {
             Some("orbit") => Parsed::Run(Order::Scout(crate::journal::ScoutOrder::Orbit)),
             Some("dock") | Some("home") => {

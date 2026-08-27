@@ -505,7 +505,9 @@ fn owner_of(role: Role) -> Claimant {
         // The bank answers to the mayor like the rest of the town's own
         // buildings. Whose *goods* are inside is a separate ledger, and not
         // one the permits system has any business in.
-        Role::Shop | Role::Civic | Role::Paving | Role::Bank => Claimant::Office(Office::Mayor),
+        Role::Shop | Role::Civic | Role::Paving | Role::Bank | Role::Clinic => {
+            Claimant::Office(Office::Mayor)
+        }
         // Filled in per building below: which resident depends on which
         // container, and the roster's home routes are what say so.
         Role::Dwelling => Claimant::Resident(usize::MAX),
@@ -536,6 +538,7 @@ fn label_for(role: Role, owner: Claimant) -> String {
         (Role::Civic, _) => "THE RADIO TOWER".into(),
         (Role::Paving, _) => "THE TOWN PAVING".into(),
         (Role::Bank, _) => "THE BANK".into(),
+        (Role::Clinic, _) => "THE CLINIC".into(),
         (Role::Dwelling, Claimant::Resident(index)) if index < RESIDENTS => {
             format!("{}S HOUSE", resident_name(index))
         }

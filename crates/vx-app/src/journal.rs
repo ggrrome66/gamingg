@@ -136,7 +136,13 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // `Electrolyse` argument word for word: the fleet burns what the pile holds,
 // so a replay that skipped a well would run the crew dry at a different tick
 // and leave a different hole.
-const VERSION: u32 = 20;
+// Twenty-one moves generated ground twice over. Every town on the frontier
+// now walls itself: what used to come back `Open` — a hamlet with nothing
+// around it — is a mini star, four short bastions on a low thin trace drawn
+// in tight against the buildings. And every town gained a clinic, which is a
+// building where there was open plot. A log recorded over the old ground
+// would replay its digging into rock that has a wall through it.
+const VERSION: u32 = 21;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///

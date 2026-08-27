@@ -106,7 +106,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 28 | `4665d04` | Hostiles and health: a warrant sends deputies who believe rather than know, search an occupancy map, take cover, never fire through each other, and break or surrender on nerve |
 | 29 | `12425b4` | Bunkers occupied: every shelter holds a squad derived from its own seed, hostiles route on the drones' flow fields, noise reaches them as 32-metre zones, pairs move under overwatch, and a surrendered holder can be taken in for the board's pay |
 | 30 | `a4248b3` | Factions: the Compact and the Holdouts remember what the bounty board forgets — standing shades prices, buys a challenge before a volley, and puts the spoofers in the other side's hands |
-| 31 | _this_ | Uranium, oil and gas, and the thing that hunts by ear: a deep ore that pays for itself in dose, fluid reservoirs worked by a wellhead that keeps paying until it stops, and a stalker that is told a thirty-two metre cell and has to find you inside it |
+| 31 | `02ac7c9` | Uranium, oil and gas, and the thing that hunts by ear: a deep ore that pays for itself in dose, fluid reservoirs worked by a wellhead that keeps paying until it stops, and a stalker that is told a thirty-two metre cell and has to find you inside it |
+| 32 | _this_ | Faces, walls and a ward: the townsfolk get eyes that follow what they are watching and a grunt for anyone who crowds them, every town on the frontier walls itself with at least a mini star, and a free cot in every clinic mends you and scrubs the dose |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1720,6 +1721,79 @@ catalogue, which waits for something worth enriching it *for*.
 
 ---
 
+## Shipped — Stage 32: faces, walls and a ward
+
+**A face is five cubes and it is worth more than any five cubes in this
+game.** The townsfolk have turned toward what they notice since stage 7 — the
+work was all there — but a bare skin block for a head reads as a mannequin, so
+none of it showed. Two eyes, two pupils and a flat mouth, and the pupils take
+their gaze from *the same sighting the body turns toward*: one perception,
+two tells, no second look at the world. The gaze **clamps** rather than
+tracking all the way round, which is the whole of "roughly" — past about
+thirty-five degrees the eyes saturate and the body has to do the turning,
+which is exactly what a person does and what a googly toy does not.
+
+Structurally it is one flag on a rig part. `Part::follow` moves with a gaze
+and nothing else does, so every other rig in the game keeps calling
+`objects()` unchanged and the deputies — who wear the villagers' rig —
+inherit a face for nothing.
+
+**A grunt is the other half of being crowded.** Under one and three quarter
+blocks somebody grunts and shifts aside: three synthesized voices rather than
+one recording, no line of sight required (being trodden on is not something
+you watch coming), once per approach on the greeting's own hysteresis. It
+lands as a toast as well as a sound, because a machine with no audio device is
+a supported machine here and a tell that only exists in the speakers is a tell
+half this game's players never get.
+
+**Every town is walled now.** The star forts of stage 21 tiered a hamlet down
+to `Open` — nothing at all — which left most of the map reading as sheds in a
+field. The floor is now a **mini star**: four short bastions, a wall four high
+and three thick, standing off nine blocks instead of fourteen, with the same
+ditch, the same four gates on the four roads and the same lockbox on each. Its
+own `standoff`, `height`, `half` and `ditch` come off the trace, so it is the
+same geometry built smaller rather than a special case. `Trace::Open` was
+deleted rather than left unreachable — a variant nothing can produce is a lie
+in a table, and this file has held that line since the schedule dropped its
+rain rule.
+
+Four high rather than three, and the reason is the gate: a gateway is a
+four-block opening with wall carrying on over it, so a three-high trace would
+have to choose between a door you cannot walk through and an arch that is not
+there.
+
+**And there is somewhere to go when you are hurt.** A clinic in every town
+plan — a nine-by-seven ward with two cots and a Tier Two lock, claimed like
+any other building. The cot is free and it also **scrubs the dose**, which is
+the door stage 31 deliberately left open: standing in a uranium face is a
+bargain you take knowing there is somewhere to walk to afterwards.
+
+Free is the right price because the walk is already the cost. A bed in town is
+worth nothing at the bottom of a shaft, which is what makes the **medkit**
+worth its forty-five credits — bought at the same counter, carried, spent by
+the terminal's `patch` wherever you are, two hits back and never wasted on
+somebody already whole.
+
+**No journal change belongs to the ward.** Medkits are a count in a pocket
+rather than a good on a pile, credits have always been live-only and health
+has been live-only since stage 28, so the oracle never hears about a hospital.
+**VERSION 21** is the *ground* moving twice: a wall around every town that had
+none, and a building on plot that used to be open.
+
+**Surface.** `patch` at the terminal; the ward panel on the electrolyser's
+shape; F3 gained the medkit count. Three capture fixtures — and the ward's
+taught its own lesson: a two-block-high shed photographs as a sheet of
+corrugated metal from the inside, so the picture is the door somebody walks
+through.
+
+**Deliberately not in 32:** expressions — a mouth that moves is animation this
+rig has not got, and a flat line at least never smiles at the wrong moment;
+blinking; gaze for the deputies and holders, who wear the face but have not
+been asked where they are looking; villagers who *staff* the clinic; illness
+or injury that needs more than a bed; and a bill for the cot.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -1913,11 +1987,11 @@ through. What is left of the plan is one toy and the civic layer.
 
 | Stage | What | Why here |
 |---|---|---|
-| 32 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 33 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 31.
+The whole game at a glance, as of stage 32.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -2003,9 +2077,16 @@ the stalker (a director that knows the truth and may say only a 32-metre
 cell, a creature that closes the rest on the same occupancy search the law
 uses, hints weighted by the noise a working mine makes, a floor distance it
 never arrives inside, and a pressure budget that makes it break off);
+faces on the townsfolk (eyes that follow whatever has their attention and
+saturate rather than swivelling, and a grunt in three voices for anybody who
+crowds them);
+a mini star around every town that had no wall at all, gates and ditch
+included;
+a clinic in every town (a free cot that mends you and scrubs your dose, and
+medkits bought there and spent in the field);
 an F3 debug readout in every build (engine vitals, the journal clock, the
-fleet, the hostiles' belief, your dose, your wells, how roused the deep is
-and both standings — diagnostics that change nothing they report on, unlike
+fleet, the hostiles' belief, your dose, your medkits, your wells, how roused
+the deep is and both standings — diagnostics that change nothing they report on, unlike
 the gold panel, which is why one ships and the other is compiled out);
 a Steam Deck dist build every round.
 
