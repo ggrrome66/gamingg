@@ -84,6 +84,13 @@ pub struct HudContent<'a> {
     pub condition: Option<String>,
     /// Deputies still coming for you. Zero draws nothing.
     pub deputies: usize,
+    /// What the deep ore is doing to you, once anything is showing. Ranked
+    /// with the condition line rather than the kit lines for the same
+    /// reason: it is a thing to act on now.
+    pub dose: Option<String>,
+    /// What is out there in the dark, when something is. Top of the urgent
+    /// block: nothing else on this panel outranks it.
+    pub dark: Option<String>,
 }
 
 /// What the HUD says about how the player is moving.
@@ -239,8 +246,17 @@ pub fn render_hud(content: &HudContent) -> Vec<u8> {
     }
     // Your own condition and the law's attention outrank the kit lines:
     // both are things you must act on now.
+    if let Some(dark) = &content.dark {
+        font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, WANTED, dark);
+        y += LINE_HEIGHT as i32;
+    }
     if let Some(condition) = &content.condition {
         font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, WANTED, condition);
+        y += LINE_HEIGHT as i32;
+    }
+    if let Some(dose) = &content.dose {
+        let colour = if dose.contains("GET OUT") { WANTED } else { ACCENT };
+        font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, colour, dose);
         y += LINE_HEIGHT as i32;
     }
     if content.deputies > 0 {
@@ -322,6 +338,8 @@ mod tests {
             kestrel: None,
             optic: None,
             condition: None,
+            dose: None,
+            dark: None,
             deputies: 0,
             fuel: None,
         }

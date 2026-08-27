@@ -467,7 +467,7 @@ mod tests {
             base_total: 340,
             town_name: Some("STONEHAVEN".into()),
             town_centre: Some((0, 0)),
-            stocks: [400.0, 200.0, 100.0, 40.0, 15.0],
+            stocks: [400.0, 200.0, 100.0, 40.0, 15.0, 2.0, 24.0, 31.0],
             tuning,
             world_hash: None,
         }

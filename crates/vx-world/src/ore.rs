@@ -28,11 +28,19 @@ use vx_core::BlockPos;
 
 use crate::noise::signed_2d;
 
-/// What a deposit is made of. One kind for now; the shape is here so more are
-/// data rather than new code paths.
+/// What a deposit is made of.
+///
+/// The second kind arrives the way the first one promised it would: as data
+/// in this table and a band constant, not as a new code path. Everything
+/// below — the lattice, the wobble, the outcrop rule — is untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OreKind {
     Copper,
+    /// The deep prize. Never near the surface, never in the overburden, and
+    /// worth more per block than anything else that comes out of the ground
+    /// — which is the bargain, because it is also the only ore that costs
+    /// you something to stand beside.
+    Uranium,
 }
 
 impl OreKind {
@@ -40,6 +48,15 @@ impl OreKind {
     pub fn block_name(self) -> &'static str {
         match self {
             OreKind::Copper => "engine:copper_ore",
+            OreKind::Uranium => "engine:uranium_ore",
+        }
+    }
+
+    /// How the panels and the terminal say it. Uppercase for the font.
+    pub fn name(self) -> &'static str {
+        match self {
+            OreKind::Copper => "COPPER",
+            OreKind::Uranium => "URANIUM",
         }
     }
 }
@@ -56,6 +73,18 @@ const BAND_MAX_Y: i32 = 104;
 
 const MIN_RADIUS: f32 = 4.0;
 const MAX_RADIUS: f32 = 10.5;
+
+/// The deepest a deposit may be and still be copper's to claim — above this
+/// nothing is uranium, so every outcrop on every hillside is what it always
+/// was.
+const URANIUM_MAX_Y: f32 = 34.0;
+
+/// Share of eligible deep cells that come up uranium rather than copper.
+/// Low: the point of the deep dark is that most of it is ordinary.
+const URANIUM_SHARE: f32 = 0.30;
+
+/// Uranium bodies are smaller than copper ones — a pod, not a seam.
+const URANIUM_RADIUS_SCALE: f32 = 0.55;
 
 /// Fraction of lattice cells that actually hold a deposit. Below 1.0 so ore is
 /// worth looking for rather than being everywhere.
@@ -136,14 +165,26 @@ fn deposit_in_cell(seed: u64, cell_x: i32, cell_y: i32, cell_z: i32) -> Option<D
         return None;
     }
 
+    // Deep cells may come up uranium. The draw is its own hash stream, so
+    // turning this dial cannot move a single copper body sideways.
+    let kind = if centre_y <= URANIUM_MAX_Y && key(0x06) < URANIUM_SHARE {
+        OreKind::Uranium
+    } else {
+        OreKind::Copper
+    };
+    let radius_scale = match kind {
+        OreKind::Copper => 1.0,
+        OreKind::Uranium => URANIUM_RADIUS_SCALE,
+    };
+
     Some(Deposit {
-        kind: OreKind::Copper,
+        kind,
         centre: [
             cell_x as f32 * CELL_XZ as f32 + key(0x02) * CELL_XZ as f32,
             centre_y,
             cell_z as f32 * CELL_XZ as f32 + key(0x04) * CELL_XZ as f32,
         ],
-        radius: MIN_RADIUS + key(0x05) * (MAX_RADIUS - MIN_RADIUS),
+        radius: (MIN_RADIUS + key(0x05) * (MAX_RADIUS - MIN_RADIUS)) * radius_scale,
         seed: seed ^ ((cell_x as i64 as u64) << 42)
             ^ ((cell_y as i64 as u64) << 21)
             ^ (cell_z as i64 as u64),
@@ -228,8 +269,52 @@ mod tests {
                 "deposit at y={} escaped the band",
                 deposit.centre[1]
             );
-            assert!((MIN_RADIUS..=MAX_RADIUS).contains(&deposit.radius));
+            let floor = MIN_RADIUS
+                * match deposit.kind {
+                    OreKind::Copper => 1.0,
+                    OreKind::Uranium => URANIUM_RADIUS_SCALE,
+                };
+            assert!((floor..=MAX_RADIUS).contains(&deposit.radius));
         }
+    }
+
+    #[test]
+    fn uranium_is_a_deep_thing_only() {
+        // The band constant is the whole safety argument for putting a
+        // hazard in the ground: a player who never goes below the ore band
+        // never meets it, so the danger is opt-in by depth.
+        let mut uranium = 0;
+        for seed in [1, 7, 2024, 909] {
+            for deposit in survey(seed) {
+                if deposit.kind == OreKind::Uranium {
+                    uranium += 1;
+                    assert!(
+                        deposit.centre[1] <= URANIUM_MAX_Y,
+                        "uranium at y={}",
+                        deposit.centre[1]
+                    );
+                }
+            }
+        }
+        assert!(uranium > 0, "no uranium anywhere in four worlds");
+    }
+
+    #[test]
+    fn the_deep_is_still_mostly_copper() {
+        let deep: Vec<Deposit> = survey(2024)
+            .into_iter()
+            .filter(|deposit| deposit.centre[1] <= URANIUM_MAX_Y)
+            .collect();
+        let uranium = deep
+            .iter()
+            .filter(|deposit| deposit.kind == OreKind::Uranium)
+            .count();
+        assert!(!deep.is_empty());
+        assert!(
+            uranium * 2 < deep.len(),
+            "{uranium} of {} deep bodies are uranium — the dark is not ordinary any more",
+            deep.len()
+        );
     }
 
     #[test]

@@ -685,6 +685,71 @@ compiled in. It needs **glibc 2.39 or newer** (SteamOS 3.7+ is fine, 3.6 is not)
 ./dist/gamingg-linux-x86_64
 ```
 
+### Uranium, oil and gas
+
+Three new things are in the ground, and none of them behaves like copper.
+
+**Uranium** is banded far below the overburden, so nobody meets it by walking
+— you go and find it, in the dark, a long way down. It is worth more per block
+than anything else in the world, it takes twice as long to cut, and it is
+doing something to you the whole time you stand in it. Exposure is not a
+timer: it is a sum over the bare uranium within five blocks of your body,
+falling off with the square of the distance, so every lever you have over it
+is a physical one. Back off between cuts. Wall the face back up. Send a
+machine instead. Or print the **lead lining** at the workshop, which buys time
+and never buys immunity — a fully lined suit still takes a third of the dose,
+and nobody gets to live in a uranium face.
+
+**Oil and gas** are not ore at all. A reservoir is a body hundreds of blocks
+across on its own coarse lattice, deep, and worthless one block at a time —
+digging into oil sand by hand gets you the smell of it and nothing else. What
+makes it pay is a **wellhead**: printed at the fabricator, carried out to a
+column with something under it, and left there. Spudding in costs casing and
+cement up front, the string takes minutes to reach the crown, and then it
+lifts on its own clock into your base pile while you go and do something else.
+It is the first machine in this game that keeps paying — and, because a
+reservoir is finite, the first one that stops.
+
+A dry hole costs exactly what a good one costs. What is under a column is a
+pure function of the seed, so a duster is a *place*, not a dice roll: the same
+column is dry in every session of that world, and a player who learns the
+ground has learned something true. The panel will tell you whether the mud log
+shows a trace before you spend the casing. What fluid, how much, and how deep
+are what the drilling is for.
+
+Oil is what the towns pay for. Gas is what your fleet burns when there is no
+lake for two kilometres: a canister of well gas is worth three fifths of a
+canister of oxyhydrogen, and the tank reaches for the good stuff first and
+falls back to gas on its own.
+
+### Something down there heard that
+
+The deep is not empty any more, and what is in it hunts by ear.
+
+It is two brains, deliberately. A **director** knows exactly where you are and
+is forbidden from saying so: everything it passes on is quantised to a
+thirty-two metre cell — the same grade the shelters' director uses, because
+there is one rule about lying to your own monsters and it is written once. The
+**creature** takes that cell and closes the rest with the same occupancy
+search a posse uses. It cannot walk to you, because it does not know where you
+are. Break line of sight and its picture of you goes stale exactly the way
+yours goes stale about it.
+
+What attaches it to this game rather than to a haunted corridor: hints are
+weighted by noise, and **machines are loud**. A drill chewing rock is a dinner
+bell. A shot underground is louder still. So the pressure lands on the core
+mining loop and the levers are all yours — run the swarm loud and rich, run it
+short and quiet, or dig a decoy a valley over and work in the noise of your own
+diversion. Heat fades when nothing is cutting, and it fades four times faster
+in daylight: coming up is the reliable way out.
+
+Nothing ever arrives within forty-eight metres of you. It comes from somewhere,
+always, from the direction the noise came from, and it says so — every change
+of mind lands a line, because a search nobody can perceive may as well be a
+random walk. Sustained contact spends a budget: ninety seconds of it and the
+director makes the thing break off for a minute, which is what turns a monster
+into a rhythm. Eight rounds put it off for the night.
+
 ### Two peoples keep two books on you
 
 The bounty board is a bill; getting arrested settles it. Your *name* is a
@@ -938,10 +1003,11 @@ Controls:
 | `[` / `]` | Zoom the minimap out / in |
 | `9` | The electrolyser, to place on a shore |
 | `E` | A word with the nearest townsperson when nothing solid is in reach — or, if somebody nearby has their hands up, take them in for the board's pay |
-| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `law` reads the deputies, `standing` your name with both peoples |
+| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `law` reads the deputies, `standing` your name with both peoples, `wells` every hole you have sunk |
+| `E` | A printed wellhead, once it is standing: the mud log says whether anything shows under this column, and `Enter` spuds the hole in |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
 | `F` | Toggle walking and flying |
-| `F3` | The debug readout: FPS, position, chunks and triangles, journal tick, fleet and fuel, hostiles and their belief, your standings — diagnostics only, in every build, and it changes nothing it reports on |
+| `F3` | The debug readout: FPS, position, chunks and triangles, journal tick, fleet and fuel, hostiles and their belief, your dose, your wells, how roused the deep is, your standings — diagnostics only, in every build, and it changes nothing it reports on |
 | `F5` | Save |
 | `F10` | The gold panel — the operator's console (dev builds only, see below) |
 | `Escape` | Release the mouse |

@@ -30,9 +30,12 @@ pub const PACK: &str = "pack";
 pub const PRESS: &str = "press";
 /// The suit lamp's reflector: a longer, stronger throw underground.
 pub const LAMP: &str = "lamp";
+/// Lead in the suit: what makes a uranium face somewhere you can work
+/// rather than somewhere you can visit.
+pub const SHIELD: &str = "shield";
 
 /// Every line, in the order panels list them.
-pub const LINES: [&str; 6] = [DRILL, CARGO, CELL, PACK, PRESS, LAMP];
+pub const LINES: [&str; 7] = [DRILL, CARGO, CELL, PACK, PRESS, LAMP, SHIELD];
 
 /// What each line does, for the panels and the terminal's `kit`.
 pub fn describes(line: &str) -> &'static str {
@@ -43,6 +46,7 @@ pub fn describes(line: &str) -> &'static str {
         PACK => "YOU CARRY MORE BEFORE IT SLOWS YOU",
         PRESS => "THE FABRICATOR PRINTS FASTER",
         LAMP => "THE LAMP THROWS FURTHER",
+        SHIELD => "THE SUIT KEEPS MORE OF THE DOSE OUT",
         _ => "",
     }
 }

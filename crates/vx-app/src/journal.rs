@@ -127,7 +127,16 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // because how long a crew turned is what decides where the hole ends up —
 // so mending a machine is an order the log must carry, and its replay arm
 // spends the same parts off the same pile.
-const VERSION: u32 = 19;
+// Twenty is two changes at once, like eight and fifteen before it. The
+// ground changed: uranium joined the ore lattice below the overburden, and
+// oil and gas bodies are stamped into the deep stone off a lattice of their
+// own — a log recorded over the old rock would replay its digging into rock
+// that is no longer the same rock. And `Spud` joins the commands, because a
+// well eats casing off the pile and puts barrels back on it, which is the
+// `Electrolyse` argument word for word: the fleet burns what the pile holds,
+// so a replay that skipped a well would run the crew dry at a different tick
+// and leave a different hole.
+const VERSION: u32 = 20;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -207,6 +216,12 @@ pub enum Command {
     /// holding copper the live game had already dissolved, and would run its
     /// fleet dry at a different tick than the session did.
     Electrolyse { run: u32 },
+    /// A hole sunk under a wellhead. What it finds is a pure function of the
+    /// seed and the column, so the order carries only *where*: both sides
+    /// ask the ground the same question and get the same answer, exactly
+    /// like `Salvage` derives its haul from a position rather than carrying
+    /// one.
+    Spud { at: BlockPos },
     /// A supply cache stripped. Not a no-op and not merely a break: it
     /// clears a block *and* pays out a haul, and both sides derive the haul
     /// from the same position, so a replay finishes holding exactly what the
@@ -683,6 +698,16 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                     .add(crate::fuel::CELL, u64::from(run.cells));
             }
         }
+        Command::Spud { at } => {
+            // Casing and cement off the pile, and a hole that lifts back
+            // onto it for as long as the ground holds out. One function,
+            // both sides — and the ground it consults is the seed, which
+            // neither side can disagree about.
+            let seed = world.seed();
+            if let Some(base) = state.mining.fleet.base.as_mut() {
+                let _ = state.mining.wells.spud(*at, seed, &mut base.stockpile);
+            }
+        }
         Command::Salvage { at } => {
             // The crate goes, and its haul lands on the pile. The contents
             // are a pure function of the position, so the two sides cannot
@@ -852,6 +877,10 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
         Command::Electrolyse { run } => {
             file.write_all(&[17u8])?;
             file.write_all(&run.to_le_bytes())?;
+        }
+        Command::Spud { at } => {
+            file.write_all(&[22u8])?;
+            write_pos(file, *at)?;
         }
         Command::Bank {
             town,
@@ -1142,6 +1171,9 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
             recipe: read_u32(file)?,
         },
         16 => Command::Salvage {
+            at: read_pos(file)?,
+        },
+        22 => Command::Spud {
             at: read_pos(file)?,
         },
         17 => Command::Electrolyse {
@@ -2103,6 +2135,55 @@ mod fire_tests {
             pile.add(crate::fuel::CELL, u64::from(run.cells));
             assert_eq!(pile.count("engine:copper_bar"), 40 - run.bars, "run {index}");
             assert_eq!(pile.count(crate::fuel::CELL), u64::from(run.cells));
+        }
+    }
+
+    #[test]
+    fn a_spud_round_trips_and_both_sides_sink_the_same_hole() {
+        let directory =
+            std::env::temp_dir().join(format!("vx-journal-spud-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let heads = [
+            BlockPos::new(-1_217, 96, 1_116),
+            BlockPos::new(340, 71, -9_708),
+        ];
+        let mut journal = CommandLog::default();
+        for at in heads {
+            journal.record(Command::Spud { at });
+            journal.record(Command::Advance { ticks: 900 });
+        }
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let orders: Vec<Command> = read_back
+            .entries()
+            .iter()
+            .map(|entry| entry.command.clone())
+            .filter(|command| matches!(command, Command::Spud { .. }))
+            .collect();
+        assert_eq!(
+            orders,
+            heads.iter().map(|at| Command::Spud { at: *at }).collect::<Vec<_>>(),
+            "a hole did not survive the wire"
+        );
+
+        // And what a hole finds is derived from the seed and the column, so
+        // there is nothing rolled for the two sides to disagree about — the
+        // same argument `Salvage` makes about its haul.
+        for at in heads {
+            let seed = 4242;
+            let run = || {
+                let mut pile = vx_agent::Stockpile::new();
+                pile.add(crate::well::CASING.0, 20);
+                pile.add(crate::well::CEMENT.0, 200);
+                let mut wells = crate::well::Wells::default();
+                wells.spud(at, seed, &mut pile).unwrap();
+                wells.tick(2_000, &mut pile);
+                (wells, pile.total())
+            };
+            assert_eq!(run(), run(), "a hole at {at:?} disagreed with itself");
         }
     }
 

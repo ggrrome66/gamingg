@@ -73,7 +73,20 @@ pub mod slot {
     /// A building's foundation.
     pub const FOOTING: u32 = 41;
 
-    pub const COUNT: u32 = 42;
+    /// The deep prize, and the only ore that reads as a warning.
+    pub const URANIUM_ORE: u32 = 42;
+    /// Rock with oil in it.
+    pub const OIL_SAND: u32 = 43;
+    /// Shale with gas in it.
+    pub const GAS_SHALE: u32 = 44;
+    /// A barrel of crude: what a well lifts and a town buys.
+    pub const OIL_BARREL: u32 = 45;
+    /// A canister of well gas — the fuel you do not need a lake for.
+    pub const GAS_CELL: u32 = 46;
+    /// The wellhead: the machine that stands over a field and waits.
+    pub const WELLHEAD: u32 = 47;
+
+    pub const COUNT: u32 = 48;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -552,6 +565,93 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         // The chamber glow: warm, because something in there
                         // is hot.
                         shade([0.20, 0.17, 0.12], noise * 0.05)
+                    }
+                }
+                slot::URANIUM_ORE => {
+                    // Dark host rock with pitchblende in it and a sick green
+                    // bloom around the grains. Nothing else in the palette is
+                    // green-on-black, so a face of it in lamplight is
+                    // unmistakable — which is the point, because this is the
+                    // one ore that is also a warning sign.
+                    let grain = jitter(tile ^ 0x9d, x / 2, y / 2);
+                    if grain > 0.34 {
+                        shade([0.30, 0.62, 0.26], noise * 0.10)
+                    } else if grain > 0.12 {
+                        shade([0.16, 0.26, 0.16], noise * 0.08)
+                    } else {
+                        shade([0.22, 0.21, 0.24], noise * 0.09)
+                    }
+                }
+                slot::OIL_SAND => {
+                    // Saturated sandstone: pale grains gone black where the
+                    // crude has soaked in, in bands, because that is how it
+                    // lies in the ground.
+                    let band = ((y / 3) % 2) == 0;
+                    let soaked = jitter(tile ^ 0x11, x, y / 2) > (if band { -0.3 } else { 0.25 });
+                    if soaked {
+                        shade([0.12, 0.10, 0.08], noise * 0.05)
+                    } else {
+                        shade([0.46, 0.40, 0.29], noise * 0.08)
+                    }
+                }
+                slot::GAS_SHALE => {
+                    // Laminated grey shale with a bluish sheen along the
+                    // partings. Flat and layered, so it never gets confused
+                    // with oil sand at a glance.
+                    if y % 4 == 0 {
+                        shade([0.34, 0.42, 0.48], noise * 0.05)
+                    } else if y % 4 == 2 && (x + y) % 5 == 0 {
+                        shade([0.44, 0.54, 0.60], noise * 0.04)
+                    } else {
+                        shade([0.28, 0.30, 0.33], noise * 0.07)
+                    }
+                }
+                slot::OIL_BARREL => {
+                    // A drum: two hoops around a dark cylinder, stacked
+                    // upright, with a lid ring on top.
+                    let hoop = (5..7).contains(&y) || (TILE_SIZE - 7..TILE_SIZE - 5).contains(&y);
+                    let edge = !(2..TILE_SIZE - 2).contains(&x);
+                    if edge {
+                        shade([0.10, 0.10, 0.11], noise * 0.04)
+                    } else if hoop {
+                        shade([0.42, 0.36, 0.20], noise * 0.05)
+                    } else {
+                        shade([0.20, 0.18, 0.16], noise * 0.07)
+                    }
+                }
+                slot::GAS_CELL => {
+                    // A pressure bottle, upright, with a shoulder and a valve
+                    // — the same silhouette as the oxyhydrogen canister but
+                    // in field yellow, because mixing the two up at the pump
+                    // should be impossible.
+                    let bottle = (4..TILE_SIZE - 4).contains(&x) && y >= 4;
+                    let valve = (7..9).contains(&x) && y < 4;
+                    let highlight = bottle && x == 6;
+                    if valve {
+                        shade([0.55, 0.57, 0.60], noise * 0.04)
+                    } else if highlight {
+                        shade([0.95, 0.86, 0.40], noise * 0.03)
+                    } else if bottle {
+                        shade([0.72, 0.60, 0.14], noise * 0.06)
+                    } else {
+                        shade([0.24, 0.24, 0.26], noise * 0.05)
+                    }
+                }
+                slot::WELLHEAD => {
+                    // A christmas tree: the stack of valves and flanges that
+                    // sits on a hole in the ground, painted the red that
+                    // every wellhead on earth is painted.
+                    let stack = (6..10).contains(&x);
+                    let flange = stack && (y % 5 == 0);
+                    let deck = y >= TILE_SIZE - 3;
+                    if deck {
+                        shade([0.34, 0.35, 0.38], noise * 0.05)
+                    } else if flange {
+                        shade([0.60, 0.60, 0.62], noise * 0.04)
+                    } else if stack {
+                        shade([0.62, 0.16, 0.12], noise * 0.06)
+                    } else {
+                        shade([0.28, 0.29, 0.31], noise * 0.06)
                     }
                 }
                 // Unknown slots get magenta, the universal "missing texture".

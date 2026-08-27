@@ -186,11 +186,38 @@ pub const CATALOGUE: &[Recipe] = &[
         floor: 8,
     },
     Recipe {
+        label: "WELLHEAD",
+        output: Output::Good {
+            name: "engine:wellhead",
+            count: 1,
+        },
+        // Printed rather than bought, because a well is not a machine you
+        // own — it is a machine you *leave somewhere*, and the ones worth
+        // leaving are a long way from any shop counter.
+        inputs: &[
+            ("engine:copper_bar", 10),
+            ("engine:stone", 20),
+            ("engine:plank", 4),
+        ],
+        seconds: 45.0,
+        floor: 10,
+    },
+    Recipe {
         label: "NIGHT VISION VISOR",
         output: Output::Optic(crate::optics::NIGHT_VISION),
         inputs: &[("engine:copper_bar", 6), ("engine:copper_ore", 8)],
         seconds: 40.0,
         floor: 12,
+    },
+    Recipe {
+        label: "LEAD LINING",
+        output: Output::Upgrade(crate::wallet::SHIELD),
+        // Stone and bars: the fiction is lead sheet beaten into the suit,
+        // and the game has no lead — what it has is heavy rock and metal,
+        // and a lot of both.
+        inputs: &[("engine:copper_bar", 6), ("engine:stone", 24)],
+        seconds: 38.0,
+        floor: 13,
     },
     Recipe {
         label: "LAMP REFLECTOR",
@@ -506,7 +533,9 @@ mod tests {
                 "CARGO RACK",
                 "PACK FRAME",
                 "CHARGED CELL",
+                "WELLHEAD",
                 "NIGHT VISION VISOR",
+                "LEAD LINING",
                 "LAMP REFLECTOR",
                 "PRESS ROLLERS",
                 "THERMAL VISOR",

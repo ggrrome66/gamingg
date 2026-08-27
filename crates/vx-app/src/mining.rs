@@ -75,6 +75,16 @@ pub struct Mining {
     /// hole ends up — so replay carries this struct, and replay carries the
     /// wear.
     pub wear: crate::wear::Wear,
+    /// The holes this player has sunk. Here rather than in `main` for the
+    /// tank's reason and the wear's: a well puts goods on the pile, the pile
+    /// decides how long the fleet turns, and how long the fleet turns is
+    /// what the world hash covers. Replay carries this struct, so replay
+    /// carries the wells.
+    pub wells: crate::well::Wells,
+    /// What the wells did on the last `advance`. Kept beside them rather
+    /// than returned, because `FleetReport` belongs to `vx-agent` and
+    /// `vx-agent` has never heard of oil.
+    pub well_report: crate::well::WellReport,
     /// Fractional ticks carried between frames, so the drone runs at a steady
     /// rate rather than at whatever the frame rate happens to be.
     pending: f64,
@@ -151,6 +161,8 @@ impl Default for Mining {
             operation: None,
             tank: crate::fuel::Tank::default(),
             wear: crate::wear::Wear::default(),
+            wells: crate::well::Wells::default(),
+            well_report: crate::well::WellReport::default(),
             pinned: Vec::new(),
             last_ticks: 0,
             pending: 0.0,
@@ -369,6 +381,22 @@ impl Mining {
     /// identically on one managing three hundred.
     pub fn advance(&mut self, world: &mut World, events: &EventBus, ticks: u32) -> FleetReport {
         let mut report = FleetReport::default();
+
+        // The wells first, and outside every gate below. A wellhead does not
+        // burn the fleet's fuel, does not wear, and does not care whether
+        // there is a dig running — which is exactly what makes it the thing
+        // that rescues a crew that ran dry a long way from any water.
+        // With no base there is nowhere to deliver: the hole still goes
+        // down and still lifts, and what comes up goes on the ground. The
+        // tick runs either way so that a well's life depends on how long it
+        // ran rather than on when a container happened to be standing.
+        self.well_report = match self.fleet.base.as_mut() {
+            Some(base) => self.wells.tick(ticks, &mut base.stockpile),
+            None => {
+                let mut spoil = vx_agent::Stockpile::default();
+                self.wells.tick(ticks, &mut spoil)
+            }
+        };
 
         if self.operation.is_none() {
             // The fleet still flies with no dig running.

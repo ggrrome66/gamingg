@@ -32,12 +32,30 @@ use std::path::Path;
 /// The good a tank is filled from.
 pub const CELL: &str = "engine:hho_cell";
 
+/// The other good a tank is filled from: raw well gas, compressed at the
+/// wellhead.
+///
+/// # Why a second fuel exists at all
+///
+/// Oxyhydrogen has one problem as the only fuel in the game: it needs a
+/// lake. That made every long-range dig a haulage question with exactly one
+/// answer — go back to the water. Well gas is the answer for somebody who
+/// would rather sink a hole where they already are. It is worse fuel, and
+/// deliberately: a canister of it buys about three fifths of what a canister
+/// of oxyhydrogen does, because it is what came out of the ground rather
+/// than something anybody made.
+pub const GAS: &str = "engine:gas_cell";
+
 /// How many machine-ticks one canister is worth.
 ///
 /// Five minutes of one machine at the journal's eight ticks a second. A crew
 /// of four gets through a cell in a minute and a quarter, which is the number
 /// that decides whether a dig is a trip to the lake or an afternoon.
 pub const TICKS_PER_CELL: u32 = 2_400;
+
+/// What a canister of well gas is worth, in the same machine-ticks. Three
+/// fifths of oxyhydrogen: cheaper to come by, and it shows.
+pub const TICKS_PER_GAS: u32 = 1_440;
 
 /// Below this many machine-ticks the readout starts warning.
 const LOW: u32 = TICKS_PER_CELL / 2;
@@ -72,11 +90,18 @@ impl Tank {
             return true;
         }
         while self.charge < machines {
-            if pile.take(CELL, 1) == 0 {
+            // Oxyhydrogen first, always. It is the better fuel and the one a
+            // player went to the trouble of making, so burning the well gas
+            // while good cells sit in the pile would be the machine
+            // second-guessing them. Gas is what it falls back on.
+            if pile.take(CELL, 1) > 0 {
+                self.charge += TICKS_PER_CELL;
+            } else if pile.take(GAS, 1) > 0 {
+                self.charge += TICKS_PER_GAS;
+            } else {
                 self.dry = true;
                 return false;
             }
-            self.charge += TICKS_PER_CELL;
         }
         self.charge -= machines;
         self.dry = false;
@@ -94,7 +119,7 @@ impl Tank {
             return None;
         }
         if self.dry {
-            return Some("FLEET DRY - NO HHO".to_string());
+            return Some("FLEET DRY - NO FUEL".to_string());
         }
         let held = self.cells() as u64 + spare_cells;
         if self.charge < LOW && held == 0 {
@@ -182,7 +207,7 @@ mod tests {
         let mut empty = pile(0);
         assert!(!tank.burn(2, &mut empty), "a dry fleet kept working");
         assert!(tank.dry);
-        assert_eq!(tank.readout(2, 0).as_deref(), Some("FLEET DRY - NO HHO"));
+        assert_eq!(tank.readout(2, 0).as_deref(), Some("FLEET DRY - NO FUEL"));
 
         // And it picks straight back up when a canister arrives.
         let mut stocked = pile(1);
@@ -246,5 +271,35 @@ mod tests {
         for character in tank.readout(1, 0).unwrap().chars() {
             assert!(vx_render::font::knows(character));
         }
+    }
+
+    #[test]
+    fn well_gas_fuels_the_fleet_when_the_good_stuff_runs_out() {
+        // The fallback order is the whole design: a player who has both
+        // should burn what they made, and a player who has only what came
+        // out of a hole should still get to dig.
+        let mut pile = vx_agent::Stockpile::default();
+        pile.add(CELL, 1);
+        pile.add(GAS, 1);
+
+        let mut tank = Tank::default();
+        assert!(tank.burn(1, &mut pile));
+        assert_eq!(pile.count(CELL), 0, "the tank did not reach for the HHO first");
+        assert_eq!(pile.count(GAS), 1, "the gas went first");
+
+        // Run the oxyhydrogen out, then the gas has to carry it.
+        tank.charge = 0;
+        assert!(tank.burn(1, &mut pile));
+        assert_eq!(pile.count(GAS), 0);
+        assert_eq!(tank.charge, TICKS_PER_GAS - 1);
+
+        // And gas is honestly worse — pinned at build time, because the
+        // fallback order above only makes sense while it is true.
+        const { assert!(TICKS_PER_GAS < TICKS_PER_CELL) };
+
+        // Nothing left: dry, and it says so.
+        tank.charge = 0;
+        assert!(!tank.burn(1, &mut pile));
+        assert!(tank.dry);
     }
 }

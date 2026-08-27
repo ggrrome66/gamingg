@@ -51,19 +51,27 @@ const MAGIC: &[u8; 4] = b"VXEC";
 /// array of stocks, so a fifth good is a format change: an old file's four
 /// numbers cannot be read as five without inventing the missing one, and a
 /// town's books are better re-derived from its site than guessed at.
-const VERSION: u32 = 3;
+/// Four adds the three deep goods — uranium, oil and gas — for the same
+/// reason three added oxyhydrogen: a market's books are a fixed array, and
+/// five numbers cannot be read as eight without inventing three. A town's
+/// books are re-derived from its site instead, which is cheaper than a
+/// migration and more honest than a guess.
+const VERSION: u32 = 4;
 
 /// What the network moves.
 ///
 /// Three raw goods that come out of the ground and one that is made. Ordered,
 /// because a market's books are an array indexed by this — names are for disk
 /// and for the player, indices are for the arithmetic.
-pub const GOODS: [&str; 5] = [
+pub const GOODS: [&str; 8] = [
     "engine:copper_ore",
     "engine:log",
     "engine:stone",
     "engine:copper_bar",
     "engine:hho_cell",
+    "engine:uranium_ore",
+    "engine:oil_barrel",
+    "engine:gas_cell",
 ];
 
 pub const ORE: usize = 0;
@@ -74,6 +82,14 @@ pub const BAR: usize = 3;
 /// anything: it is water and electrodes and patience, which is exactly why
 /// a town can run *out* of it in a way it can never run out of stone.
 pub const HHO: usize = 4;
+/// The deep three. Nothing on the network *makes* any of them: no town
+/// extracts uranium, and no town has a well. Every barrel in every book on
+/// the frontier came off a player's pile, which is what makes these the
+/// first goods where the player is the supply rather than another trader on
+/// it — and why they are dear everywhere until somebody floods a town.
+pub const URANIUM: usize = 5;
+pub const OIL: usize = 6;
+pub const GAS: usize = 7;
 
 /// Ticks per catch-up step. Thirty seconds of game time at eight ticks a
 /// second, so a full day of neglect is forty steps.
@@ -86,7 +102,7 @@ const TARGET: f32 = 400.0;
 const CAPACITY: f32 = 1_200.0;
 
 /// What each good is worth to a town holding exactly [`TARGET`] of it.
-const BASE_PRICE: [f32; GOODS.len()] = [10.0, 4.0, 3.0, 60.0, 34.0];
+const BASE_PRICE: [f32; GOODS.len()] = [10.0, 4.0, 3.0, 60.0, 34.0, 190.0, 24.0, 30.0];
 
 /// How far price may swing from its reference. A glutted market still pays
 /// something and a desperate one is still affordable — a shock should be
@@ -152,10 +168,10 @@ impl Market {
 fn extraction(speciality: Speciality) -> [f32; GOODS.len()] {
     match speciality {
         // A camp built around a hole: ore and the spoil that comes with it.
-        Speciality::Mine => [0.030, 0.0, 0.020, 0.0, 0.0],
+        Speciality::Mine => [0.030, 0.0, 0.020, 0.0, 0.0, 0.0, 0.0, 0.0],
         // Timber from the country around it.
-        Speciality::Depot => [0.0, 0.018, 0.0, 0.0, 0.0],
-        Speciality::Refinery => [0.0, 0.004, 0.006, 0.0, 0.0],
+        Speciality::Depot => [0.0, 0.018, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        Speciality::Refinery => [0.0, 0.004, 0.006, 0.0, 0.0, 0.0, 0.0, 0.0],
     }
 }
 
@@ -163,12 +179,12 @@ fn extraction(speciality: Speciality) -> [f32; GOODS.len()] {
 fn conversion(speciality: Speciality) -> Option<([f32; GOODS.len()], usize, f32)> {
     match speciality {
         // Ore and stone in, bars out. The reason a refinery is worth visiting.
-        Speciality::Refinery => Some(([0.030, 0.0, 0.012, 0.0, 0.0], BAR, 0.010)),
+        Speciality::Refinery => Some(([0.030, 0.0, 0.012, 0.0, 0.0, 0.0, 0.0, 0.0], BAR, 0.010)),
         // A depot runs the cell bank: bars in — electrodes wear out the same
         // for a town as for a player — and fuel out. So the one place that
         // *makes* fuel is not the one place that burns most of it, which is
         // what gives the network something to haul.
-        Speciality::Depot => Some(([0.0, 0.0, 0.0, 0.004, 0.0], HHO, 0.014)),
+        Speciality::Depot => Some(([0.0, 0.0, 0.0, 0.004, 0.0, 0.0, 0.0, 0.0], HHO, 0.014)),
         _ => None,
     }
 }
@@ -178,11 +194,15 @@ fn consumption(speciality: Speciality) -> [f32; GOODS.len()] {
     match speciality {
         // Props and fires — and the cutting gear, which is the point of the
         // whole loop: a mine is the town that stops when the fuel does.
-        Speciality::Mine => [0.0, 0.012, 0.0, 0.0, 0.016],
+        // Oil for the cutting gear and gas for the compressors: a mine
+        // burns both, which is why a mine is where a well pays best.
+        Speciality::Mine => [0.0, 0.012, 0.0, 0.0, 0.016, 0.0, 0.009, 0.011],
         // A depot's whole business is moving finished goods onward.
-        Speciality::Depot => [0.004, 0.006, 0.002, 0.012, 0.004],
+        Speciality::Depot => [0.004, 0.006, 0.002, 0.012, 0.004, 0.0, 0.005, 0.005],
         // Furnaces run hot on it.
-        Speciality::Refinery => [0.0, 0.008, 0.0, 0.002, 0.010],
+        // The refinery is the only place on the frontier with any use for
+        // uranium at all, and it uses it slowly.
+        Speciality::Refinery => [0.0, 0.008, 0.0, 0.002, 0.010, 0.002, 0.011, 0.007],
     }
 }
 
@@ -207,6 +227,10 @@ pub fn opening_books(site: &TownSite) -> Market {
             (Speciality::Depot, BAR) => 0.5,
             (Speciality::Depot, HHO) => 1.5,
             (Speciality::Mine, HHO) | (Speciality::Refinery, HHO) => 0.45,
+            // The deep three: the network has no source for any of them, so
+            // every town opens nearly out and pays accordingly.
+            (_, URANIUM) => 0.06,
+            (_, OIL) | (_, GAS) => 0.18,
             _ => 1.0,
         };
         *slot = (TARGET * spread * bias).min(CAPACITY);

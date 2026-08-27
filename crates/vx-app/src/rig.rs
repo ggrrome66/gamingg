@@ -160,6 +160,54 @@ impl Rig {
         }
     }
 
+    /// The thing that comes when a mine runs loud.
+    ///
+    /// Built wrong on purpose: long low body, too many legs for its size,
+    /// no head worth the name. It reads as *not a person* at fifty blocks in
+    /// lamplight, which is the only job the shape has — every other thing
+    /// with legs in this game is somebody you could talk to.
+    pub fn stalker() -> Self {
+        let hip = 0.9;
+        let body = 1.4;
+        Rig {
+            parts: vec![
+                // Four long legs, splayed.
+                Part::fixed(
+                    Vec3::new(0.34, hip * 0.5, 0.30),
+                    Vec3::new(0.10, hip, 0.10),
+                    slot::TREAD,
+                ),
+                Part::fixed(
+                    Vec3::new(0.34, hip * 0.5, -0.30),
+                    Vec3::new(0.10, hip, 0.10),
+                    slot::TREAD,
+                ),
+                Part::fixed(
+                    Vec3::new(-0.34, hip * 0.55, 0.30),
+                    Vec3::new(0.10, hip * 1.1, 0.10),
+                    slot::TREAD,
+                ),
+                Part::fixed(
+                    Vec3::new(-0.34, hip * 0.55, -0.30),
+                    Vec3::new(0.10, hip * 1.1, 0.10),
+                    slot::TREAD,
+                ),
+                // The body: long, low, and slung between them.
+                Part::fixed(
+                    Vec3::new(0.0, hip + 0.18, 0.0),
+                    Vec3::new(body, 0.34, 0.5),
+                    slot::BUNKER_SHELL,
+                ),
+                // A blunt snout where a head should be.
+                Part::fixed(
+                    Vec3::new(body * 0.55, hip + 0.16, 0.0),
+                    Vec3::new(0.34, 0.24, 0.3),
+                    slot::RUSTED_METAL,
+                ),
+            ],
+        }
+    }
+
     /// The player, seen from behind in third person.
     ///
     /// Deliberately not a villager: same build, but a hi-vis work jacket, a
@@ -333,6 +381,10 @@ mod tests {
         assert_eq!(flier.parts.iter().filter(|part| part.spin == Some(Spin::Yaw)).count(), 1);
 
         assert_eq!(Rig::hand_drill().parts.len(), 4);
+        // Four legs and a body that is not a person's.
+        let stalker = Rig::stalker();
+        assert_eq!(stalker.parts.len(), 6);
+        assert_eq!(stalker.parts.iter().filter(|part| part.spin.is_some()).count(), 0);
         assert_eq!(Rig::launcher().parts.len(), 5);
         let kestrel = Rig::kestrel();
         assert_eq!(kestrel.parts.len(), 5);

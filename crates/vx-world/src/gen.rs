@@ -45,6 +45,19 @@ pub struct TerrainBlocks {
     pub water: BlockId,
     pub bedrock: BlockId,
     pub copper_ore: BlockId,
+    /// The deep ore. Harder than copper, worth far more, and hot enough that
+    /// standing in a face of it is a decision rather than a chore.
+    pub uranium_ore: BlockId,
+    /// Rock with oil in it, and shale with gas in it. Neither is worth much
+    /// a block at a time — they are what a *field* looks like when something
+    /// cuts into it, and the machine that makes them pay stands on top.
+    pub oil_sand: BlockId,
+    pub gas_shale: BlockId,
+    /// A drum of crude and a bottle of well gas: what a well lifts.
+    pub oil_barrel: BlockId,
+    pub gas_cell: BlockId,
+    /// The wellhead itself: printed, stood on the ground, and then patient.
+    pub wellhead: BlockId,
     pub container: BlockId,
     pub plank: BlockId,
     pub roof: BlockId,
@@ -208,6 +221,23 @@ impl TerrainBlocks {
                 BlockDef::uniform("engine:footing", 41)
                     .with_hardness(Some(FORTIFIED_HARDNESS)),
             ),
+            // Twice copper's hardness: the deep ore does not come out of the
+            // wall in an afternoon, which is what keeps a uranium face a
+            // place you have to *stay*, and staying is what costs you.
+            uranium_ore: register(
+                BlockDef::uniform("engine:uranium_ore", 42).with_hardness(Some(5.0)),
+            ),
+            // Saturated rock cuts about like the stone around it. A player
+            // who digs into a field by hand should feel nothing special —
+            // the value was never in the block.
+            oil_sand: register(BlockDef::uniform("engine:oil_sand", 43).with_hardness(Some(1.8))),
+            gas_shale: register(BlockDef::uniform("engine:gas_shale", 44).with_hardness(Some(2.0))),
+            // Soft: goods are carried, not built into anything.
+            oil_barrel: register(
+                BlockDef::uniform("engine:oil_barrel", 45).with_hardness(Some(0.9)),
+            ),
+            gas_cell: register(BlockDef::uniform("engine:gas_cell", 46).with_hardness(Some(0.8))),
+            wellhead: register(BlockDef::uniform("engine:wellhead", 47).with_hardness(Some(1.5))),
         }
     }
 
@@ -249,6 +279,12 @@ impl TerrainBlocks {
             rampart: registry.id_of("engine:rampart")?,
             vault: registry.id_of("engine:vault")?,
             footing: registry.id_of("engine:footing")?,
+            uranium_ore: registry.id_of("engine:uranium_ore")?,
+            oil_sand: registry.id_of("engine:oil_sand")?,
+            gas_shale: registry.id_of("engine:gas_shale")?,
+            oil_barrel: registry.id_of("engine:oil_barrel")?,
+            gas_cell: registry.id_of("engine:gas_cell")?,
+            wellhead: registry.id_of("engine:wellhead")?,
         })
     }
 }
@@ -518,6 +554,16 @@ impl TerrainGenerator {
 
         // Gather the ore bodies reaching this chunk once. Hashing the deposit
         // lattice per block would cost far more than the terrain itself.
+        // And the fluid bodies, gathered the same way off their own much
+        // coarser lattice. Most chunks in the world come back with an empty
+        // list, which is the cheapest possible answer to "is there a field
+        // under here" and the reason a well is worth surveying for.
+        let reservoirs = crate::reservoir::reservoirs_overlapping(
+            self.seed,
+            origin,
+            BlockPos::new(origin.x + CHUNK_SIZE, CHUNK_HEIGHT, origin.z + CHUNK_SIZE),
+        );
+
         let deposits = deposits_overlapping(
             self.seed,
             origin,
@@ -535,6 +581,7 @@ impl TerrainGenerator {
                     [world_x, world_z],
                     surface,
                     &deposits,
+                    &reservoirs,
                     &sites,
                     &bunkers,
                 );
@@ -637,6 +684,7 @@ impl TerrainGenerator {
         world: [i32; 2],
         surface: i32,
         deposits: &[Deposit],
+        reservoirs: &[crate::reservoir::Reservoir],
         sites: &[TownSite],
         bunkers: &[crate::bunker::BunkerSite],
     ) {
@@ -679,26 +727,56 @@ impl TerrainGenerator {
                 && crate::caves::carved(self.seed, world_x, y, world_z, surface)
         };
 
-        // Rock, with ore wherever a body reaches. Restricting ore to what would
-        // otherwise be stone or soil is what guarantees it never hangs in air.
+        // What the rock at a depth is made of. Ore wins over saturated rock
+        // where the two overlap: a vein cuts *through* a field, which is the
+        // way round that leaves both legible in a cut face — and restricting
+        // both to what would otherwise be stone is what guarantees neither
+        // ever hangs in air.
+        let rock_at = |y: i32| -> BlockId {
+            if in_village {
+                return blocks.stone;
+            }
+            let pos = BlockPos::new(world_x, y, world_z);
+            match ore_at(deposits, pos) {
+                Some(crate::ore::OreKind::Copper) => blocks.copper_ore,
+                Some(crate::ore::OreKind::Uranium) => blocks.uranium_ore,
+                None => match crate::reservoir::fluid_at(reservoirs, pos) {
+                    Some(crate::reservoir::Fluid::Oil) => blocks.oil_sand,
+                    Some(crate::reservoir::Fluid::Gas) => blocks.gas_shale,
+                    None => blocks.stone,
+                },
+            }
+        };
+
         for y in 1..stone_top {
             if hollow(y) {
                 continue;
             }
-            let has_ore =
-                !in_village && ore_at(deposits, BlockPos::new(world_x, y, world_z)).is_some();
-            place(chunk, y, if has_ore { blocks.copper_ore } else { blocks.stone });
+            place(chunk, y, rock_at(y));
         }
 
-        // Overburden. A body reaching up through here is on its way to becoming
-        // a visible outcrop.
+        // Overburden. A body reaching up through here is on its way to
+        // becoming a visible outcrop. Only copper ever gets this far — the
+        // deep ore and the fluid bodies are banded far below — so the soil
+        // looks exactly as it always did.
         for y in stone_top.max(1)..surface {
             if hollow(y) {
                 continue;
             }
-            let has_ore =
-                !in_village && ore_at(deposits, BlockPos::new(world_x, y, world_z)).is_some();
-            place(chunk, y, if has_ore { blocks.copper_ore } else { subsoil });
+            let ore = if in_village {
+                None
+            } else {
+                ore_at(deposits, BlockPos::new(world_x, y, world_z))
+            };
+            place(
+                chunk,
+                y,
+                match ore {
+                    Some(crate::ore::OreKind::Copper) => blocks.copper_ore,
+                    Some(crate::ore::OreKind::Uranium) => blocks.uranium_ore,
+                    None => subsoil,
+                },
+            );
         }
 
         // The surface block itself only shows ore when the body also fills the
@@ -709,7 +787,11 @@ impl TerrainGenerator {
         let surface_pos = BlockPos::new(world_x, surface, world_z);
         let outcrop = !in_village && breaks_surface(deposits, surface_pos);
         if !mouth {
-            place(chunk, surface, if outcrop { blocks.copper_ore } else { top });
+            let showing = match ore_at(deposits, surface_pos) {
+                Some(crate::ore::OreKind::Uranium) => blocks.uranium_ore,
+                _ => blocks.copper_ore,
+            };
+            place(chunk, surface, if outcrop { showing } else { top });
         }
 
         // A scattering of grass tufts on plain grass tops — never on an
@@ -1252,6 +1334,82 @@ mod tests {
         let (_, b) = generator(555);
         let pos = ChunkPos::new(2, -3);
         assert_eq!(a.generate(pos), b.generate(pos));
+    }
+
+    #[test]
+    fn a_field_shows_as_saturated_rock_where_a_hole_reaches_it() {
+        // The world's half of the well's bargain: if `reservoir_under` says
+        // there is oil below this column, digging down that column has to
+        // actually meet oil sand. Otherwise the survey is a rumour and the
+        // machine that trusts it is broken.
+        let seed = 909;
+        let (registry, generator) = generator(seed);
+        let oil = registry.id_of("engine:oil_sand").unwrap();
+        let gas = registry.id_of("engine:gas_shale").unwrap();
+
+        let mut struck = 0;
+        for reservoir in crate::reservoir::reservoirs_overlapping(
+            seed,
+            BlockPos::new(-2000, 0, -2000),
+            BlockPos::new(2000, CHUNK_HEIGHT, 2000),
+        ) {
+            let x = reservoir.centre[0].round() as i32;
+            let z = reservoir.centre[2].round() as i32;
+            if crate::reservoir::reservoir_under(seed, x, z).is_none() {
+                continue;
+            }
+            let chunk = generator.generate(ChunkPos::new(
+                x.div_euclid(CHUNK_SIZE),
+                z.div_euclid(CHUNK_SIZE),
+            ));
+            let saturated = (1..CHUNK_HEIGHT).any(|y| {
+                let block = chunk.get(
+                    LocalPos::new(x.rem_euclid(CHUNK_SIZE), y, z.rem_euclid(CHUNK_SIZE)).unwrap(),
+                );
+                block == oil || block == gas
+            });
+            assert!(saturated, "a strike at {x},{z} generated no saturated rock");
+            struck += 1;
+        }
+        assert!(struck > 0, "no field in four kilometres of world");
+    }
+
+    #[test]
+    fn nothing_deep_reaches_the_daylight() {
+        // Uranium and the fluid bodies are banded below the overburden on
+        // purpose: a player who never goes underground never meets either.
+        // This is the whole of the "opt in by depth" promise, checked
+        // against generated blocks rather than against the lattices that
+        // claim to place them.
+        let seed = 2024;
+        let (registry, generator) = generator(seed);
+        let deep = [
+            registry.id_of("engine:uranium_ore").unwrap(),
+            registry.id_of("engine:oil_sand").unwrap(),
+            registry.id_of("engine:gas_shale").unwrap(),
+        ];
+
+        for cx in -3..3 {
+            for cz in -3..3 {
+                let pos = ChunkPos::new(cx, cz);
+                let chunk = generator.generate(pos);
+                let origin = pos.origin();
+                for x in 0..CHUNK_SIZE {
+                    for z in 0..CHUNK_SIZE {
+                        let surface = generator.height_at(origin.x + x, origin.z + z);
+                        for y in (surface - 2).max(1)..CHUNK_HEIGHT {
+                            let block = chunk.get(LocalPos::new(x, y, z).unwrap());
+                            assert!(
+                                !deep.contains(&block),
+                                "a deep resource surfaced at {},{y},{}",
+                                origin.x + x,
+                                origin.z + z
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

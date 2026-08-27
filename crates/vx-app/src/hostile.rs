@@ -300,7 +300,7 @@ impl Pathing {
     }
 
     /// The next cell on the route from `from`, when the route knows one.
-    fn step(&self, world: &World, from: Vec3) -> Option<BlockPos> {
+    pub(crate) fn step(&self, world: &World, from: Vec3) -> Option<BlockPos> {
         let feet = BlockPos::new(
             from.x.floor() as i32,
             from.y.floor() as i32,

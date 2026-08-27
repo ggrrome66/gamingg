@@ -105,7 +105,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 27 | `6a2eeef` | Micro-on-damage: a block gains a 4³ interior only when violence touches it, one `u64` a wound, so walls chew where they are shot, rays pass through the holes and feet never do |
 | 28 | `4665d04` | Hostiles and health: a warrant sends deputies who believe rather than know, search an occupancy map, take cover, never fire through each other, and break or surrender on nerve |
 | 29 | `12425b4` | Bunkers occupied: every shelter holds a squad derived from its own seed, hostiles route on the drones' flow fields, noise reaches them as 32-metre zones, pairs move under overwatch, and a surrendered holder can be taken in for the board's pay |
-| 30 | _this_ | Factions: the Compact and the Holdouts remember what the bounty board forgets — standing shades prices, buys a challenge before a volley, and puts the spoofers in the other side's hands |
+| 30 | `a4248b3` | Factions: the Compact and the Holdouts remember what the bounty board forgets — standing shades prices, buys a challenge before a volley, and puts the spoofers in the other side's hands |
+| 31 | _this_ | Uranium, oil and gas, and the thing that hunts by ear: a deep ore that pays for itself in dose, fluid reservoirs worked by a wellhead that keeps paying until it stops, and a stalker that is told a thirty-two metre cell and has to find you inside it |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1640,6 +1641,85 @@ civic layer.
 
 ---
 
+## Shipped — Stage 31: uranium, oil and gas, and what came up with them
+
+**Three resources, and only one of them is an ore.** Uranium joins the ore
+lattice as data — a band constant and a kind in the table, exactly what the
+first ore module promised the second one would cost. Oil and gas are not ore
+at all: they are bodies hundreds of blocks across on their own lattice eight
+times coarser, stamped into the deep stone as saturated rock, and worthless
+one block at a time. That difference is the round. A vein is a thing you cut;
+a field is a thing you *stand a machine over and leave*.
+
+**The well is the first machine that keeps paying.** Printed at the
+fabricator, carried out, spudded in for casing and cement charged up front,
+drilling on the journal's clock at fourteen ticks a block of depth, then
+lifting a unit every four seconds into the base pile until the body is empty.
+Everything about it is constant, because it lives inside `Mining::advance` —
+the wear lesson from stage 26 and the tank lesson from stage 20, restated: a
+machine whose arithmetic decides what is on the pile decides how long the
+fleet turns, and how long the fleet turns is what the world hash covers. So
+`Spud` is an order the log carries, the world is consulted exactly once at
+the spud, and both sides sink the same hole.
+
+**A dry hole is a place, not a roll.** `reservoir_under` is pure in the seed
+and the column, so the same ground is dry in every session of a world. The
+panel shows whether the mud log has a trace before the casing is spent; what
+fluid, how much, and how deep are what the drilling buys. A duster costs
+exactly what a strike costs, which is the whole weight behind the word
+*commitment*.
+
+**Gas is the second fuel, and honestly worse.** A canister of well gas is
+worth three fifths of a canister of oxyhydrogen. The tank reaches for the
+good stuff first and falls back on gas by itself, so a player who went to the
+trouble of splitting water never has it quietly burned. What gas buys is
+independence from lakes — the first answer this game has offered to "I am two
+kilometres from water and out of fuel" that is not "walk back".
+
+**Uranium costs you something to be near.** Exposure is a sum over the bare
+uranium within five blocks, falling with the square of the distance, so every
+lever is physical: back off, wall the face up, send a machine, or print the
+lead lining — which is multiplicative and floored at a third, because
+shielding that reaches zero is not shielding, it is permission. Dose spends
+health, health has been live-only since stage 28, and none of it reaches the
+oracle: two sessions with identical journals can end with different dose and
+the same world hash.
+
+**The stalker lands, and it is two brains.** The hunt note's last part,
+built as the note specified. A director that knows the truth and may only
+emit `HINT_GRADE` cells — the same thirty-two metre quantiser the shelters'
+director uses, so the rule about lying to your own monsters is written once —
+and a creature that closes the rest with `belief.rs`, the same occupancy
+search a posse runs. Hints are weighted by noise at the note's `HINT_NOISE_W`,
+and machines are the loudest thing in the world, so the tension attaches to
+the mining loop rather than to a corridor. Heat fades, and four times faster
+in daylight. Nothing arrives inside `NO_SPAWN_R`. Ninety seconds of contact
+force a sixty-second break, which is the difference between a monster and a
+rhythm. Every mode transition lands a line, because intelligence a player
+cannot perceive is intelligence wasted.
+
+**Journal VERSION 20, and it is two changes at once** — the ground moved
+(uranium below the overburden, fluid bodies in the deep stone) and `Spud`
+joined the commands. The same shape as eight and fifteen.
+
+**Surface.** `wells` at the terminal lists every hole and what it is doing;
+the wellhead panel is one row and one key, because a hole is a decision
+rather than a menu; the HUD carries the dose and what is out there in the
+dark; F3 gained the deep's heat, the dose and the well count. Three new
+capture fixtures — and a third variation on the fixture trap, recorded here
+so the next round does not find it again: `set_objects` culls against the
+*last uploaded frustum*, so a scene built before the camera is pointed at it
+is a scene the culler quietly throws away.
+
+**Deliberately not in 31:** any fluid simulation — nothing flows, and a
+reservoir is rock with something in it; refining oil into anything (it is a
+trade good and the towns want it); wells that can be worked by the fleet
+rather than by hand; more than one stalker, and anything it does to the
+world (it damages the player, never the rock); uranium in the fabricator's
+catalogue, which waits for something worth enriching it *for*.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -1726,7 +1806,7 @@ part has to attach to, which maps onto the arc as it now stands:
 | `belief.rs`, the occupancy search, the watchdog | 28 — shipped | lands with the first hostile — there is nothing to hold a belief until then |
 | Fire discipline and lane costs | 28 — shipped | needs a *pair* of hostiles before "do not shoot your friend" can be violated |
 | The director and its pacing budget | 29 — the zone-hint half shipped; interior pacing waits for room fighting | arrives with the occupied bunkers it paces |
-| The stalker, and noise-weighted hints | 31 | waits until the deep caves have somewhere worth being afraid of |
+| The stalker, and noise-weighted hints | 31 — shipped | landed with the deep resources, and hunts by the noise the mine working them makes |
 
 Its tests come with it, and one is a house rule restated: **all of it
 replays** — a firefight's journal reproduces every mode transition at the
@@ -1827,22 +1907,17 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-Renumbered again after the townsfolk (23), the controller (24), the
-workshop (25), wear (26) and micro-on-damage (27) took their slots: the
-plans kept their order, the stages moved down to make room. The hunt note
-above supplied the engine for 28, which has shipped; its director lands with
-29 and the stalker waits for 31 — and it
-now arrives into a world where cover already degrades, which is exactly why
-the micro note asked to land before the hostiles rather than after them.
+The hunt note above is finished: its engine landed in 28, its director half
+in 29, and its stalker in 31 alongside the deep resources it hunts you
+through. What is left of the plan is one toy and the civic layer.
 
 | Stage | What | Why here |
 |---|---|---|
-| 31 | Uranium, oil, gas | New resource *kinds* (fluids, wells) — a bigger worldgen change than more ore. The hunt note's stalker lands here too: it waits until the deep places are worth being afraid of, and hunts by the noise a working mine makes |
 | 32 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 30.
+The whole game at a glance, as of stage 31.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -1917,16 +1992,26 @@ and the Holdouts as standings the bounty board cannot settle — captures,
 kills, crimes, trade and gifts each moving two opinions, prices shaded a
 few percent, a challenge-and-grace truce at Neutral, and grudged shelters
 jamming the scout with the spoofers the intrusion round taught);
+uranium, oil and gas (a deep ore banded below the overburden and hot enough
+that a face is a place you visit rather than live in, shielding printed
+against it; fluid reservoirs on their own coarse lattice, worked by a
+printed wellhead that spuds in for casing, drills on the journal's clock and
+then lifts into the pile until the body is empty; a dry hole that is a place
+rather than a roll; and well gas as a second, honestly worse fuel that needs
+no lake);
+the stalker (a director that knows the truth and may say only a 32-metre
+cell, a creature that closes the rest on the same occupancy search the law
+uses, hints weighted by the noise a working mine makes, a floor distance it
+never arrives inside, and a pressure budget that makes it break off);
 an F3 debug readout in every build (engine vitals, the journal clock, the
-fleet, the hostiles' belief and both standings — diagnostics that change
-nothing they report on, unlike the gold panel, which is why one ships and
-the other is compiled out);
+fleet, the hostiles' belief, your dose, your wells, how roused the deep is
+and both standings — diagnostics that change nothing they report on, unlike
+the gold panel, which is why one ships and the other is compiled out);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** uranium, oil and gas with the stalker; the
-pocket arcade; the civic layer B2 (offices, the NPC economic loop, the warrant chain) and
-B3 (elections on trade goodwill); factions; uranium/oil/gas; the pocket
-arcade.
+**Planned, in arc order:** the pocket arcade; the civic layer B2 (offices,
+the NPC economic loop, the warrant chain) and B3 (elections on trade
+goodwill).
 
 **Outstanding engineering:** floating-origin rebase; journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the

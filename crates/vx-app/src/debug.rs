@@ -72,6 +72,12 @@ pub struct DebugContent {
     pub bounty: u64,
     pub compact: &'static str,
     pub holdouts: &'static str,
+    /// Holes sunk, and how many of them are still lifting.
+    pub wells: (usize, usize),
+    /// Rads a second at the body right now, and the dose carried.
+    pub rads: (f32, f32),
+    /// How roused the deep is, 0 to 1, and what it is doing if anything.
+    pub dark: (f32, &'static str),
 }
 
 /// One row: a dim label and a value.
@@ -95,7 +101,7 @@ impl Rows {
 /// Rows the panel always draws, plus one optional belief row. The height
 /// is derived, not typed — the fabricator panel's overflow taught that
 /// lesson for everybody.
-const FIXED_ROWS: u32 = 14;
+const FIXED_ROWS: u32 = 17;
 pub const DEBUG_HEIGHT: u32 = 12 + (FIXED_ROWS + 1) * LINE_HEIGHT + 4 * 3 + 8;
 
 /// Draw the readout. Pure in its inputs.
@@ -222,6 +228,25 @@ pub fn render_debug(content: &DebugContent) -> Vec<u8> {
         &format!("TOWNS {}   SHELTERS {}", content.compact, content.holdouts),
         TEXT,
     );
+    rows.line(
+        "DOSE",
+        &format!("{:.0} RADS   {:.1}/S", content.rads.1, content.rads.0),
+        if content.rads.1 >= crate::dose::BURN_AT {
+            WARN
+        } else {
+            TEXT
+        },
+    );
+    rows.line(
+        "THE DEEP",
+        &format!("HEAT {:.0}%   {}", content.dark.0 * 100.0, content.dark.1),
+        if content.dark.1 == "GONE" { TEXT } else { WARN },
+    );
+    rows.line(
+        "WELLS",
+        &format!("{} SUNK   {} PUMPING", content.wells.0, content.wells.1),
+        TEXT,
+    );
     rows.line("F3", "CLOSES", DIM);
 
     rows.pixels
@@ -262,6 +287,9 @@ mod tests {
             bounty: 120,
             compact: "WARM",
             holdouts: "COLD",
+            wells: (4, 2),
+            rads: (18.4, 132.0),
+            dark: (0.8, "HUNTING"),
         }
     }
 

@@ -20,6 +20,7 @@ mod controller;
 mod debug;
 mod device;
 mod disposition;
+mod dose;
 mod economy;
 mod garage;
 mod garrison;
@@ -50,12 +51,14 @@ mod roost;
 mod scout;
 mod shop;
 mod skills;
+mod stalker;
 mod streaming;
 mod terminal;
 mod tuning;
 mod view;
 mod villagers;
 mod wear;
+mod well;
 mod wallet;
 
 use std::sync::Arc;
@@ -94,6 +97,8 @@ const TERM_SLOT: usize = 13;
 const PAD_SLOT: usize = 14;
 /// The F3 diagnostics readout.
 const DEBUG_SLOT: usize = 15;
+/// The wellhead's panel.
+const WELL_SLOT: usize = 16;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -227,6 +232,12 @@ struct Options {
     standing: bool,
     /// The F3 diagnostics readout, filled with a busy session.
     debug: bool,
+    /// A wellhead panel over a live field, mid-drill.
+    well: bool,
+    /// A uranium face, cut open, with the dose climbing.
+    hot: bool,
+    /// The thing in the deep, mid-hunt, in a gallery.
+    dark: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -270,6 +281,9 @@ fn parse_args() -> Result<Options, String> {
         held: false,
         standing: false,
         debug: false,
+        well: false,
+        hot: false,
+        dark: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -352,6 +366,9 @@ fn parse_args() -> Result<Options, String> {
             "--held" => options.held = true,
             "--standing" => options.standing = true,
             "--debug" => options.debug = true,
+            "--well" => options.well = true,
+            "--hot" => options.hot = true,
+            "--dark" => options.dark = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -888,6 +905,9 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             bounty: 120,
             compact: "WARM",
             holdouts: "COLD",
+            wells: (3, 1),
+            rads: (12.5, 88.0),
+            dark: (0.6, "HUNTING"),
         };
         let pixels = debug::render_debug(&content);
         let panel_width = debug::DEBUG_WIDTH as f32 * shop::SHOP_SCALE;
@@ -1352,6 +1372,8 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             kestrel: None,
             fuel: options.hho.then(|| "HHO 12".to_string()),
             condition: options.posse.then(|| "HITS 4/6".to_string()),
+            dose: options.hot.then(|| "DOSE 74%".to_string()),
+            dark: options.dark.then(|| "CLOSING - 2/8".to_string()),
             deputies: usize::from(options.posse) * 3,
             optic: options.optic.as_deref().and_then(|choice| match choice {
                 "lamp" => Some("LAMP"),
@@ -1708,6 +1730,355 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         }
     }
 
+    // The wellhead, over a field the seed actually put there. Late like the
+    // posse fixture, and for the same reason.
+    if options.well {
+        // The nearest field to `--at`, off the lattice itself rather than by
+        // sampling columns: bodies are hundreds of blocks apart, and a
+        // sampler coarse enough to be quick is coarse enough to miss one.
+        let bodies = vx_world::reservoir::reservoirs_overlapping(
+            world.seed(),
+            vx_core::BlockPos::new(options.at.0 - 2_400, 0, options.at.1 - 2_400),
+            vx_core::BlockPos::new(options.at.0 + 2_400, 128, options.at.1 + 2_400),
+        );
+        let nearest = bodies.into_iter().min_by(|left, right| {
+            let span = |body: &vx_world::reservoir::Reservoir| {
+                let dx = body.centre[0] - options.at.0 as f32;
+                let dz = body.centre[2] - options.at.1 as f32;
+                dx * dx + dz * dz
+            };
+            span(left).total_cmp(&span(right))
+        });
+        let body = nearest.ok_or("no oil or gas within two kilometres of --at")?;
+        let (x, z) = (
+            body.centre[0].round() as i32,
+            body.centre[2].round() as i32,
+        );
+
+
+        // The head may be kilometres from `--at`: bring the ground with it.
+        let centre = vx_core::BlockPos::new(x, 0, z).chunk();
+        world.load_around(centre, 6);
+        let ground = world.surface_y(x, z).unwrap_or(80);
+        let head = vx_core::BlockPos::new(x, ground + 1, z);
+        // A wellhead stands on a pad. Levelling one is what a crew would do
+        // anyway, and it is also the difference between a picture of a
+        // machine and a picture of a hillside.
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        for dx in -6..=6 {
+            for dz in -6..=6 {
+                let column = vx_core::BlockPos::new(x + dx, ground, z + dz);
+                world.set_block(column, stone);
+                for dy in 1..14 {
+                    world.set_block(
+                        vx_core::BlockPos::new(x + dx, ground + dy, z + dz),
+                        vx_core::BlockId::AIR,
+                    );
+                }
+            }
+        }
+        if let Some(id) = world.registry().id_of("engine:wellhead") {
+            world.set_block(head, id);
+        }
+        remesh_all(&context, &mut renderer, &mut world);
+
+        // A real hole, sunk through the real machine and drilled most of the
+        // way down, so the panel shows a percentage the code chose.
+        let mut pile = vx_agent::Stockpile::default();
+        pile.add(well::CASING.0, 20);
+        pile.add(well::CEMENT.0, 200);
+        let mut holes = well::Wells::default();
+        holes.spud(head, world.seed(), &mut pile)?;
+        let total = holes.at(head).map_or(0, |hole| hole.total_drill);
+        holes.tick(total * 3 / 5, &mut pile);
+
+        let content = well::WellContent {
+            at: head,
+            trace: true,
+            hole: holes.at(head).copied(),
+            refusal: None,
+            feedback: Some("SPUDDED IN - THE STRING IS GOING DOWN".into()),
+        };
+        let pixels = well::render_well(&content);
+        let panel_width = well::WELL_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = well::WELL_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            WELL_SLOT,
+            &context.device,
+            &context.queue,
+            (well::WELL_WIDTH, well::WELL_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+
+        let at = glam::Vec3::new(head.x as f32 + 0.5, head.y as f32, head.z as f32 + 0.5);
+        // Camera first: `set_objects` culls against the last uploaded
+        // frustum, so a scene built before the camera moves is a scene the
+        // culler throws away.
+        // Framed off-centre on purpose: the panel is drawn in the middle of
+        // the screen, so the machine it belongs to has to live beside it.
+        camera.position = at + glam::Vec3::new(7.0, 4.0, 9.0);
+        look_at(&mut camera, at + glam::Vec3::new(4.0, 1.0, 5.0));
+        renderer.update_camera(&context.queue, &camera);
+
+        let mut objects = Vec::new();
+        objects.extend(Rig::player().objects(
+            at + glam::Vec3::new(3.5, -1.0, 3.0),
+            std::f32::consts::PI * 1.15,
+            0.0,
+        ));
+        renderer.set_objects(&context.device, &context.queue, &objects);
+        println!(
+            "well capture: {} at {x},{z}, {} in the ground, drilled {}%",
+            body.fluid.name(),
+            body.volume(),
+            holes.at(head).map_or(0.0, |hole| hole.drilled() * 100.0)
+        );
+    }
+
+    // A uranium face. Staged, and worth saying so: the world never puts the
+    // deep ore this close to daylight, so the fixture cuts a bench into the
+    // hillside and lines its back wall — what the same face looks like at
+    // the bottom of a decline, where a camera cannot see anything at all.
+    if options.hot {
+        let hot = world
+            .registry()
+            .id_of("engine:uranium_ore")
+            .ok_or("no uranium ore registered")?;
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let wall_z = options.at.1 + 6;
+        let ground = world.surface_y(options.at.0, wall_z).unwrap_or(80);
+
+        for x in options.at.0 - 5..=options.at.0 + 5 {
+            for z in wall_z - 8..=wall_z {
+                for y in ground + 1..ground + 12 {
+                    world.set_block(vx_core::BlockPos::new(x, y, z), vx_core::BlockId::AIR);
+                }
+                world.set_block(vx_core::BlockPos::new(x, ground, z), stone);
+            }
+        }
+        // The face itself: ore in the middle, host rock around it, so the
+        // tile reads against something rather than filling the frame.
+        for x in options.at.0 - 4..=options.at.0 + 4 {
+            for y in ground + 1..=ground + 6 {
+                let ore = (options.at.0 - 3..=options.at.0 + 3).contains(&x)
+                    && (ground + 2..=ground + 5).contains(&y);
+                world.set_block(
+                    vx_core::BlockPos::new(x, y, wall_z),
+                    if ore { hot } else { stone },
+                );
+            }
+        }
+        remesh_all(&context, &mut renderer, &mut world);
+
+        let face = glam::Vec3::new(
+            options.at.0 as f32 + 0.5,
+            (ground + 3) as f32,
+            wall_z as f32 + 0.5,
+        );
+        // Camera first, then the scene: the culler works off the last
+        // uploaded frustum.
+        camera.position = face + glam::Vec3::new(2.5, 2.0, -7.0);
+        look_at(&mut camera, face);
+        renderer.update_camera(&context.queue, &camera);
+
+        let mut objects = Vec::new();
+        objects.extend(Rig::player().objects(
+            face + glam::Vec3::new(1.5, -3.0, -4.0),
+            0.0,
+            0.0,
+        ));
+        renderer.set_objects(&context.device, &context.queue, &objects);
+
+        // What standing here actually costs, run through the real dose so
+        // the readout is a measurement rather than a caption: a minute at
+        // the face, shielded by nothing.
+        let standing = face + glam::Vec3::new(1.5, -2.0, -2.5);
+        let rads = dose::exposure(&world, standing);
+        let mut carried = dose::Dose::default();
+        for _ in 0..600 {
+            carried.tick(rads, 0.1, 0);
+        }
+        let hud_skills = Skills::new();
+        let hud_pixels = hud::render_hud(&hud::HudContent {
+            skills: &hud_skills,
+            time: TimeOfDay::new(options.time),
+            status: Some("CUTTING THE FACE".to_string()),
+            drilling: Some(0.42),
+            level_up: None,
+            greeting: None,
+            reconnecting: false,
+            bounty: 0,
+            watched: false,
+            movement: hud::MovementReadout {
+                stance: "STAND",
+                stamina: 0.9,
+                load: 0.55,
+            },
+            ammo: None,
+            panicking: 0,
+            kestrel: None,
+            fuel: Some("HHO 9".to_string()),
+            condition: None,
+            dose: carried.readout(),
+            dark: None,
+            deputies: 0,
+            optic: Some("LAMP"),
+        });
+        renderer.set_overlay(
+            HUD_SLOT,
+            &context.device,
+            &context.queue,
+            (hud::HUD_WIDTH, hud::HUD_HEIGHT),
+            &hud_pixels,
+            vx_render::OverlayRect {
+                x: 10.0,
+                y: height as f32 - hud::HUD_HEIGHT as f32 * hud::HUD_SCALE - 10.0,
+                width: hud::HUD_WIDTH as f32 * hud::HUD_SCALE,
+                height: hud::HUD_HEIGHT as f32 * hud::HUD_SCALE,
+            },
+        );
+        println!(
+            "hot capture: {rads:.1} rads a second at the face, {:.0} carried after a minute",
+            carried.rads
+        );
+    }
+
+    // The thing in the deep, hunting. Everything below is the real director
+    // and the real creature: the fixture cuts a gallery and then gets out of
+    // the way.
+    if options.dark {
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let floor = 24;
+        // A straight gallery, a hundred blocks of it, buried deep enough
+        // that `is_deep` is satisfied along its whole length.
+        for x in options.at.0 - 110..=options.at.0 + 110 {
+            for z in options.at.1 - 5..=options.at.1 + 5 {
+                for y in floor..floor + 6 {
+                    world.set_block(vx_core::BlockPos::new(x, y, z), vx_core::BlockId::AIR);
+                }
+                // Floor, ceiling and walls all poured explicitly. A gallery
+                // with a hole in its roof is a gallery with daylight in it,
+                // and one lit block at the end of a dark corridor reads as a
+                // rendering bug rather than as rock.
+                world.set_block(vx_core::BlockPos::new(x, floor - 1, z), stone);
+                world.set_block(vx_core::BlockPos::new(x, floor + 6, z), stone);
+                world.set_block(vx_core::BlockPos::new(x, floor + 7, z), stone);
+            }
+            for z in [options.at.1 - 5, options.at.1 + 5] {
+                for y in floor..floor + 6 {
+                    world.set_block(vx_core::BlockPos::new(x, y, z), stone);
+                }
+            }
+        }
+        remesh_all(&context, &mut renderer, &mut world);
+
+        let player = glam::Vec3::new(
+            options.at.0 as f32 + 0.5,
+            floor as f32,
+            options.at.1 as f32 + 0.5,
+        );
+        let mut dark = stalker::TheDark::default();
+        let mut tells: Vec<String> = Vec::new();
+        // Cut rock until something comes, then keep cutting while it closes.
+        for step in 0..6_000 {
+            if step % 4 == 0 {
+                dark.hear(player + glam::Vec3::new(2.0, 0.0, 0.0), 0.6);
+            }
+            let report = dark.update(1.0 / 30.0, &world, player, 0xdeadbeef);
+            for line in report.tells {
+                if !tells.contains(&line) {
+                    tells.push(line);
+                }
+            }
+            let close = dark
+                .present()
+                .is_some_and(|it| (it.position - player).length() < 4.5);
+            if close {
+                break;
+            }
+        }
+
+        // The camera goes up *first*. `set_objects` culls against whatever
+        // frustum was last uploaded, so building the scene before pointing
+        // the camera at it quietly throws the scene away — the third
+        // variation on this fixture trap, after "run after the villagers'
+        // pass" and "remember to call `update_camera` at all".
+        let at = dark
+            .present()
+            .map_or(player + glam::Vec3::new(20.0, 0.0, 0.0), |it| it.position);
+        // Close enough that it fills the lamp cone: this is the last thing a
+        // player sees before it is on them, so the picture is that distance
+        // and not a safer one.
+        let towards = (at - player).normalize_or_zero();
+        camera.position = at - towards * 3.2 + glam::Vec3::Y * 1.45;
+        look_at(&mut camera, at + glam::Vec3::Y * 0.55);
+        renderer.update_camera(&context.queue, &camera);
+
+        // No player body in this one: the camera is standing where they
+        // are, and the picture is about what is coming up the gallery.
+        let mut objects = Vec::new();
+        if let Some(stalker) = dark.present() {
+            objects.extend(Rig::stalker().objects(stalker.position, stalker.yaw, 0.0));
+        }
+        renderer.set_objects(&context.device, &context.queue, &objects);
+
+        let mut console = terminal::Terminal::default();
+        console.toggle();
+        for line in tells.iter().take(4) {
+            console.say(terminal::Kind::Warn, line.clone());
+        }
+        if let Some(stalker) = dark.present() {
+            let (taken, of) = stalker.wounds();
+            console.say(
+                terminal::Kind::Note,
+                format!(
+                    "{} - {taken}/{of} - {:.0} BLOCKS OFF",
+                    stalker.mood.name(),
+                    (stalker.position - player).length()
+                ),
+            );
+        }
+        if !options.close {
+            let pixels = terminal::render_terminal(&console, false);
+            let panel_width = terminal::TERM_WIDTH as f32 * shop::SHOP_SCALE;
+            let panel_height = terminal::TERM_HEIGHT as f32 * shop::SHOP_SCALE;
+            renderer.set_overlay(
+                TERM_SLOT,
+                &context.device,
+                &context.queue,
+                (terminal::TERM_WIDTH, terminal::TERM_HEIGHT),
+                &pixels,
+                vx_render::OverlayRect {
+                    x: (width as f32 - panel_width) / 2.0,
+                    y: (height as f32 - panel_height) / 2.0,
+                    width: panel_width,
+                    height: panel_height,
+                },
+            );
+        }
+
+        // Down the gallery from behind the player, so the thing is coming at
+        // the camera the way it comes at you.
+        println!(
+            "dark camera {:.1},{:.1},{:.1} looking at {:.1},{:.1},{:.1}; player {:.1},{:.1},{:.1}",
+            camera.position.x, camera.position.y, camera.position.z,
+            at.x, at.y, at.z,
+            player.x, player.y, player.z
+        );
+        println!(
+            "dark capture: {} at {:.0} blocks, {} tells",
+            dark.present().map_or("NOTHING", |it| it.mood.name()),
+            dark.present().map_or(0.0, |it| (it.position - player).length()),
+            tells.len()
+        );
+    }
+
     if options.device {
         // The handheld's roster, over whatever the frame already shows.
         let mut mining = Mining::default();
@@ -1797,7 +2168,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             base_total: 340,
             town_name: Some("STONEHAVEN".into()),
             town_centre: Some((0, 0)),
-            stocks: [400.0, 200.0, 100.0, 40.0, 15.0],
+            stocks: [400.0, 200.0, 100.0, 40.0, 15.0, 2.0, 24.0, 31.0],
             tuning: &tuning,
             world_hash: None,
         };
@@ -1896,7 +2267,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             (terminal::Kind::Echo, "> SCOUT SORTIE -40 120"),
             (terminal::Kind::Note, "KESTREL AWAY TO -40 120"),
             (terminal::Kind::Note, "SALVAGED 18 COPPER BAR, 34 STONE"),
-            (terminal::Kind::Note, "FLEET DRY - NO HHO"),
+            (terminal::Kind::Note, "FLEET DRY - NO FUEL"),
             (terminal::Kind::Echo, "> FROBNICATE"),
             (terminal::Kind::Warn, "NO SUCH COMMAND: FROBNICATE"),
         ] {
@@ -2561,6 +2932,8 @@ struct Active {
     resuming: bool,
     /// The player's own body, drawn in third person.
     player_rig: Rig,
+    /// The shape of the thing in the deep. Built once, like every other rig.
+    stalker_rig: Rig,
     /// The handheld drill's shape, built once.
     hand_rig: Rig,
     /// The body a trade load borrows when one passes close enough to see.
@@ -2660,6 +3033,22 @@ struct Active {
     optics: optics::Optics,
     /// The machine that turns a lake into fuel.
     electrolyser: electrolysis::Electrolyser,
+    /// The wellhead panel: which head is open, and what it last said. The
+    /// holes themselves live on `Mining`, where the oracle carries them.
+    well_panel: well::Panel,
+    /// The deep, and whatever it has sent. Live-only like the posse: it
+    /// reads the world, spends health and says things, and never writes a
+    /// block or touches the pile.
+    dark: stalker::TheDark,
+    /// What the deep ore has done to you. Live-only, like the health it
+    /// spends: no journal ever hears about a dose.
+    dose: dose::Dose,
+    /// Seconds until the next exposure sample. The sum is over a box of a
+    /// thousand blocks, which is cheap but not free, and a body does not
+    /// move far in a quarter second.
+    dose_check: f32,
+    /// The last exposure sample, held between beats.
+    last_rads: f32,
     /// Every town's strongroom.
     banks: bank::Bank,
     /// Who in every town knows you, and how well: the friendship ledger.
@@ -3121,6 +3510,7 @@ impl App {
         Self::advance_scouts(active, active.mining.last_ticks());
         Self::advance_printing(active, active.mining.last_ticks());
         Self::advance_electrolysis(active, active.mining.last_ticks());
+        Self::report_the_wells(active);
 
         // The fleet's work becomes the player's experience.
         if report.sectors_completed > 0 || report.pings_found > 0 {
@@ -3310,6 +3700,9 @@ impl App {
             let rig = &active.villager_rigs[deputy.variant % active.villager_rigs.len()];
             objects.extend(rig.objects(deputy.position, deputy.yaw, 0.0));
         }
+        if let Some(stalker) = active.dark.present() {
+            objects.extend(active.stalker_rig.objects(stalker.position, stalker.yaw, 0.0));
+        }
         for holder in active.garrisons.squads.iter().flat_map(|squad| &squad.holders) {
             if holder.mode == hostile::Mode::Down {
                 continue;
@@ -3470,6 +3863,7 @@ impl App {
         self.refresh_permit();
         self.refresh_printer();
         self.refresh_electrolyser();
+        self.refresh_well();
         self.refresh_vault();
         self.refresh_terminal();
         self.refresh_debug();
@@ -3651,6 +4045,8 @@ impl App {
     /// villagers, the roost and contact marks draw, and it is why combat
     /// needed no journal version of its own.
     fn advance_law(active: &mut Active, dt: f32) {
+        Self::advance_dose(active, dt);
+        Self::advance_the_dark(active, dt);
         if active.health.tick(dt) && active.health.readout().is_some() {
             active.greeting = Some((
                 active.health.readout().unwrap_or_default(),
@@ -3762,6 +4158,9 @@ impl App {
         debug_assert!(settled, "the arrest charged more than the wallet held");
         active.permits.borrow_mut().bounty = 0;
         active.posse.stand_down();
+        // Whatever was in the dark loses interest too: you are a long way
+        // up and a long way off, and the deep does not follow anybody home.
+        active.dark.stand_down();
         active.health.revive();
 
         // Put down at the homestead, which is where you wake up.
@@ -3809,6 +4208,16 @@ impl App {
                     active.terminal.say(terminal::Kind::Warn, line.clone());
                     active.greeting = Some((line, Instant::now()));
                 }
+                // And whatever is out in the dark, which does not bark
+                // back — it either wears the round or it does not.
+                if active.dark.under_fire(sweep.from, sweep.to) {
+                    let line = match active.dark.present().map(|it| it.wounds()) {
+                        Some((taken, of)) => format!("YOU HIT IT - {taken}/{of}"),
+                        None => "YOU HIT IT".to_string(),
+                    };
+                    active.terminal.say(terminal::Kind::Warn, line.clone());
+                    active.greeting = Some((line, Instant::now()));
+                }
                 let held = active.garrisons.under_fire(sweep.from, sweep.to);
                 Self::note_the_deeds(active, held.downed, held.cleared);
                 for line in held.barks {
@@ -3820,6 +4229,7 @@ impl App {
                 // A shot landing is the loudest thing in held country, and
                 // the shelters hear it as a zone, never a spot.
                 active.garrisons.hear(impact.at);
+                active.dark.hear(impact.at, 4.0);
                 let heard = (impact.at - active.player.eye_position()).length();
                 let volume = (1.0 - heard / 80.0).clamp(0.1, 1.0);
                 active.audio.play(audio::Cue::Thud, volume);
@@ -4161,6 +4571,35 @@ impl App {
                     ));
                 }
                 lines
+            }
+            "wells" => {
+                // The roster the wellhead panel cannot give you: every hole
+                // at once, from wherever you happen to be standing.
+                let holes = active.mining.wells.all();
+                if active.mining.wells.is_empty() {
+                    vec!["NO HOLES SUNK".to_string()]
+                } else {
+                    let mut lines = vec![format!("{} HOLES", holes.len())];
+                    for hole in holes {
+                        let what = match (hole.stage, hole.fluid) {
+                            (well::Stage::Drilling { .. }, _) => format!(
+                                "DRILLING {}%",
+                                (hole.drilled() * 100.0).round() as u32
+                            ),
+                            (well::Stage::Pumping, Some(fluid)) => {
+                                format!("{} {} LEFT", fluid.name(), hole.remaining)
+                            }
+                            _ => "DRY".to_string(),
+                        };
+                        lines.push(format!(
+                            "{:<14} {:<18} LIFTED {}",
+                            format!("{} {}", hole.at.x, hole.at.z),
+                            what,
+                            hole.lifted
+                        ));
+                    }
+                    lines
+                }
             }
             "who" => {
                 let site = *active.villagers.site();
@@ -4585,6 +5024,122 @@ impl App {
                 active.electrolyser.feedback = Some("RUNNING".into());
             }
             Err(reason) => active.electrolyser.feedback = Some(reason),
+        }
+    }
+
+    /// One frame of whatever is down there.
+    ///
+    /// Everything it says goes through the toast-and-terminal channel the
+    /// townsfolk round built, because a search nobody can perceive may as
+    /// well be a random walk — the note's own argument, and the reason the
+    /// tells are not optional.
+    fn advance_the_dark(active: &mut Active, dt: f32) {
+        let seed = active.world.seed() ^ active.journal.tick();
+        let report = active
+            .dark
+            .update(dt, &active.world, active.player.position, seed);
+        for line in report.tells {
+            active.terminal.say(terminal::Kind::Warn, line.clone());
+            active.greeting = Some((line, Instant::now()));
+        }
+        if report.hits > 0 {
+            active.health.take(report.hits);
+            active.greeting = Some((
+                active
+                    .health
+                    .readout()
+                    .unwrap_or_else(|| "IT GOT A HOLD OF YOU".into()),
+                Instant::now(),
+            ));
+        }
+    }
+
+    /// Charge the player for whatever they are standing next to.
+    ///
+    /// Sampled on its own small beat rather than every frame: the sum walks
+    /// a box of a thousand blocks, and nobody moves far enough in a quarter
+    /// of a second for the difference to be visible.
+    fn advance_dose(active: &mut Active, dt: f32) {
+        active.dose_check -= dt;
+        let rads = if active.dose_check <= 0.0 {
+            active.dose_check = 0.25;
+            active.last_rads = dose::exposure(&active.world, active.player.position);
+            active.last_rads
+        } else {
+            active.last_rads
+        };
+
+        let marks = active.wallet.upgrade(wallet::SHIELD);
+        match active.dose.tick(rads, dt, marks) {
+            Some(dose::Told::Warned) => {
+                active.greeting = Some((
+                    "YOU ARE COOKING - THAT FACE IS HOT".into(),
+                    Instant::now(),
+                ));
+            }
+            Some(dose::Told::Burned) => {
+                active.health.take(1);
+                active.greeting = Some((
+                    active
+                        .health
+                        .readout()
+                        .unwrap_or_else(|| "THE DOSE IS TELLING ON YOU".into()),
+                    Instant::now(),
+                ));
+            }
+            None => {}
+        }
+    }
+
+    /// Sink a hole under the open wellhead.
+    ///
+    /// The order goes in the log *before* anything moves, like every other
+    /// order that touches the pile: the log is the record of what was asked
+    /// for, and the same call runs on the replay side.
+    fn spud_in(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let Some(at) = active.well_panel.at else { return };
+        let seed = active.world.seed();
+        let Some(base) = active.mining.fleet.base.as_mut() else {
+            active.well_panel.feedback = Some("NO BASE PILE TO DRAW ON".into());
+            return;
+        };
+        match active.mining.wells.spud(at, seed, &mut base.stockpile) {
+            Ok(()) => {
+                active.journal.record(Command::Spud { at });
+                let line = "SPUDDED IN - THE STRING IS GOING DOWN".to_string();
+                active.well_panel.feedback = Some(line.clone());
+                active.greeting = Some((line, Instant::now()));
+            }
+            Err(reason) => active.well_panel.feedback = Some(reason),
+        }
+    }
+
+    /// Say out loud what the holes did, once per thing rather than per tick.
+    ///
+    /// The report comes off `Mining` because the wells tick inside the call
+    /// replay re-runs — and replay has nobody to tell, which is exactly why
+    /// the telling happens here and not in there.
+    fn report_the_wells(active: &mut Active) {
+        let report = std::mem::take(&mut active.mining.well_report);
+        if report.quiet() {
+            return;
+        }
+        for (at, fluid) in &report.struck {
+            let line = format!("STRUCK {} AT {} {}", fluid.name(), at.x, at.z);
+            active.greeting = Some((line, Instant::now()));
+        }
+        for at in &report.dusters {
+            active.greeting = Some((
+                format!("DRY HOLE AT {} {} - NOTHING DOWN THERE", at.x, at.z),
+                Instant::now(),
+            ));
+        }
+        for at in &report.spent {
+            active.greeting = Some((
+                format!("THE WELL AT {} {} IS PUMPED OUT", at.x, at.z),
+                Instant::now(),
+            ));
         }
     }
 
@@ -5071,6 +5626,11 @@ impl App {
         // noise a valley over and work in the shadow of your own diversion.
         if active.journal.tick().is_multiple_of(16) {
             active.garrisons.hear(active.player.position);
+            // And the deep hears it better than the shelters do. This is the
+            // whole attachment between the hunt and the mining loop: a hole
+            // being cut is a dinner bell, and the only dial the player has
+            // is how long they keep cutting.
+            active.dark.hear(active.player.position, 0.55);
         }
 
         let Some(hit) = raycast_solid(
@@ -5311,6 +5871,17 @@ impl App {
                         Instant::now(),
                     ));
                 }
+                // A head broken off is a hole abandoned. Everything still
+                // in the ground stays in the ground: the reservoir is
+                // worldgen, so spudding here again finds exactly what was
+                // left — minus the casing, which is the price of moving.
+                if active.mining.wells.remove(hit.block) {
+                    if active.well_panel.at == Some(hit.block) {
+                        active.well_panel.close();
+                        active.renderer.clear_overlay(WELL_SLOT);
+                    }
+                    active.greeting = Some(("WELLHEAD PULLED".into(), Instant::now()));
+                }
                 if active.electrolyser.at == Some(hit.block) {
                     active.electrolyser.at = None;
                     active.electrolyser.job = None;
@@ -5460,6 +6031,7 @@ impl App {
                 || active.permit_panel.open
                 || active.printer.open
                 || active.electrolyser.open
+                || active.well_panel.open
                 || active.banks.open
                 || active.intro.open
                 || active.terminal.open
@@ -5763,6 +6335,25 @@ impl App {
                     let Some(active) = &mut self.active else { return };
                     active.electrolyser.close();
                     active.renderer.clear_overlay(FUEL_SLOT);
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // The wellhead's panel. One row and one key: a hole is a decision,
+        // not a menu.
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.well_panel.open)
+        {
+            match code {
+                KeyCode::Enter | KeyCode::NumpadEnter => self.spud_in(),
+                KeyCode::KeyE | KeyCode::Escape => {
+                    let Some(active) = &mut self.active else { return };
+                    active.well_panel.close();
+                    active.renderer.clear_overlay(WELL_SLOT);
                 }
                 _ => {}
             }
@@ -6375,6 +6966,9 @@ impl App {
             }
             "engine:electrolyser" => {
                 active.electrolyser.open_at(hit.block);
+            }
+            "engine:wellhead" => {
+                active.well_panel.open_at(hit.block);
             }
             "engine:vault" => {
                 // Which town's strongroom this is comes from where it stands,
@@ -7397,6 +7991,11 @@ impl App {
         });
         let content = hud::HudContent {
             condition: active.health.readout(),
+            dose: active.dose.readout(),
+            dark: active.dark.present().map(|it| {
+                let (taken, of) = it.wounds();
+                format!("{} - {taken}/{of}", it.mood.name())
+            }),
             deputies: active.posse.active() + active.garrisons.hunting(),
             skills: &active.skills,
             time: active.clock,
@@ -7545,6 +8144,19 @@ impl App {
             bounty: active.permits.borrow().bounty,
             compact: active.reputation.compact().name(),
             holdouts: active.reputation.holdouts().name(),
+            wells: (
+                active.mining.wells.len(),
+                active.mining.wells.producing().count(),
+            ),
+            rads: (active.last_rads, active.dose.rads),
+            dark: (
+                active.dark.heat(),
+                active
+                    .dark
+                    .present()
+                    .map_or(stalker::Mood::Asleep, |it| it.mood)
+                    .name(),
+            ),
         };
 
         let pixels = debug::render_debug(&content);
@@ -7664,6 +8276,45 @@ impl App {
             &active.context.device,
             &active.context.queue,
             (electrolysis::FUEL_WIDTH, electrolysis::FUEL_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 - panel_height) / 2.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
+    /// Draw the wellhead panel when it is open.
+    fn refresh_well(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.well_panel.open {
+            return;
+        }
+        let Some(at) = active.well_panel.at else { return };
+        let pile = active
+            .mining
+            .fleet
+            .base
+            .as_ref()
+            .map(|base| &base.stockpile);
+        let content = well::WellContent {
+            at,
+            trace: vx_world::reservoir::reservoir_under(active.world.seed(), at.x, at.z).is_some(),
+            hole: active.mining.wells.at(at).copied(),
+            refusal: well::refuse(&active.mining.wells, at, pile),
+            feedback: active.well_panel.feedback.clone(),
+        };
+        let pixels = well::render_well(&content);
+        let (width, height) = active.renderer.size();
+        let panel_width = well::WELL_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = well::WELL_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            WELL_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (well::WELL_WIDTH, well::WELL_HEIGHT),
             &pixels,
             vx_render::OverlayRect {
                 x: (width as f32 - panel_width) / 2.0,
@@ -7921,6 +8572,9 @@ impl App {
         if let Err(error) = active.mining.wear.save(save.root()) {
             log::error!("could not save the wear ledger: {error}");
         }
+        if let Err(error) = active.mining.wells.save(save.root()) {
+            log::error!("could not save the wells: {error}");
+        }
         if let Err(error) = active.health.save(save.root()) {
             log::error!("could not save the player's condition: {error}");
         }
@@ -8118,6 +8772,7 @@ impl ApplicationHandler for App {
         let mut bath = electrolysis::Electrolyser::default();
         let mut tank = fuel::Tank::default();
         let mut crew_wear = wear::Wear::default();
+        let mut holes = well::Wells::default();
         let mut condition = health::Health::default();
         let mut name = reputation::Reputation::default();
         let mut vaults = bank::Bank::default();
@@ -8144,6 +8799,10 @@ impl ApplicationHandler for App {
             // journal says it did.
             tank.load(save.root());
             crew_wear.load(save.root());
+            // And the holes, for the tank's reason exactly: a well puts
+            // goods on the pile the fleet burns, so a reload that forgot one
+            // would dig a different hole than the journal says it dug.
+            holes.load(save.root());
             condition.load(save.root());
             name.load(save.root());
             vaults.load(save.root());
@@ -8193,6 +8852,7 @@ impl ApplicationHandler for App {
                 // reload that started fresh would hand back a worn-out
                 // fleet's youth.
                 mining.wear = crew_wear;
+                mining.wells = holes;
                 mining
             },
             map,
@@ -8209,6 +8869,7 @@ impl ApplicationHandler for App {
             // the door on any future reordering of this function.
             resuming: true,
             player_rig: Rig::player(),
+            stalker_rig: Rig::stalker(),
             hand_rig: Rig::hand_drill(),
             trade_rig: Rig::flier(),
             drill_spin: 0.0,
@@ -8261,6 +8922,11 @@ impl ApplicationHandler for App {
             printer: press,
             optics: eyes,
             electrolyser: bath,
+            well_panel: well::Panel::default(),
+            dark: stalker::TheDark::default(),
+            dose: dose::Dose::default(),
+            dose_check: 0.0,
+            last_rads: 0.0,
             banks: vaults,
             friends,
             terminal: terminal::Terminal::default(),

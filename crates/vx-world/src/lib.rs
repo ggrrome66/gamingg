@@ -17,6 +17,7 @@ pub mod noise;
 pub mod ore;
 pub mod physics;
 pub mod raycast;
+pub mod reservoir;
 pub mod save;
 pub mod seed;
 pub mod sight;
