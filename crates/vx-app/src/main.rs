@@ -247,6 +247,8 @@ struct Options {
     ministar: bool,
     /// The ward, with its panel open over the cots.
     ward: bool,
+    /// Catch the handheld mid-swing rather than fully up.
+    raising: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -296,6 +298,7 @@ fn parse_args() -> Result<Options, String> {
         faces: false,
         ministar: false,
         ward: false,
+        raising: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -384,6 +387,7 @@ fn parse_args() -> Result<Options, String> {
             "--faces" => options.faces = true,
             "--ministar" => options.ministar = true,
             "--ward" => options.ward = true,
+            "--raising" => options.raising = true,
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -2285,22 +2289,54 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             centre: options.at,
             markers: &markers,
         };
-        let pixels = device::render_device(&handheld, &roster, Some(&country), None);
-        let panel_width = device::DEVICE_WIDTH as f32 * device::DEVICE_SCALE;
-        let panel_height = device::DEVICE_HEIGHT as f32 * device::DEVICE_SCALE;
-        renderer.set_overlay(
-            DEVICE_SLOT,
-            &context.device,
-            &context.queue,
-            (device::DEVICE_WIDTH, device::DEVICE_HEIGHT),
-            &pixels,
-            vx_render::OverlayRect {
-                x: (width as f32 - panel_width) / 2.0,
-                y: (height as f32 - panel_height) / 2.0,
-                width: panel_width,
-                height: panel_height,
-            },
+        // The unit itself, held. `--raising` catches it mid-swing, which is
+        // the frame that shows it is an object rather than a panel.
+        handheld.raise = if options.raising { 0.45 } else { 1.0 };
+
+        let mut pixels = device::render_device(&handheld, &roster, Some(&country), None);
+        device::dim(&mut pixels, handheld.raise);
+
+        // Camera before objects: `set_objects` culls against the last
+        // uploaded frustum, the trap stage 31 found the hard way.
+        renderer.update_camera(&context.queue, &camera);
+        let forward = camera.forward();
+        let right = camera.right();
+        let held = device::carried_at(camera.position, forward, right, handheld.raise);
+        let (_, _, _, tilt) = device::carry(handheld.raise);
+        let mut objects = Rig::handheld().objects_pitched(
+            held,
+            rig::yaw_towards(forward.x, forward.z).unwrap_or(0.0),
+            camera.pitch - tilt,
+            0.0,
         );
+        // Whoever was already on screen stays on screen.
+        let rigs = Villagers::rigs();
+        let mut town = Villagers::new();
+        let alone = awareness::Surroundings::empty();
+        for _ in 0..600 {
+            town.update(1.0 / 60.0, TimeOfDay::new(options.time), &alone);
+        }
+        objects.extend(town.objects(&rigs));
+        renderer.set_objects(&context.device, &context.queue, &objects);
+
+        // And the readout on its glass, exactly as the game places it.
+        let corners = device::screen_corners(camera.position, forward, right, handheld.raise);
+        if let Some(rect) =
+            device::screen_rect(camera.view_projection(), corners, (width as f32, height as f32))
+        {
+            renderer.set_overlay(
+                DEVICE_SLOT,
+                &context.device,
+                &context.queue,
+                (device::DEVICE_WIDTH, device::DEVICE_HEIGHT),
+                &pixels,
+                rect,
+            );
+            println!(
+                "handheld capture: raise {:.2}, screen {:.0}x{:.0} at {:.0},{:.0}",
+                handheld.raise, rect.width, rect.height, rect.x, rect.y
+            );
+        }
 
         // And the banner that rides a live feed.
         if let Some(listing) = roster.first() {
@@ -3106,6 +3142,9 @@ struct Active {
     player_rig: Rig,
     /// The shape of the thing in the deep. Built once, like every other rig.
     stalker_rig: Rig,
+    /// The handheld PC, as an object you hold rather than a panel that
+    /// appears.
+    handheld_rig: Rig,
     /// The handheld drill's shape, built once.
     hand_rig: Rig,
     /// The body a trade load borrows when one passes close enough to see.
@@ -3339,6 +3378,13 @@ impl App {
         // The day rolls on. The dt above is already clamped, so a stalled
         // frame cannot lurch the clock forward by an hour.
         active.clock = active.clock.advance(dt);
+
+        // The handheld swings up or down. Kept out here rather than in the
+        // key handler because closing it starts a *movement*, and the slot
+        // is only cleared once the unit is genuinely off the frame.
+        if !active.device.raise_by(dt) {
+            active.renderer.clear_overlay(DEVICE_SLOT);
+        }
 
         // The body stands still whenever the player's attention is elsewhere:
         // haggling at a counter, or staring at a handheld. For the feed that
@@ -3995,7 +4041,25 @@ impl App {
             + glam::Vec3::Y * (-0.38 + bob);
         let drill_yaw = rig::yaw_towards(camera_forward.x, camera_forward.z).unwrap_or(0.0);
         if active.view.draws_viewmodel() {
-            if active.arsenal.equipped {
+            // Both hands are busy while the handheld is up, so the drill and
+            // the launcher go away. That is the whole reason raising it
+            // reads as a gesture rather than as a menu: checking on your
+            // fleet with something chasing you is a decision now.
+            if active.device.showing() {
+                let held = device::carried_at(
+                    active.camera.position,
+                    camera_forward,
+                    camera_right,
+                    active.device.raise,
+                );
+                let (_, _, _, tilt) = device::carry(active.device.raise);
+                objects.extend(active.handheld_rig.objects_pitched(
+                    held,
+                    drill_yaw,
+                    active.camera.pitch - tilt,
+                    0.0,
+                ));
+            } else if active.arsenal.equipped {
                 objects.extend(active.launcher_rig.objects_pitched(
                     drill_position,
                     drill_yaw,
@@ -6449,9 +6513,10 @@ impl App {
                     active.device.turn_page();
                 }
                 KeyCode::KeyV | KeyCode::Escape => {
+                    // Put it down. The overlay stays up until the unit has
+                    // finished dropping out of frame — see `frame`.
                     let Some(active) = &mut self.active else { return };
                     active.device.close();
-                    active.renderer.clear_overlay(DEVICE_SLOT);
                 }
                 _ => {}
             }
@@ -7588,7 +7653,9 @@ impl App {
     /// Rebuild and upload the handheld panel while it is open.
     fn refresh_device(&mut self) {
         let Some(active) = &mut self.active else { return };
-        if !active.device.open {
+        // Drawn while the unit is anywhere in frame, not only while it is
+        // open: the screen has to stay on its glass all the way down.
+        if !active.device.showing() {
             return;
         }
         let from = active.player.eye_position();
@@ -7688,22 +7755,48 @@ impl App {
             rows: scout_rows,
             job: job_line,
         });
-        let pixels = device::render_device(&active.device, &roster, Some(&country), scout.as_ref());
+        let mut pixels =
+            device::render_device(&active.device, &roster, Some(&country), scout.as_ref());
+        // The screen comes on as the unit arrives.
+        device::dim(&mut pixels, active.device.raise);
+
+        // And it lands on the glass rather than in the middle of the screen:
+        // the four corners of the model's own screen face, projected through
+        // the very camera matrix the frame was drawn with. Look around while
+        // it is up and the readout goes with it, because it is *on* it.
         let (width, height) = active.renderer.size();
-        let panel_width = device::DEVICE_WIDTH as f32 * device::DEVICE_SCALE;
-        let panel_height = device::DEVICE_HEIGHT as f32 * device::DEVICE_SCALE;
+        let rect = if active.view.draws_viewmodel() {
+            let corners = device::screen_corners(
+                active.camera.position,
+                active.camera.forward(),
+                active.camera.right(),
+                active.device.raise,
+            );
+            device::screen_rect(
+                active.camera.view_projection(),
+                corners,
+                (width as f32, height as f32),
+            )
+        } else {
+            // Third person draws no viewmodel, so there is no glass out
+            // there to put this on: the readout goes back to the middle of
+            // the frame rather than floating where a unit is not.
+            Some(device::centred(width as f32, height as f32))
+        };
+        let Some(rect) = rect else {
+            // Still swinging up from somewhere off-frame: nothing to draw
+            // yet, and a rectangle derived from a point behind the eye would
+            // be a rectangle in the wrong place.
+            active.renderer.clear_overlay(DEVICE_SLOT);
+            return;
+        };
         active.renderer.set_overlay(
             DEVICE_SLOT,
             &active.context.device,
             &active.context.queue,
             (device::DEVICE_WIDTH, device::DEVICE_HEIGHT),
             &pixels,
-            vx_render::OverlayRect {
-                x: (width as f32 - panel_width) / 2.0,
-                y: (height as f32 - panel_height) / 2.0,
-                width: panel_width,
-                height: panel_height,
-            },
+            rect,
         );
     }
 
@@ -9181,6 +9274,7 @@ impl ApplicationHandler for App {
             resuming: true,
             player_rig: Rig::player(),
             stalker_rig: Rig::stalker(),
+            handheld_rig: Rig::handheld(),
             hand_rig: Rig::hand_drill(),
             trade_rig: Rig::flier(),
             drill_spin: 0.0,

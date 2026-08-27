@@ -10,16 +10,21 @@
 //! buffer stamped with the bitmap font and shipped through an overlay slot.
 //! The compositor knows nothing about what any of it means.
 
+use glam::{Mat4, Vec3};
 use vx_render::font::{self, LINE_HEIGHT};
+use vx_render::OverlayRect;
 use vx_world::World;
 
 use crate::map::{self, MapState, Marker};
 use crate::mining::{MachineListing, MachineRef};
 
-/// Panel size in texture pixels; drawn at [`DEVICE_SCALE`].
+/// Panel size in texture pixels.
+///
+/// No scale constant any more: the readout is not drawn at a size somebody
+/// chose, it is drawn *on the glass of the unit you are holding*, and how big
+/// that lands is a question for the camera — see [`screen_rect`].
 pub const DEVICE_WIDTH: u32 = 240;
 pub const DEVICE_HEIGHT: u32 = 166;
-pub const DEVICE_SCALE: f32 = 2.0;
 
 /// The strip along the top of a live feed.
 pub const BANNER_WIDTH: u32 = 240;
@@ -40,6 +45,182 @@ const BANNER_BACK: [u8; 4] = [10, 12, 16, 170];
 
 /// Side of the handheld's map, in panel pixels.
 pub const HANDHELD_MAP: u32 = 120;
+
+// ----------------------------------------------------------- holding it up
+//
+// The handheld is a *thing you hold*, and the geometry of holding it lives
+// here rather than in `main` for the reason every panel's layout does: it is
+// pure arithmetic over numbers, so it can be tested without a window, a
+// world, or a graphics device anywhere near it.
+
+/// Seconds from stowed to raised, and back.
+///
+/// Long enough to read as a movement, short enough that nobody waits on it.
+pub const RAISE_SECONDS: f32 = 0.32;
+
+/// Where the unit rides when it is down: below the frame, out of the way,
+/// tipped away from the face. Camera-relative, in (forward, right, up).
+const STOWED: (f32, f32, f32) = (0.62, 0.30, -0.75);
+
+/// And where it comes to rest, in front of the face and a little to the
+/// right, tipped back so the glass looks at you.
+///
+/// The forward distance is the number that decides how big the screen lands
+/// on a monitor, and it is picked so the projected rectangle is close to the
+/// size the flat panel used to be drawn at — the overlay samples with
+/// `Nearest`, so a screen much smaller than its own pixels is a screen you
+/// cannot read.
+const RAISED: (f32, f32, f32) = (0.60, 0.07, -0.15);
+
+/// How far the case is tipped, in radians, stowed and raised. Positive tips
+/// the top of the screen away.
+const STOWED_TILT: f32 = 0.85;
+const RAISED_TILT: f32 = 0.14;
+
+/// Smooth the ends of the raise, so it does not start and stop dead.
+fn ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Where the unit sits this frame, and how far it is tipped.
+///
+/// Returned in camera-relative components rather than as a world point, so
+/// the caller composes it with whatever basis it already has and there is one
+/// place that decides *shape of the motion* rather than two.
+pub fn carry(raise: f32) -> (f32, f32, f32, f32) {
+    let t = ease(raise);
+    let lerp = |from: f32, to: f32| from + (to - from) * t;
+    (
+        lerp(STOWED.0, RAISED.0),
+        lerp(STOWED.1, RAISED.1),
+        lerp(STOWED.2, RAISED.2),
+        lerp(STOWED_TILT, RAISED_TILT),
+    )
+}
+
+/// Where the unit's body sits in the world, given the camera's basis.
+pub fn carried_at(eye: Vec3, forward: Vec3, right: Vec3, raise: f32) -> Vec3 {
+    let (ahead, across, down, _) = carry(raise);
+    eye + forward * ahead + right * across + Vec3::Y * down
+}
+
+/// The four corners of the glass in the world, clockwise from top-left as
+/// the person holding it sees them.
+///
+/// The screen's own dimensions come from [`crate::rig::screen`], which is
+/// also what [`crate::rig::Rig::handheld`] builds the plate from — one set of
+/// numbers, so the readout cannot land somewhere the model is not.
+pub fn screen_corners(eye: Vec3, forward: Vec3, right: Vec3, raise: f32) -> [Vec3; 4] {
+    use crate::rig::screen;
+
+    let (_, _, _, tilt) = carry(raise);
+    let centre = carried_at(eye, forward, right, raise);
+
+    // The rig is pitched about its lateral axis by `tilt`, so the glass's own
+    // up and normal turn with it. Across is the lateral axis and does not.
+    let up = Vec3::Y * tilt.cos() + forward * tilt.sin();
+    let normal = forward * tilt.cos() - Vec3::Y * tilt.sin();
+
+    // `screen::DEPTH` is negative — the glass faces back at the holder.
+    let face = centre + normal * screen::DEPTH;
+    let across = right * screen::HALF_WIDTH;
+    let rise = up * screen::HALF_HEIGHT;
+    [
+        face - across + rise,
+        face + across + rise,
+        face + across - rise,
+        face - across - rise,
+    ]
+}
+
+/// The screen's four corners as a rectangle of pixels on the frame.
+///
+/// `None` when any corner is behind the camera: a rectangle derived from a
+/// point behind the eye is a rectangle in the wrong place, and drawing
+/// nothing is the honest answer while the unit is still coming up from
+/// somewhere off-frame.
+pub fn screen_rect(
+    view_projection: Mat4,
+    corners: [Vec3; 4],
+    size: (f32, f32),
+) -> Option<OverlayRect> {
+    let (width, height) = size;
+    let mut min = (f32::MAX, f32::MAX);
+    let mut max = (f32::MIN, f32::MIN);
+    for corner in corners {
+        let clip = view_projection * corner.extend(1.0);
+        if clip.w <= 1.0e-4 {
+            return None;
+        }
+        let ndc = (clip.x / clip.w, clip.y / clip.w);
+        // Clip space is y-up from the centre; pixels are y-down from the
+        // top-left, the same mapping the overlay shader undoes.
+        let pixel = (
+            (ndc.0 * 0.5 + 0.5) * width,
+            (0.5 - ndc.1 * 0.5) * height,
+        );
+        min = (min.0.min(pixel.0), min.1.min(pixel.1));
+        max = (max.0.max(pixel.0), max.1.max(pixel.1));
+    }
+
+    let (box_width, box_height) = (max.0 - min.0, max.1 - min.1);
+    if box_width <= 1.0 || box_height <= 1.0 {
+        return None;
+    }
+
+    // The glass is tilted toward you, so its projection is a trapezoid and
+    // the box around it is wider than the face. Stretching the readout into
+    // that box would squash the text by however far the unit happens to be
+    // tipped, so the picture is *fitted* inside the box at its own shape
+    // instead, and centred. Letterboxing a screen is what a real one does
+    // with the wrong aspect anyway.
+    let want = DEVICE_WIDTH as f32 / DEVICE_HEIGHT as f32;
+    let (width, height) = if box_width / box_height > want {
+        (box_height * want, box_height)
+    } else {
+        (box_width, box_width / want)
+    };
+
+    Some(OverlayRect {
+        x: min.0 + (box_width - width) * 0.5,
+        y: min.1 + (box_height - height) * 0.5,
+        width,
+        height,
+    })
+}
+
+/// The readout in the middle of the frame, at twice its own pixels.
+///
+/// The fallback for a view with no hands in it: third person draws no
+/// viewmodel, so there is no glass to land on and a screen floating in the
+/// air where a unit is not would be worse than the flat panel this replaced.
+pub fn centred(width: f32, height: f32) -> OverlayRect {
+    let panel_width = DEVICE_WIDTH as f32 * 2.0;
+    let panel_height = DEVICE_HEIGHT as f32 * 2.0;
+    OverlayRect {
+        x: (width - panel_width) / 2.0,
+        y: (height - panel_height) / 2.0,
+        width: panel_width,
+        height: panel_height,
+    }
+}
+
+/// Fade the readout up with the raise: a screen that is at full brightness
+/// while the thing carrying it is still swinging into view reads as a
+/// sticker rather than as a display coming on.
+///
+/// Done to the pixels rather than in the shader because the overlay pass has
+/// no tint uniform, and the buffer is rebuilt every frame anyway.
+pub fn dim(pixels: &mut [u8], fraction: f32) {
+    let scale = ease(fraction).clamp(0.0, 1.0);
+    if scale >= 1.0 {
+        return;
+    }
+    for texel in pixels.chunks_exact_mut(4) {
+        texel[3] = (texel[3] as f32 * scale) as u8;
+    }
+}
 
 /// What the handheld is showing.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +256,9 @@ pub struct ScoutReadout {
 pub struct Device {
     /// Is the roster panel up?
     pub open: bool,
+    /// How far the unit has been raised, 0 stowed to 1 in front of your
+    /// face. Live-only cosmetics, like every other animation clock here.
+    pub raise: f32,
     /// Which page it is showing.
     pub page: Page,
     cursor: usize,
@@ -94,6 +278,24 @@ impl Device {
     pub fn open_list(&mut self) {
         self.open = true;
         self.feedback = None;
+    }
+
+    /// Run the raise toward wherever it is going. Returns whether anything
+    /// of the unit is still on screen, which is what tells the caller when
+    /// it is finally safe to clear the overlay.
+    pub fn raise_by(&mut self, dt: f32) -> bool {
+        let step = dt / RAISE_SECONDS;
+        if self.open {
+            self.raise = (self.raise + step).min(1.0);
+        } else {
+            self.raise = (self.raise - step).max(0.0);
+        }
+        self.raise > 0.0
+    }
+
+    /// Is the unit far enough up to be worth drawing the screen on?
+    pub fn showing(&self) -> bool {
+        self.raise > 0.0
     }
 
     /// Turn to the next page: fleet, map, kestrel, round again.
@@ -638,5 +840,173 @@ mod tests {
         let mut fleet = Device::new();
         fleet.open_list();
         assert_ne!(drawn, render_device(&fleet, &[], Some(&country), None));
+    }
+
+    // --------------------------------------------------------- holding it
+
+    /// A camera looking down -Z from the origin, which is this engine's
+    /// zero-yaw convention, with the basis the game hands the handheld.
+    fn looking_north() -> (vx_render::Camera, Vec3, Vec3) {
+        let camera = vx_render::Camera {
+            position: Vec3::new(0.0, 80.0, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            aspect: 16.0 / 9.0,
+            ..Default::default()
+        };
+        (camera, camera.forward(), camera.right())
+    }
+
+    #[test]
+    fn the_raise_runs_both_ways_and_settles_at_the_ends() {
+        let mut device = Device::new();
+        assert_eq!(device.raise, 0.0);
+        assert!(!device.showing());
+
+        device.open_list();
+        // A whole second is longer than the raise: it must not overshoot.
+        for _ in 0..60 {
+            device.raise_by(1.0 / 60.0);
+        }
+        assert_eq!(device.raise, 1.0);
+        assert!(device.showing());
+
+        device.close();
+        // And it goes down rather than vanishing — the frame after closing,
+        // there is still something on screen to draw.
+        assert!(device.raise_by(1.0 / 60.0), "the unit blinked out of existence");
+        for _ in 0..60 {
+            device.raise_by(1.0 / 60.0);
+        }
+        assert_eq!(device.raise, 0.0);
+        assert!(!device.showing());
+    }
+
+    #[test]
+    fn the_carry_moves_the_unit_up_and_levels_it() {
+        let (down_ahead, _, down_height, down_tilt) = carry(0.0);
+        let (up_ahead, _, up_height, up_tilt) = carry(1.0);
+        assert!(
+            up_height > down_height,
+            "raising it did not lift it: {down_height} to {up_height}"
+        );
+        assert!(up_tilt < down_tilt, "raising it did not level the glass");
+        assert!(down_ahead > 0.0 && up_ahead > 0.0, "the unit is behind you");
+
+        // Monotone in between, so nothing bounces on the way up.
+        let mut last = carry(0.0).2;
+        for step in 1..=20 {
+            let height = carry(step as f32 / 20.0).2;
+            assert!(height >= last - 1.0e-6, "the raise doubled back");
+            last = height;
+        }
+    }
+
+    #[test]
+    fn the_screen_lands_in_front_of_the_camera_and_faces_it() {
+        let (camera, forward, right) = looking_north();
+        let corners = screen_corners(camera.position, forward, right, 1.0);
+        for corner in corners {
+            let along = (corner - camera.position).dot(forward);
+            assert!(along > 0.05, "a corner of the glass is behind the eye");
+            assert!(along < 1.5, "the glass is a metre and a half away");
+        }
+        // Top corners above the bottom ones, which is what stops the readout
+        // arriving upside down.
+        assert!(corners[0].y > corners[3].y);
+        assert!(corners[1].y > corners[2].y);
+    }
+
+    #[test]
+    fn the_projected_rect_is_on_screen_and_keeps_the_readouts_shape() {
+        let (camera, forward, right) = looking_north();
+        let size = (1280.0, 720.0);
+        let corners = screen_corners(camera.position, forward, right, 1.0);
+        let rect = screen_rect(camera.view_projection(), corners, size)
+            .expect("the raised screen projected to nothing");
+
+        assert!(rect.x > 0.0 && rect.y > 0.0, "the screen ran off the frame");
+        assert!(rect.x + rect.width < size.0);
+        assert!(rect.y + rect.height < size.1);
+
+        // Big enough to read: the overlay samples with `Nearest`, so a
+        // rectangle much under the readout's own pixel size aliases the text
+        // into porridge.
+        assert!(
+            rect.width >= DEVICE_WIDTH as f32,
+            "the screen landed {} pixels wide, under the readout's own {}",
+            rect.width,
+            DEVICE_WIDTH
+        );
+
+        // And the shape is exactly the readout's: the rectangle is fitted
+        // inside the projected face rather than stretched to it, so no
+        // amount of tilt can squash the text.
+        let want = DEVICE_WIDTH as f32 / DEVICE_HEIGHT as f32;
+        let got = rect.width / rect.height;
+        assert!(
+            (got - want).abs() < 1.0e-3,
+            "the screen is {got:.3} to one against the readout's {want:.3}"
+        );
+    }
+
+    #[test]
+    fn the_readout_keeps_its_shape_however_the_unit_is_tipped() {
+        // The letterbox, checked across the whole raise: at every point in
+        // the swing the rectangle is the readout's own shape, because a
+        // screen that stretches as it comes up is worse than one that does
+        // not move at all.
+        let (camera, forward, right) = looking_north();
+        let want = DEVICE_WIDTH as f32 / DEVICE_HEIGHT as f32;
+        let mut seen = 0;
+        for step in 0..=10 {
+            let raise = step as f32 / 10.0;
+            let corners = screen_corners(camera.position, forward, right, raise);
+            let Some(rect) =
+                screen_rect(camera.view_projection(), corners, (1280.0, 720.0))
+            else {
+                continue;
+            };
+            seen += 1;
+            assert!((rect.width / rect.height - want).abs() < 1.0e-3);
+        }
+        assert!(seen > 5, "only {seen} of the swing projected at all");
+    }
+
+    #[test]
+    fn a_screen_behind_the_eye_projects_to_nothing() {
+        // Turned around, the glass is behind the camera, and a rectangle
+        // derived from a point behind the eye is a rectangle in the wrong
+        // place. Nothing is the right answer.
+        let (mut camera, _, _) = looking_north();
+        let corners = screen_corners(camera.position, camera.forward(), camera.right(), 1.0);
+        camera.yaw = std::f32::consts::PI;
+        assert!(screen_rect(camera.view_projection(), corners, (1280.0, 720.0)).is_none());
+    }
+
+    #[test]
+    fn the_third_person_fallback_is_centred_and_the_right_shape() {
+        let rect = centred(1280.0, 720.0);
+        assert!((rect.x + rect.width / 2.0 - 640.0).abs() < 0.5);
+        assert!((rect.y + rect.height / 2.0 - 360.0).abs() < 0.5);
+        let want = DEVICE_WIDTH as f32 / DEVICE_HEIGHT as f32;
+        assert!((rect.width / rect.height - want).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn the_screen_comes_on_as_it_arrives() {
+        let bright = [255u8, 255, 255, 200];
+        let mut dark = bright;
+        dim(&mut dark, 0.0);
+        assert_eq!(dark[3], 0, "a stowed unit is showing a lit screen");
+        assert_eq!(&dark[..3], &bright[..3], "dimming changed the colours");
+
+        let mut half = bright;
+        dim(&mut half, 0.5);
+        assert!(half[3] > 0 && half[3] < bright[3]);
+
+        let mut full = bright;
+        dim(&mut full, 1.0);
+        assert_eq!(full[3], bright[3], "a raised unit is not at full brightness");
     }
 }

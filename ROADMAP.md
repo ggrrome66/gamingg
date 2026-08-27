@@ -107,7 +107,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 29 | `12425b4` | Bunkers occupied: every shelter holds a squad derived from its own seed, hostiles route on the drones' flow fields, noise reaches them as 32-metre zones, pairs move under overwatch, and a surrendered holder can be taken in for the board's pay |
 | 30 | `a4248b3` | Factions: the Compact and the Holdouts remember what the bounty board forgets — standing shades prices, buys a challenge before a volley, and puts the spoofers in the other side's hands |
 | 31 | `02ac7c9` | Uranium, oil and gas, and the thing that hunts by ear: a deep ore that pays for itself in dose, fluid reservoirs worked by a wellhead that keeps paying until it stops, and a stalker that is told a thirty-two metre cell and has to find you inside it |
-| 32 | _this_ | Faces, walls and a ward: the townsfolk get eyes that follow what they are watching and a grunt for anyone who crowds them, every town on the frontier walls itself with at least a mini star, and a free cot in every clinic mends you and scrubs the dose |
+| 32 | `8c6d21a` | Faces, walls and a ward: the townsfolk get eyes that follow what they are watching and a grunt for anyone who crowds them, every town on the frontier walls itself with at least a mini star, and a free cot in every clinic mends you and scrubs the dose |
+| 33 | _this_ | The handheld you hold: the fleet uplink becomes a cased unit that swings up into your hands with its screen coming on, the readout is projected onto the model's own glass through the frame's camera matrix, and your drill is away while it is up |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1794,6 +1795,52 @@ or injury that needs more than a bed; and a bill for the cot.
 
 ---
 
+## Shipped — Stage 33: the handheld you hold
+
+**The most-used object in the game had no object.** The fleet roster, the
+country map and the scout's orders all live on the handheld, and it was a
+rectangle that appeared in the middle of the screen. Now it is a cased unit —
+bezel, glass, two dials, a stub aerial, a strap over the forearm — that swings
+up into view on a third of a second and drops back out when you put it down.
+The information did not change at all. What changed is that consulting it is a
+*gesture*, with a cost in the moment it takes.
+
+**The screen is on the model, and the maths is the frame's own.** Every frame
+the four corners of the glass are put through the same
+`Camera::view_projection` the world was drawn with, and the readout is placed
+in the rectangle that comes back — so looking around while it is up carries
+the screen with the thing holding it, because it is *on* it. One set of
+numbers describes the glass (`rig::screen`), used both by the rig that builds
+the plate and by the projection that lands the readout on it, so the two
+cannot drift apart.
+
+**Fitted, not stretched.** The case is tipped toward the face, so the glass
+projects as a trapezoid and the box around it is wider than the face. Filling
+that box would squash the text by however far the unit happens to be tilted,
+so the readout is letterboxed inside it at its own aspect instead. A real
+screen does the same thing with the wrong shape of picture.
+
+**Both hands are busy.** The drill and the launcher are not drawn while the
+unit is up. That is the whole reason the round is worth doing: checking where
+your drones are with something coming down the gallery at you is now a
+decision, where a panel that appears was a free pause.
+
+**Live-only, and cheap.** A raise fraction on `Device`, four pure functions
+over numbers, and nine cuboids on the existing instanced path. No renderer
+change, no new pipeline, no journal anywhere near it — the alternative was
+rendering the readout to a texture and sampling it on the quad, which is a new
+render target, a second bind group, and blurrier text at every angle.
+
+**Surface.** `V` raises and lowers it; third person, which draws no
+viewmodel, falls back to the centred panel rather than floating a screen where
+no unit is; the `--device` capture gained `--raising` for the mid-swing frame.
+
+**Deliberately not in 33:** the unit in the player's hands in third person; a
+world-space screen texture; the unit visible while stowed; buttons on the case
+that do anything; and any change at all to what the readout says.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -1987,11 +2034,11 @@ through. What is left of the plan is one toy and the civic layer.
 
 | Stage | What | Why here |
 |---|---|---|
-| 33 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 34 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
 
 ## The feature map
 
-The whole game at a glance, as of stage 32.
+The whole game at a glance, as of stage 33.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -2077,6 +2124,9 @@ the stalker (a director that knows the truth and may say only a 32-metre
 cell, a creature that closes the rest on the same occupancy search the law
 uses, hints weighted by the noise a working mine makes, a floor distance it
 never arrives inside, and a pressure budget that makes it break off);
+a handheld you actually hold (a cased unit that swings up into your hands
+with the readout projected onto its own glass, and both hands busy while it
+is up);
 faces on the townsfolk (eyes that follow whatever has their attention and
 saturate rather than swivelling, and a grunt in three voices for anybody who
 crowds them);

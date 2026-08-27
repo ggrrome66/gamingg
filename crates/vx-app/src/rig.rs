@@ -131,6 +131,25 @@ impl Gaze {
     }
 }
 
+/// The handheld's screen face, in rig-local coordinates.
+///
+/// Exported because two things have to agree about it and neither should be
+/// guessing: [`Rig::handheld`] builds the plate here, and
+/// [`crate::device::screen_corners`] projects the readout onto the same four
+/// corners. A model whose screen is somewhere other than where the readout
+/// lands is the one bug this design can have, so there is one set of numbers.
+pub mod screen {
+    /// How far forward of the case's centre the glass sits — negative,
+    /// because the rig's nose is +X and the screen faces back at the person
+    /// holding it.
+    pub const DEPTH: f32 = -0.056;
+    /// Half-width across the face, along the rig's lateral axis.
+    pub const HALF_WIDTH: f32 = 0.205;
+    /// Half-height. Sized against the readout it carries — 240 by 166 — so
+    /// the text lands square rather than stretched.
+    pub const HALF_HEIGHT: f32 = HALF_WIDTH * 166.0 / 240.0;
+}
+
 /// A machine's shape.
 #[derive(Debug, Clone)]
 pub struct Rig {
@@ -419,6 +438,83 @@ impl Rig {
         }
     }
 
+    /// The handheld PC, held in both hands and raised into view.
+    ///
+    /// Built around the screen rather than around a silhouette: the glass is
+    /// the reason the object exists, so [`screen`] fixes where it sits and
+    /// everything else — case, bezel, dials, the strap over the forearm — is
+    /// arranged around it. The plate itself is dark on purpose: the readout
+    /// is drawn over it by the overlay pass, so what this rig contributes is
+    /// the frame that makes a rectangle of text read as a thing somebody is
+    /// holding.
+    ///
+    /// Local axes as ever: +X is the nose, which here points away from the
+    /// face, so the screen sits at a negative X and looks back at you. Like
+    /// the drill and the launcher it hangs off the camera, so parts sit at
+    /// negative Y and the ground-origin convention does not apply.
+    pub fn handheld() -> Self {
+        let width = screen::HALF_WIDTH;
+        let height = screen::HALF_HEIGHT;
+        Rig {
+            parts: vec![
+                // The case: a slab a little larger than the glass, thick
+                // enough to read as a machine from the side.
+                Part::fixed(
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.11, height * 2.0 + 0.09, width * 2.0 + 0.09),
+                    slot::HULL,
+                ),
+                // The bezel: brushed metal between case and glass.
+                Part::fixed(
+                    Vec3::new(screen::DEPTH * 0.55, 0.0, 0.0),
+                    Vec3::new(0.02, height * 2.0 + 0.05, width * 2.0 + 0.05),
+                    slot::STEEL,
+                ),
+                // The glass. Exactly the screen rectangle, a hair proud of
+                // the bezel so it never fights it for depth.
+                Part::fixed(
+                    Vec3::new(screen::DEPTH, 0.0, 0.0),
+                    Vec3::new(0.012, height * 2.0, width * 2.0),
+                    slot::CAB,
+                ),
+                // Two dials under the glass, because a machine with no
+                // controls on it is a picture of a machine.
+                Part::fixed(
+                    Vec3::new(screen::DEPTH * 0.8, -height - 0.035, width * 0.55),
+                    Vec3::new(0.03, 0.035, 0.035),
+                    slot::STEEL,
+                ),
+                Part::fixed(
+                    Vec3::new(screen::DEPTH * 0.8, -height - 0.035, width * 0.2),
+                    Vec3::new(0.03, 0.035, 0.035),
+                    slot::STEEL,
+                ),
+                // A stub aerial off the top corner.
+                Part::fixed(
+                    Vec3::new(0.0, height + 0.09, -width * 0.8),
+                    Vec3::new(0.02, 0.11, 0.02),
+                    slot::STEEL,
+                ),
+                // The strap over the forearm: two bands and a backing plate.
+                Part::fixed(
+                    Vec3::new(0.055, -0.02, width * 0.62),
+                    Vec3::new(0.05, height * 1.5, 0.04),
+                    slot::CLOTH,
+                ),
+                Part::fixed(
+                    Vec3::new(0.055, -0.02, -width * 0.62),
+                    Vec3::new(0.05, height * 1.5, 0.04),
+                    slot::CLOTH,
+                ),
+                Part::fixed(
+                    Vec3::new(0.075, -0.02, 0.0),
+                    Vec3::new(0.03, height * 1.2, width * 1.1),
+                    slot::TREAD,
+                ),
+            ],
+        }
+    }
+
     /// The slug launcher, sized for the viewmodel: a fat barrel over a boxy
     /// receiver, all mass and no grace. Like the drill it hangs off the
     /// camera, so parts sit at negative Y and the ground-origin convention
@@ -581,6 +677,10 @@ mod tests {
         assert_eq!(flier.parts.iter().filter(|part| part.spin == Some(Spin::Yaw)).count(), 1);
 
         assert_eq!(Rig::hand_drill().parts.len(), 4);
+        // Case, bezel, glass, two dials, an aerial and three of strap.
+        let handheld = Rig::handheld();
+        assert_eq!(handheld.parts.len(), 9);
+        assert!(handheld.parts.iter().all(|part| part.spin.is_none()));
         // Four legs and a body that is not a person's.
         let stalker = Rig::stalker();
         assert_eq!(stalker.parts.len(), 6);

@@ -685,6 +685,26 @@ compiled in. It needs **glibc 2.39 or newer** (SteamOS 3.7+ is fine, 3.6 is not)
 ./dist/gamingg-linux-x86_64
 ```
 
+### The handheld is a thing you hold
+
+The fleet uplink used to be a rectangle that appeared in front of your face.
+It is now an object: a cased unit with a bezel, a stub aerial and a strap over
+the forearm, and pressing `V` swings it up into view over about a third of a
+second, with the screen fading on as it arrives. Press it again and the unit
+drops back out of frame — it leaves rather than vanishing.
+
+The readout is the same readout, drawn on the unit's own glass. Every frame
+the four corners of the screen face are put through the very camera matrix the
+world was drawn with, and the panel lands in the rectangle that comes back, so
+looking around while it is up moves the screen with the thing carrying it. The
+rectangle is *fitted* to the glass rather than stretched onto it: the case is
+tipped toward you, so its projection is a trapezoid, and stretching text into
+that would squash it by however far the unit happens to be tilted.
+
+And while it is up, your drill and your launcher are away. You have two hands
+and both of them are holding the thing — which is what turns checking on your
+drones into a decision rather than a free pause.
+
 ### The townsfolk have faces
 
 Everybody in every town has eyes now, and the eyes go where their attention
@@ -1030,7 +1050,7 @@ Controls:
 | `7` | Take out or sling the slug launcher (once you own one) |
 | Hold left button | (launcher out) Fire — slow, heavy rounds on a visible arc |
 | `C` | Toggle first person and over-the-shoulder |
-| `V` | Open the handheld fleet uplink (arrows pick) |
+| `V` | Raise the handheld — a real unit that swings up into your hands, screen coming on as it arrives. Arrows pick, `Tab` turns the page, `V` again puts it down. Your drill is away while it is up |
 | `Tab` | (in the handheld) Turn the page: fleet roster, map, kestrel command |
 | `Enter` | (on the kestrel page) Give the selected standing order — orbit, sortie, perch, vanguard, dock — or, when the machine is standing at a lock or the town's watch box, set the coil on it |
 | `Enter` | (in the uplink) Look through the selected machine |
