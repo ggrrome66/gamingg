@@ -8,6 +8,7 @@
 //!   display, so it works over SSH, in CI, and against a software Vulkan
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
+mod arcade;
 mod arsenal;
 mod audio;
 mod awareness;
@@ -249,6 +250,7 @@ struct Options {
     ward: bool,
     /// Catch the handheld mid-swing rather than fully up.
     raising: bool,
+    arcade: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -299,6 +301,7 @@ fn parse_args() -> Result<Options, String> {
         ministar: false,
         ward: false,
         raising: false,
+        arcade: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -388,6 +391,10 @@ fn parse_args() -> Result<Options, String> {
             "--ministar" => options.ministar = true,
             "--ward" => options.ward = true,
             "--raising" => options.raising = true,
+            "--arcade" => {
+                options.device = true;
+                options.arcade = true;
+            }
             "--drones" => {
                 options.drones = value()?
                     .parse()
@@ -451,6 +458,7 @@ fn parse_args() -> Result<Options, String> {
                      --third-person      frame over the player's shoulder, body in shot\n  \
                      --device            draw the handheld fleet roster over the capture\n  \
                      --handheld-map      draw the handheld's map page instead\n  \
+                     --arcade            play the pocket arcade on the raised handheld\n  \
                      --view-distance <n> chunks visible in every direction (4-16, default 8)\n  \
                      --gold              enable the operator console (F10; dev builds only)\n  \
                      --sheriff           wear the badge (dev override; won at the ballot box later)\n  \
@@ -670,6 +678,55 @@ fn dig_nearby(
         .reduce(VoxelAabb::union)
         .unwrap_or(body);
     Ok((operation, plan.method, start, workings))
+}
+
+/// One step of a breadth-first walk across an arcade floor: the centre of the
+/// next cell on the shortest corridor route from `from` to `to`. Only the
+/// `--arcade` capture uses it — the game itself never pathfinds, because the
+/// player is the one doing the walking.
+fn arcade_waypoint(level: &arcade::Level, from: (f32, f32), to: (f32, f32)) -> (f32, f32) {
+    let side = arcade::SIDE as i32;
+    let start = (from.0 as i32, from.1 as i32);
+    let goal = (to.0 as i32, to.1 as i32);
+    if start == goal {
+        return to;
+    }
+    // Backwards from the goal, so the first hop off the start cell is simply
+    // whichever neighbour carries the smaller distance.
+    let mut seen = vec![u32::MAX; (side * side) as usize];
+    let index = |cell: (i32, i32)| (cell.1 * side + cell.0) as usize;
+    let mut queue = std::collections::VecDeque::from([goal]);
+    seen[index(goal)] = 0;
+    while let Some(cell) = queue.pop_front() {
+        if cell == start {
+            break;
+        }
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let next = (cell.0 + dx, cell.1 + dz);
+            if next.0 < 0 || next.1 < 0 || next.0 >= side || next.1 >= side {
+                continue;
+            }
+            if level.solid(next.0, next.1) || seen[index(next)] != u32::MAX {
+                continue;
+            }
+            seen[index(next)] = seen[index(cell)] + 1;
+            queue.push_back(next);
+        }
+    }
+    let here = seen[index(start)];
+    if here == u32::MAX {
+        return to;
+    }
+    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        let next = (start.0 + dx, start.1 + dz);
+        if next.0 < 0 || next.1 < 0 || next.0 >= side || next.1 >= side {
+            continue;
+        }
+        if !level.solid(next.0, next.1) && seen[index(next)] < here {
+            return (next.0 as f32 + 0.5, next.1 as f32 + 0.5);
+        }
+    }
+    to
 }
 
 fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
@@ -2293,7 +2350,93 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // the frame that shows it is an object rather than a panel.
         handheld.raise = if options.raising { 0.45 } else { 1.0 };
 
-        let mut pixels = device::render_device(&handheld, &roster, Some(&country), None);
+        // `--arcade` puts the toy on the glass instead of the roster: a
+        // cartridge printed, a run started, and the game played until the
+        // frame is worth looking at. The bot below only ever presses the
+        // buttons a player presses, so the picture is a real position in a
+        // real run rather than a pose set by hand.
+        let mut cabinet = arcade::Arcade::default();
+        if options.arcade {
+            handheld.page = device::Page::Arcade;
+            handheld.feedback = None;
+            cabinet.print();
+            cabinet.start();
+            let tick = 1.0 / 60.0;
+            for _ in 0..3_600 {
+                let pose = cabinet.pose();
+                let seen = cabinet.sighted();
+                let Some((tx, tz)) = seen.or_else(|| cabinet.nearest_standing()) else {
+                    break;
+                };
+                // Head for what you can see; otherwise for the next corner on
+                // the way to the nearest one, so the bot walks the corridors
+                // instead of leaning on a wall with a target behind it.
+                let (ax, az) = if seen.is_some() {
+                    (tx, tz)
+                } else {
+                    arcade_waypoint(cabinet.level(), (pose.x, pose.z), (tx, tz))
+                };
+                let (dx, dz) = (ax - pose.x, az - pose.z);
+                // Two distances: to the thing being aimed at, and to the one
+                // being hunted. The first steers, the second decides when to
+                // stop closing.
+                let reach = (dx * dx + dz * dz).sqrt();
+                let range = ((tx - pose.x).powi(2) + (tz - pose.z).powi(2)).sqrt();
+                // Shortest way round to the bearing of the thing being headed
+                // for.
+                let mut error = dz.atan2(dx) - pose.facing;
+                while error > std::f32::consts::PI {
+                    error -= std::f32::consts::TAU;
+                }
+                while error < -std::f32::consts::PI {
+                    error += std::f32::consts::TAU;
+                }
+                // Standing near the middle of a corridor cell rather than
+                // scraping a wall, one already down, and the next one square
+                // in the sights a few paces off: that is the frame.
+                let centred = (pose.x.fract() - 0.5).abs() < 0.25
+                    && (pose.z.fract() - 0.5).abs() < 0.25;
+                if cabinet.score > 0
+                    && seen.is_some()
+                    && centred
+                    && (3.0..7.0).contains(&range)
+                    && error.abs() < 0.06
+                {
+                    break;
+                }
+                cabinet.step(
+                    tick,
+                    arcade::Buttons {
+                        turn_left: error < -0.04,
+                        turn_right: error > 0.04,
+                        forward: error.abs() < 0.5
+                            && reach > 0.2
+                            && (seen.is_none() || range > 3.2),
+                        // Shoot the first one on sight to get a score on the
+                        // strip, then hold fire so the capture catches the
+                        // next one alive and square in the sights.
+                        fire: seen.is_some()
+                            && error.abs() < 0.10
+                            && (cabinet.score == 0 || range < 2.8),
+                        ..arcade::Buttons::default()
+                    },
+                );
+            }
+            println!(
+                "arcade capture: floor {}, health {}, ammo {}, {} standing, score {}",
+                cabinet.floor,
+                cabinet.health,
+                cabinet.ammo,
+                cabinet.standing(),
+                cabinet.score
+            );
+        }
+
+        let mut pixels = if options.arcade {
+            arcade::render(&cabinet)
+        } else {
+            device::render_device(&handheld, &roster, Some(&country), None)
+        };
         device::dim(&mut pixels, handheld.raise);
 
         // Camera before objects: `set_objects` culls against the last
@@ -3249,6 +3392,8 @@ struct Active {
     well_panel: well::Panel,
     /// The ward, when its door is open.
     clinic: clinic::Clinic,
+    /// The pocket arcade: the cartridge, the run on it and the record.
+    arcade: arcade::Arcade,
     /// The deep, and whatever it has sent. Live-only like the posse: it
     /// reads the world, spends health and says things, and never writes a
     /// block or touches the pile.
@@ -3384,6 +3529,27 @@ impl App {
         // is only cleared once the unit is genuinely off the frame.
         if !active.device.raise_by(dt) {
             active.renderer.clear_overlay(DEVICE_SLOT);
+        }
+
+        // The toy. Its controls are held keys read straight off the input
+        // state — the panel has released the pointer, and the pad's own
+        // panel mapping already turns buttons into these codes, so the Deck
+        // plays it without a line of new input code.
+        if active.device.open && active.device.page == device::Page::Arcade {
+            let held = arcade::Buttons {
+                forward: self.input.is_down(KeyCode::KeyW),
+                back: self.input.is_down(KeyCode::KeyS),
+                turn_left: self.input.is_down(KeyCode::KeyA)
+                    || self.input.is_down(KeyCode::ArrowLeft),
+                turn_right: self.input.is_down(KeyCode::KeyD)
+                    || self.input.is_down(KeyCode::ArrowRight),
+                strafe_left: self.input.is_down(KeyCode::KeyQ),
+                strafe_right: self.input.is_down(KeyCode::KeyE),
+                fire: self.input.is_down(KeyCode::Space),
+                start: self.input.is_down(KeyCode::Enter)
+                    || self.input.is_down(KeyCode::NumpadEnter),
+            };
+            active.arcade.step(dt, held);
         }
 
         // The body stands still whenever the player's attention is elsewhere:
@@ -4594,6 +4760,15 @@ impl App {
                 return;
             }
         }
+        // And one cartridge is one cartridge, for the same reason.
+        if matches!(
+            printer::recipe(index).map(|recipe| recipe.output),
+            Some(printer::Output::Cartridge)
+        ) && active.arcade.owned
+        {
+            active.printer.feedback = Some("YOU ALREADY OWN ONE".into());
+            return;
+        }
         let Some(base) = active.mining.fleet.base.as_mut() else {
             active.printer.feedback = Some("NO BASE PILE TO DRAW ON".into());
             return;
@@ -5518,6 +5693,12 @@ impl App {
             printer::Output::Optic(name) => {
                 active.optics.owned.insert(name.to_string());
                 format!("PRINTED A {}", name.to_uppercase())
+            }
+            printer::Output::Cartridge => {
+                // Live-only like the optics and the wallet: a toy on a screen
+                // is not state a replay carries.
+                active.arcade.print();
+                "PRINTED A CARTRIDGE - IT IS ON THE HANDHELD".to_string()
             }
             printer::Output::Upgrade(line) => {
                 // The same line the counter sells, raised the same way —
@@ -6481,6 +6662,29 @@ impl App {
                 .active
                 .as_ref()
                 .is_some_and(|active| active.device.page == device::Page::Kestrel);
+            // The arcade takes the keyboard for itself: its controls are
+            // *held* rather than pressed, read straight off the input state
+            // every frame, so the only thing this handler must do on that
+            // page is keep out of the way. Enter opening a drone feed
+            // mid-firefight would be a comedy.
+            let on_arcade_page = self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.device.page == device::Page::Arcade);
+            if on_arcade_page {
+                match code {
+                    KeyCode::Tab => {
+                        let Some(active) = &mut self.active else { return };
+                        active.device.turn_page();
+                    }
+                    KeyCode::KeyV | KeyCode::Escape => {
+                        let Some(active) = &mut self.active else { return };
+                        active.device.close();
+                    }
+                    _ => {}
+                }
+                return;
+            }
             match code {
                 KeyCode::ArrowUp | KeyCode::ArrowDown => {
                     let rows = if on_kestrel_page {
@@ -7755,8 +7959,13 @@ impl App {
             rows: scout_rows,
             job: job_line,
         });
-        let mut pixels =
-            device::render_device(&active.device, &roster, Some(&country), scout.as_ref());
+        // On the arcade page the readout *is* the game: same buffer, same
+        // glass, and `device` never has to learn what a corridor is.
+        let mut pixels = if active.device.page == device::Page::Arcade {
+            arcade::render(&active.arcade)
+        } else {
+            device::render_device(&active.device, &roster, Some(&country), scout.as_ref())
+        };
         // The screen comes on as the unit arrives.
         device::dim(&mut pixels, active.device.raise);
 
@@ -8979,6 +9188,9 @@ impl App {
         if let Err(error) = active.mining.wells.save(save.root()) {
             log::error!("could not save the wells: {error}");
         }
+        if let Err(error) = active.arcade.save(save.root()) {
+            log::error!("could not save the arcade: {error}");
+        }
         if let Err(error) = active.health.save(save.root()) {
             log::error!("could not save the player's condition: {error}");
         }
@@ -9177,6 +9389,7 @@ impl ApplicationHandler for App {
         let mut tank = fuel::Tank::default();
         let mut crew_wear = wear::Wear::default();
         let mut holes = well::Wells::default();
+        let mut cabinet = arcade::Arcade::default();
         let mut condition = health::Health::default();
         let mut name = reputation::Reputation::default();
         let mut vaults = bank::Bank::default();
@@ -9207,6 +9420,9 @@ impl ApplicationHandler for App {
             // goods on the pile the fleet burns, so a reload that forgot one
             // would dig a different hole than the journal says it dug.
             holes.load(save.root());
+            // The cabinet keeps what a cabinet keeps: the cartridge, the
+            // record and how deep anybody ever got.
+            cabinet.load(save.root());
             condition.load(save.root());
             name.load(save.root());
             vaults.load(save.root());
@@ -9329,6 +9545,7 @@ impl ApplicationHandler for App {
             electrolyser: bath,
             well_panel: well::Panel::default(),
             clinic: clinic::Clinic::default(),
+            arcade: cabinet,
             dark: stalker::TheDark::default(),
             dose: dose::Dose::default(),
             dose_check: 0.0,

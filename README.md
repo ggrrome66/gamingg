@@ -705,6 +705,28 @@ And while it is up, your drill and your launcher are away. You have two hands
 and both of them are holding the thing — which is what turns checking on your
 drones into a decision rather than a free pause.
 
+### There is a game on the handheld
+
+Print a `POCKET ARCADE` cartridge at a fabricator — it is dear, and it sits
+high on the ladder, because it is the last thing you need and the first thing
+you will want. It slots into the unit you already carry. Raise the handheld
+with `V`, `Tab` round to the arcade page, and there is a corridor shooter
+running on the glass: rock walls receding into the dark, something with two
+eyes coming down the passage at you, a gun at the bottom of the screen and a
+door out somewhere on the floor.
+
+Find the door and the next floor is worse — more of them, faster, and less
+ammunition lying about. A kill pays two rounds back, so pushing forward is
+what keeps you loaded. When they finally get you the run ends, and the
+cartridge remembers two things: the best score and the deepest floor you
+reached.
+
+Every floor is a number: the same cartridge deals the same floors in the same
+order, which is what makes a score worth comparing. And every wall, every
+enemy and every pixel of the status strip is computed here — no borrowed
+assets, no borrowed engine, exactly like the terrain and the audio. It is not
+a port of anything.
+
 ### The townsfolk have faces
 
 Everybody in every town has eyes now, and the eyes go where their attention
@@ -1051,7 +1073,8 @@ Controls:
 | Hold left button | (launcher out) Fire — slow, heavy rounds on a visible arc |
 | `C` | Toggle first person and over-the-shoulder |
 | `V` | Raise the handheld — a real unit that swings up into your hands, screen coming on as it arrives. Arrows pick, `Tab` turns the page, `V` again puts it down. Your drill is away while it is up |
-| `Tab` | (in the handheld) Turn the page: fleet roster, map, kestrel command |
+| `Tab` | (in the handheld) Turn the page: fleet roster, map, kestrel command, arcade |
+| `W` `S` `A` `D`, arrows or `Q` / `E`, `Space`, `Enter` | (on the arcade page) Walk, strafe, turn, shoot, start a run — keys only, so the pad reaches it too |
 | `Enter` | (on the kestrel page) Give the selected standing order — orbit, sortie, perch, vanguard, dock — or, when the machine is standing at a lock or the town's watch box, set the coil on it |
 | `Enter` | (in the uplink) Look through the selected machine |
 | `R` | Take or release the master override of what you are watching |
@@ -1465,6 +1488,9 @@ cargo run --release -p vx-app -- --replay --world myworld
 
 # put a bigger crew on the next dispatch
 cargo run --release -p vx-app -- --drones 8
+
+# the pocket arcade, mid-fight, on the raised handheld
+cargo run --release -p vx-app -- --screenshot arcade.ppm --at 0,10 --arcade
 
 # the handheld's fleet roster and a live feed banner
 cargo run --release -p vx-app -- --screenshot uplink.ppm --at 0,10 --device

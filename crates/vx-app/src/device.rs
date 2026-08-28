@@ -232,6 +232,9 @@ pub enum Page {
     Map,
     /// The scout's standing orders.
     Kestrel,
+    /// The toy. Nothing on this page is about the world at all, which is
+    /// the point of owning it.
+    Arcade,
 }
 
 /// What the kestrel page needs to know, read once per frame.
@@ -303,7 +306,8 @@ impl Device {
         self.page = match self.page {
             Page::Fleet => Page::Map,
             Page::Map => Page::Kestrel,
-            Page::Kestrel => Page::Fleet,
+            Page::Kestrel => Page::Arcade,
+            Page::Arcade => Page::Fleet,
         };
         self.cursor = 0;
         self.feedback = None;
@@ -772,6 +776,8 @@ mod tests {
         assert_eq!(device.page, Page::Map);
         device.turn_page();
         assert_eq!(device.page, Page::Kestrel);
+        device.turn_page();
+        assert_eq!(device.page, Page::Arcade);
         device.turn_page();
         assert_eq!(device.page, Page::Fleet);
     }

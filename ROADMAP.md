@@ -108,7 +108,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 30 | `a4248b3` | Factions: the Compact and the Holdouts remember what the bounty board forgets — standing shades prices, buys a challenge before a volley, and puts the spoofers in the other side's hands |
 | 31 | `02ac7c9` | Uranium, oil and gas, and the thing that hunts by ear: a deep ore that pays for itself in dose, fluid reservoirs worked by a wellhead that keeps paying until it stops, and a stalker that is told a thirty-two metre cell and has to find you inside it |
 | 32 | `8c6d21a` | Faces, walls and a ward: the townsfolk get eyes that follow what they are watching and a grunt for anyone who crowds them, every town on the frontier walls itself with at least a mini star, and a free cot in every clinic mends you and scrubs the dose |
-| 33 | _this_ | The handheld you hold: the fleet uplink becomes a cased unit that swings up into your hands with its screen coming on, the readout is projected onto the model's own glass through the frame's camera matrix, and your drill is away while it is up |
+| 33 | `3b29a4d` | The handheld you hold: the fleet uplink becomes a cased unit that swings up into your hands with its screen coming on, the readout is projected onto the model's own glass through the frame's camera matrix, and your drill is away while it is up |
+| 34 | _this_ | The pocket arcade: a cartridge printed at the fabricator turns the handheld into a games machine — an original corridor shooter, every wall and every pixel of it computed, floors that loop meaner, and a record the cabinet keeps |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1841,6 +1842,66 @@ that do anything; and any change at all to what the readout says.
 
 ---
 
+## Shipped — Stage 34: the pocket arcade
+
+**The oldest item on the list, and it needed stage 33 first.** A game inside
+the game is a joke when it opens as a window over the world. It is a different
+thing entirely when it runs on the screen of a unit you raise into your hands:
+a machine you are holding, in a world that carries on around it. So the toy
+waited until the handheld was an object, and this round slots a cartridge into
+it.
+
+**It is not, and will never be, a Doom port.** The licensing section has
+carried that rule since long before the stage arrived. WADs are not
+redistributable and a GPL engine would encumber the binary, so every wall,
+every corridor, every enemy and every pixel of the status strip is computed
+here — the same answer the terrain, the tiles and the audio already give.
+What it borrows is the *technique*, which is nobody's property: one ray per
+screen column, a grid walked cell by cell, and the reciprocal of the distance
+for the height of the strip.
+
+**A floor is a number.** `Level::of(seed, floor)` carves a 24×24 grid with the
+same splitmix hashing the world uses, in one continuous two-cell-step walk —
+so the map is connected *by construction* rather than by generating and
+checking, and the flood fill that proves it exists only in the test. Pure in
+`(seed, floor)`: the same cartridge deals the same floors in the same order,
+which is the whole reason a high score means anything.
+
+**The loop tightens.** Reach the exit and the next floor comes with more of
+them, moving faster, and less ammunition on the ground — floored so that no
+floor is unwinnable before it starts. A kill pays two rounds back, so pressing
+forward is what keeps you loaded and hiding is what runs you dry. Die and the
+run ends; the cabinet keeps the best score and the deepest floor, and nothing
+else.
+
+**Earned, not given.** The cartridge is a fabricator print at a high floor of
+the ladder, in bars, ore and a plank. Nothing about the world unlocks it and
+nothing about it touches the world: no journal command, no clock, no pile, no
+economy. `arcade.dat` (magic `VXGM`) holds three facts — cartridge owned, best
+score, deepest floor — and a save with none of it plays exactly like a save
+with all of it, minus the toy.
+
+**Keys only, which is the Deck for free.** The buttons come from
+`InputState::is_down`, so the game plays with the mouse released — the way a
+panel behaves — and the pad reaches it through the key codes
+`gamepad::key_for` already synthesises in panel context. While the arcade page
+is up the rest of the keyboard is deliberately deaf: only `Tab` to leave the
+page and `V` or `Escape` to put the unit away.
+
+**Surface.** Print `POCKET ARCADE` at a fabricator, raise the handheld with
+`V`, `Tab` round to the arcade page, and play: `W`/`S` walk, `A`/`D` strafe,
+the arrow keys or `Q`/`E` turn, `Space` shoots, `Enter` starts. Without a
+cartridge the page says where to get one, exactly as the kestrel page does
+without a scout. `--arcade` captures it: the unit raised, a corridor, and
+something with two eyes coming down it.
+
+**Deliberately not in 34:** sound of its own; a second weapon; anything the
+arcade does to the world outside it (no credits, no skill, no standing); saved
+runs — the cabinet remembers the record, not the game in progress; and any
+asset that is not computed.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -2030,15 +2091,18 @@ if the traffic it produces reads as dull.
 
 The hunt note above is finished: its engine landed in 28, its director half
 in 29, and its stalker in 31 alongside the deep resources it hunts you
-through. What is left of the plan is one toy and the civic layer.
+through. The toy is finished too: the pocket arcade shipped in 34. What is
+left of the plan is the civic layer, which is the last note still holding
+rounds.
 
 | Stage | What | Why here |
 |---|---|---|
-| 34 | The pocket arcade | Endgame toy: an original mini-FPS on a craftable handheld |
+| 35 | Civic layer B2 | Town offices, residents who run the player's own economic loop, and the warrant chain |
+| 36 | Civic layer B3 | Elections on the beacon console, votes cast on trade goodwill, and offices the player can hold |
 
 ## The feature map
 
-The whole game at a glance, as of stage 33.
+The whole game at a glance, as of stage 34.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -2138,11 +2202,13 @@ an F3 debug readout in every build (engine vitals, the journal clock, the
 fleet, the hostiles' belief, your dose, your medkits, your wells, how roused
 the deep is and both standings — diagnostics that change nothing they report on, unlike
 the gold panel, which is why one ships and the other is compiled out);
+a pocket arcade on the handheld's own glass (a printed cartridge, an
+original corridor shooter computed pixel by pixel, floors that loop meaner and
+a cabinet that keeps the record);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** the pocket arcade; the civic layer B2 (offices,
-the NPC economic loop, the warrant chain) and B3 (elections on trade
-goodwill).
+**Planned, in arc order:** the civic layer B2 (offices, the NPC economic
+loop, the warrant chain) and B3 (elections on trade goodwill).
 
 **Outstanding engineering:** floating-origin rebase; journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the

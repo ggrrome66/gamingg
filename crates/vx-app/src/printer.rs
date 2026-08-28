@@ -70,6 +70,8 @@ pub enum Output {
     Module(&'static str),
     /// A piece of the optics kit: a better lamp or a visor.
     Optic(&'static str),
+    /// The arcade cartridge: a toy, and the last thing on the ladder.
+    Cartridge,
     /// One mark on an upgrade line — the same line the counter sells, paid
     /// for in materials instead of credits.
     Upgrade(&'static str),
@@ -250,6 +252,21 @@ pub const CATALOGUE: &[Recipe] = &[
         inputs: &[("engine:copper_bar", 6), ("engine:copper_ore", 4)],
         seconds: 60.0,
         floor: 20,
+    },
+    Recipe {
+        label: "POCKET ARCADE",
+        output: Output::Cartridge,
+        // The dearest thing on the ladder that does no work at all, which is
+        // exactly the point of it: everything else here is a tool, and this
+        // is the one row you print because you want to rather than because
+        // you need to.
+        inputs: &[
+            ("engine:copper_bar", 12),
+            ("engine:copper_ore", 6),
+            ("engine:plank", 2),
+        ],
+        seconds: 70.0,
+        floor: 22,
     },
     Recipe {
         label: "KESTREL",
@@ -540,6 +557,7 @@ mod tests {
                 "PRESS ROLLERS",
                 "THERMAL VISOR",
                 "LIGHT COIL",
+                "POCKET ARCADE",
                 "KESTREL",
                 "GROUND DRONE",
             ]
