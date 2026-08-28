@@ -310,7 +310,11 @@ mod tests {
 
     #[test]
     fn health_round_trips_and_never_loads_you_already_beaten() {
-        let directory = std::env::temp_dir().join(format!("vx-health-{}", std::process::id()));
+        // A directory of its own: tests run as threads in one process, and
+        // two of them sharing `health.dat` is a race that only shows up
+        // under some orderings.
+        let directory =
+            std::env::temp_dir().join(format!("vx-health-trip-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
 
         let mut health = Health::default();
@@ -406,7 +410,8 @@ mod tests {
 
     #[test]
     fn the_medkits_survive_a_save_and_an_older_file_still_loads() {
-        let directory = std::env::temp_dir().join(format!("vx-health-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("vx-health-kit-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
 
         let mut health = Health::default();

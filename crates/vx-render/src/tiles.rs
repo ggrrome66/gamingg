@@ -93,7 +93,20 @@ pub mod slot {
     /// The ward cot: what a hospital is, mechanically.
     pub const COT: u32 = 50;
 
-    pub const COUNT: u32 = 51;
+    /// Spruce bark: darker and finer than the hardwoods'.
+    pub const SPRUCE_SIDE: u32 = 51;
+    /// Spruce end grain — tighter rings than a hardwood's.
+    pub const SPRUCE_TOP: u32 = 52;
+    /// Subalpine needles: blue-dark, dense.
+    pub const NEEDLES: u32 = 53;
+    /// Black-spruce bark: grey, scaly, thin.
+    pub const BOG_BARK: u32 = 54;
+    /// Bog needles: sparse, olive, half sky showing through.
+    pub const BOG_NEEDLES: u32 = 55;
+    /// Sphagnum: the moss carpet a peat bog stands on.
+    pub const SPHAGNUM: u32 = 56;
+
+    pub const COUNT: u32 = 57;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -269,6 +282,65 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.16, 0.34, 0.12], noise * 0.10)
                     } else {
                         shade([0.24, 0.46, 0.16], noise * 0.12)
+                    }
+                }
+                slot::SPRUCE_SIDE => {
+                    // Conifer bark: finer ridges than a hardwood's, and
+                    // darker, so a spruce stand reads black-green at range.
+                    if jitter(tile ^ 0x51, x, y / 4) > -0.05 {
+                        shade([0.20, 0.14, 0.10], noise * 0.07)
+                    } else {
+                        shade([0.29, 0.20, 0.13], noise * 0.09)
+                    }
+                }
+                slot::SPRUCE_TOP => {
+                    // Tight rings: a slow tree in a short season.
+                    let cx = x as f32 - 7.5;
+                    let cy = y as f32 - 7.5;
+                    let ring = (cx * cx + cy * cy).sqrt() as u32;
+                    if ring.is_multiple_of(2) {
+                        shade([0.40, 0.30, 0.18], noise * 0.05)
+                    } else {
+                        shade([0.54, 0.41, 0.25], noise * 0.07)
+                    }
+                }
+                slot::NEEDLES => {
+                    // Dense and blue-dark, the colour that makes the high
+                    // country read as conifer from a ridge away.
+                    if jitter(tile ^ 0x53, x / 2, y / 2) > 0.0 {
+                        shade([0.10, 0.24, 0.16], noise * 0.09)
+                    } else {
+                        shade([0.14, 0.32, 0.22], noise * 0.10)
+                    }
+                }
+                slot::BOG_BARK => {
+                    // Thin scaly grey: a black spruce is mostly bark.
+                    if jitter(tile ^ 0x54, x / 3, y / 3) > 0.0 {
+                        shade([0.26, 0.24, 0.21], noise * 0.08)
+                    } else {
+                        shade([0.34, 0.31, 0.26], noise * 0.09)
+                    }
+                }
+                slot::BOG_NEEDLES => {
+                    // Olive and patchy. Opaque, like every other leaf here:
+                    // foliage never joins water in the unsorted alpha pass.
+                    // A bog crown reads thin because there is so little of
+                    // it, not because the texture has holes in it.
+                    if jitter(tile ^ 0x55, x, y) > 0.35 {
+                        shade([0.13, 0.19, 0.11], noise * 0.09)
+                    } else if jitter(tile ^ 0x56, x / 2, y / 2) > 0.0 {
+                        shade([0.18, 0.28, 0.14], noise * 0.10)
+                    } else {
+                        shade([0.26, 0.34, 0.18], noise * 0.11)
+                    }
+                }
+                slot::SPHAGNUM => {
+                    // The moss carpet: pale green, wet, faintly hummocked.
+                    let hummock = ((x / 4) + (y / 4)) % 2 == 0;
+                    if hummock {
+                        shade([0.44, 0.55, 0.32], noise * 0.10)
+                    } else {
+                        shade([0.34, 0.47, 0.30], noise * 0.11)
                     }
                 }
                 slot::TUFT => {

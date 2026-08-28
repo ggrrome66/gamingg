@@ -142,7 +142,16 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // in tight against the buildings. And every town gained a clinic, which is a
 // building where there was open plot. A log recorded over the old ground
 // would replay its digging into rock that has a wall through it.
-const VERSION: u32 = 21;
+// Twenty-two changes what grows on the ground rather than what is under it.
+// Every column now belongs to one of three forests, decided by how high and
+// how wet it is: peat bog in the flat convergent lows, mixed hardwood with
+// the odd emergent giant through the middle, subalpine conifer up high
+// thinning to knee-high krummholz at the treeline and bare rock above it.
+// The trees themselves changed species, shape and density, the bog carpets
+// itself in sphagnum instead of grass, and nothing at all stands above the
+// tree limit. A log recorded over the old forest would replay a crew driving
+// through trunks that are no longer there and around ones that are.
+const VERSION: u32 = 22;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///

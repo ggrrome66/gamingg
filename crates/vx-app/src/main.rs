@@ -251,6 +251,7 @@ struct Options {
     /// Catch the handheld mid-swing rather than fully up.
     raising: bool,
     arcade: bool,
+    forest: Option<String>,
 }
 
 /// Which method a `--dig` run should use.
@@ -302,6 +303,7 @@ fn parse_args() -> Result<Options, String> {
         ward: false,
         raising: false,
         arcade: false,
+        forest: None,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -391,6 +393,7 @@ fn parse_args() -> Result<Options, String> {
             "--ministar" => options.ministar = true,
             "--ward" => options.ward = true,
             "--raising" => options.raising = true,
+            "--forest" => options.forest = Some(value()?),
             "--arcade" => {
                 options.device = true;
                 options.arcade = true;
@@ -459,6 +462,7 @@ fn parse_args() -> Result<Options, String> {
                      --device            draw the handheld fleet roster over the capture\n  \
                      --handheld-map      draw the handheld's map page instead\n  \
                      --arcade            play the pocket arcade on the raised handheld\n  \
+                     --forest <which>    frame a stand of bog, cove or high forest\n  \
                      --view-distance <n> chunks visible in every direction (4-16, default 8)\n  \
                      --gold              enable the operator console (F10; dev builds only)\n  \
                      --sheriff           wear the badge (dev override; won at the ballot box later)\n  \
@@ -1809,6 +1813,150 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
     // The wellhead, over a field the seed actually put there. Late like the
     // posse fixture, and for the same reason.
+    if let Some(which) = options.forest.as_deref() {
+        // Frame a stand of one of the three forests. The site is *found*
+        // rather than written down: the fixture walks out from `--at` looking
+        // for a column of the right forest with more of the same around it,
+        // so the picture is a real stand rather than one lucky tree.
+        let wanted = match which {
+            "bog" | "swamp" | "low" => vx_world::forest::Biome::Bog,
+            "cove" | "hardwood" | "mid" => vx_world::forest::Biome::Hardwood,
+            "high" | "subalpine" | "conifer" | "treeline" => vx_world::forest::Biome::Subalpine,
+            other => {
+                return Err(format!(
+                    "--forest wants bog, cove, high or treeline (got {other})"
+                ))
+            }
+        };
+        // `treeline` wants the wind-flattened stuff, which only grows on the
+        // very tops: score by height instead of by how solid the stand is.
+        let summit = which == "treeline";
+        let seed = world.seed();
+        // A generator of its own, so the search and the census can go on
+        // reading the height field while the world is being loaded and
+        // remeshed around the site they picked.
+        let generator = world.generator().clone();
+        let natural = |x: i32, z: i32| generator.natural_height_at(x, z);
+
+        // How much of a 40-block square around a column grows the same
+        // forest. A stand, not a stray column on an ecotone.
+        let solidity = |x: i32, z: i32| {
+            let mut same = 0;
+            for dx in (-20..=20).step_by(10) {
+                for dz in (-20..=20).step_by(10) {
+                    if vx_world::forest::biome_at(seed, x + dx, z + dz, &natural) == wanted {
+                        same += 1;
+                    }
+                }
+            }
+            same
+        };
+
+        let mut best: Option<(i32, (i32, i32))> = None;
+        'search: for ring in 0..90 {
+            for step in -ring..=ring {
+                for (x, z) in [
+                    (options.at.0 + step * 24, options.at.1 + ring * 24),
+                    (options.at.0 + step * 24, options.at.1 - ring * 24),
+                    (options.at.0 + ring * 24, options.at.1 + step * 24),
+                    (options.at.0 - ring * 24, options.at.1 + step * 24),
+                ] {
+                    if vx_world::forest::biome_at(seed, x, z, &natural) != wanted {
+                        continue;
+                    }
+                    // Not on somebody's main street: a town's lawns and
+                    // plateau are not what a forest capture is about.
+                    if !generator.towns_near((x, z), 110).is_empty() {
+                        continue;
+                    }
+                    let score = if summit {
+                        natural(x, z)
+                    } else {
+                        solidity(x, z)
+                    };
+                    if best.is_none_or(|(had, _)| score > had) {
+                        best = Some((score, (x, z)));
+                    }
+                    if !summit && score == 25 {
+                        break 'search;
+                    }
+                    if summit && score > vx_world::forest::TREELINE_Y + 6 {
+                        break 'search;
+                    }
+                }
+            }
+        }
+        let (score, (x, z)) = best.ok_or_else(|| {
+            format!("no {which} forest within two kilometres of --at; try another seed")
+        })?;
+
+        // The stand may be a long way from `--at`: bring its ground with it.
+        let centre = vx_core::BlockPos::new(x, 0, z).chunk();
+        // Wide enough that the far edge of the loaded ground is out of shot
+        // — the chunks past it have no lit neighbours and read as a black
+        // bite out of the hillside — and no wider, because past about nine
+        // the frame starts losing meshes it has no room for.
+        world.load_around(centre, 8);
+        remesh_all(&context, &mut renderer, &mut world);
+
+        let ground = world.surface_y(x, z).unwrap_or(80) as f32;
+        // Stand off and a little above: a forest is a silhouette, and a
+        // silhouette needs sky behind it. The stand-off column has its own
+        // ground, which may be higher than the stand's — put the camera
+        // above whichever is higher or the shot is taken from inside a hill,
+        // looking up at the underside of the country.
+        // Stand downhill of the stand, so the trees have sky behind them
+        // rather than more hillside. On flat ground the gradient says
+        // nothing, and any direction will do.
+        let slope_x = (natural(x + 8, z) - natural(x - 8, z)) as f32;
+        let slope_z = (natural(x, z + 8) - natural(x, z - 8)) as f32;
+        let fall = (slope_x * slope_x + slope_z * slope_z).sqrt();
+        let (back_x, back_z) = if fall > 3.0 {
+            (
+                x - (slope_x / fall * 34.0) as i32,
+                z - (slope_z / fall * 34.0) as i32,
+            )
+        } else {
+            (x - 26, z - 34)
+        };
+        let behind = world.surface_y(back_x, back_z).unwrap_or(80) as f32;
+        let eye = glam::Vec3::new(
+            back_x as f32,
+            ground.max(behind) + 13.0,
+            back_z as f32,
+        );
+        camera.position = eye;
+        look_at(&mut camera, glam::Vec3::new(x as f32, ground + 6.0, z as f32));
+        renderer.update_camera(&context.queue, &camera);
+
+        // What actually grows here, counted rather than claimed.
+        let sites = generator.towns_overlapping((x - 120, z - 120), (x + 120, z + 120));
+        let height_at = |cx: i32, cz: i32| generator.height_with_sites(cx, cz, &sites);
+        let trees = vx_world::flora::trees_overlapping(
+            seed,
+            (x - 120, z - 120),
+            (x + 120, z + 120),
+            &height_at,
+            &natural,
+            &sites,
+        );
+        let count = |species| {
+            trees
+                .iter()
+                .filter(|tree| tree.species == species)
+                .count()
+        };
+        println!(
+            "forest capture: {which} at {x},{z} (ground {ground}, score {score}) — \
+             {} hardwood, {} giant, {} spruce, {} bog spruce, {} krummholz in 240 blocks",
+            count(vx_world::flora::Species::Hardwood),
+            count(vx_world::flora::Species::Giant),
+            count(vx_world::flora::Species::Spruce),
+            count(vx_world::flora::Species::BogSpruce),
+            count(vx_world::flora::Species::Krummholz),
+        );
+    }
+
     if options.well {
         // The nearest field to `--at`, off the lattice itself rather than by
         // sampling columns: bodies are hundreds of blocks apart, and a

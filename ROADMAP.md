@@ -109,7 +109,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 31 | `02ac7c9` | Uranium, oil and gas, and the thing that hunts by ear: a deep ore that pays for itself in dose, fluid reservoirs worked by a wellhead that keeps paying until it stops, and a stalker that is told a thirty-two metre cell and has to find you inside it |
 | 32 | `8c6d21a` | Faces, walls and a ward: the townsfolk get eyes that follow what they are watching and a grunt for anyone who crowds them, every town on the frontier walls itself with at least a mini star, and a free cot in every clinic mends you and scrubs the dose |
 | 33 | `3b29a4d` | The handheld you hold: the fleet uplink becomes a cased unit that swings up into your hands with its screen coming on, the readout is projected onto the model's own glass through the frame's camera matrix, and your drill is away while it is up |
-| 34 | _this_ | The pocket arcade: a cartridge printed at the fabricator turns the handheld into a games machine — an original corridor shooter, every wall and every pixel of it computed, floors that loop meaner, and a record the cabinet keeps |
+| 34 | `7cd3c26` | The pocket arcade: a cartridge printed at the fabricator turns the handheld into a games machine — an original corridor shooter, every wall and every pixel of it computed, floors that loop meaner, and a record the cabinet keeps |
+| 35 | _this_ | Three forests: every column belongs to a peat bog, a mixed hardwood cove or subalpine conifer, decided by how high and how wet the ground is — with emergent giants over the cove, krummholz mats at the treeline, bare rock above them and sphagnum underfoot in the lows |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1902,6 +1903,66 @@ asset that is not computed.
 
 ---
 
+## Shipped — Stage 35: three forests
+
+**Every tree in the world was the same tree.** One lattice, one shape, one
+green. The country underneath it had rivers, coasts, ridges and a hundred and
+eighty blocks of relief, and none of it changed what grew. This round the
+forest reads the ground.
+
+**Two fields decide it, and both come off the terrain that already exists.**
+How high a column is, and how wet. Wetness is the hydrologist's index with the
+non-local half taken out: the real one is `ln(a / tan β)`, where `a` is the
+upslope area draining through a point — and area accumulated over a catchment
+cannot be a pure function of a column, which the house rules do not allow.
+What survives is the shape of the idea: water gathers where the ground is
+*flat* and *convergent*, so curvature over slope says most of what the index
+says and says it from five height samples. A slow water-table field is added
+on top, because some flat country is wet for reasons its shape does not show.
+
+**The three forests, and what each one is.** A **peat bog** in the flat
+convergent lows: thin crooked black spruce over a sphagnum carpet, crowded
+with stems you can see straight through. A **mixed hardwood cove** through the
+middle: broad crowns, an open floor, and one cell in thirteen carrying an
+**emergent giant** standing a head above the closed canopy — the tulip poplar
+of a real cove forest, and the only tree in the game you can pick out from a
+ridge away. **Subalpine conifer** up high: tapered spires that get narrower
+and darker with height, thinning at the **treeline** into knee-high
+**krummholz** mats, and stopping altogether above the tree limit, which is
+what finally makes a summit read as a summit.
+
+**The bands are not contour lines.** A low-frequency field wobbles the
+elevation thresholds by a few blocks, so the treeline wanders the way a real
+one does instead of tracing a level curve around a hill. And cold air drains
+downhill: a deep hollow counts as higher ground than it is, which is why
+spruce fingers down the drainages into hardwood country. That is one term in
+one function, and it is the single change that makes the map look like it was
+grown rather than banded.
+
+**The ground says it too.** A bog carpets itself in sphagnum instead of grass,
+and grass tufts are a hardwood-country thing — the moss has the lows and the
+high country is too cold and too thin for a lawn. You can tell which forest
+you are standing in without looking up.
+
+**Purity held, and it had to.** Which forest a column grows is read off the
+*natural* height field, never the town-blended one: a market square's plateau
+must not decide what grows on the hill behind it. Nothing is stored, both
+sides of a chunk border derive the same answer, and the canopy has no seams.
+The journal moves to twenty-two, because ground that changed is ground a
+replay would drive a crew through.
+
+**Surface.** `--forest bog`, `--forest cove`, `--forest high` and
+`--forest treeline` each go and *find* a stand — walking out from `--at`
+looking for a column of the right forest with more of the same around it, out
+of town, and framing it from downhill so the trees have sky behind them.
+
+**Deliberately not in 35:** felling anything; the succession clock and the
+disturbance ledger the note wants (nothing yet disturbs a stand, so a ledger
+would have nothing to hold); riparian corridors; wave-regeneration bands; and
+pit-and-mound microtopography, which needs treefall first.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -1997,6 +2058,148 @@ the note blocks the civic half, which shipped in stage 23.
 
 ---
 
+## Planned — the forest note: felling, fluid and weather
+
+A design note arrived covering the forest, the water and the weather, and it
+is recorded whole here as every note before it has been. Its first quarter
+shipped as stage 35 above; what follows is the rest, in the order the note
+itself argues for, because the ordering is the most useful thing in it.
+
+**Two of its premises were wrong about this engine and are worth stating
+plainly**: there is no succession clock and no flora ledger here yet — the
+note assumes both exist. They do not. The forest is a pure function of the
+ground with nothing stored, so the ledger arrives with the first thing that
+can *disturb* a stand, which is felling.
+
+### Felling, and the thirty per cent rule
+
+The rule the note proposes — cut past about a third of the trunk and it goes
+over — turns out to be real forestry rather than a guess. Directional felling
+practice (OSHA's eTool, Husqvarna's academy, ANSI Z133) puts the **face notch
+at 15–33% of trunk diameter**, traditionally a third and lower in modern
+guidance; the **hinge at about 10% of diameter, at least 80% of the diameter
+in length**; and the back cut slightly above the notch. The notch *aims* the
+tree, the hinge *steers* it, and when the back cut takes the holding wood down
+toward the hinge the stem can no longer support its own lean and tips. Cut a
+leaner too fast and the trunk splits upward — a **barber chair** — and goes
+where it is heavy rather than where it was aimed.
+
+That maps onto machinery this engine already has. The trunk's cross-section
+lives in the **micro-mask** (stage 27's 4×4×4 occupancy `u64` at 0.25 m); a
+chop clears micro-cells along a cut plane; the fraction severed is a popcount.
+Past the notch depth, with the holding wood down to the hinge, fall
+probability spikes. Fall direction is the notch, biased by lean and wind.
+
+**The fall must be kinematic, not a rigid body.** Float rigid-body
+integration diverges across runs and machines, and the replay oracle would
+not survive it. A scripted arc — rotation about the hinge with a fixed
+angular-acceleration profile — is a pure function of `(tree, direction, start
+tick)`, cheap, and collidable at every fixed tick against people, saplings,
+micro-masks and other trunks. Vintage Story's mods take this shape; Valheim's
+rigid-body logs are the fun the note wants and exactly the determinism this
+project cannot have.
+
+**Impact energy is honest arithmetic.** A trunk pivoting about its base drops
+its centre of mass by half its height, so `E ≈ m·g·(h/2)` with
+`m = π·r²·h·ρ` and wood at 600–900 kg/m³. A 15 cm sapling is ~1.6 kJ, a
+mature 15 m stem ~152 kJ, an old-growth metre-thick giant ~1.9 MJ — a
+thousandfold span that has to be compressed into a playable damage curve but
+whose *ordering* is the whole point: a sapling taps you, a giant kills you and
+takes its neighbours with it. A struck trunk above its own threshold starts
+its own fall, which is the domino, deterministically.
+
+**And the log is a block, not an entity.** When the arc finishes, the trunk
+becomes horizontal log blocks along the fall line, choppable into graded
+timber. No persistent physics object, nothing to desync.
+
+**Ancient trees.** Rare, hash-selected on the existing lattice inside
+old-growth stands. Their wood sits at the bunker-shell hardness tier, which is
+a smaller extrapolation than it sounds: real wood spans ~67 lbf Janka (balsa)
+to ~5,060 (Australian buloke), a 75-fold range, against red oak's ~1,220. They
+want high-tier tools, they yield the most prime timber, and — the good hook —
+**ancient wood is the only wood that does not burn**, which makes an ancient
+grove a firebreak and a prize.
+
+### Fluid: the micro-mask is already the answer
+
+The note's decision, and it is the right one: **reuse the 64-cell micro-mask
+as a 0–64 fill level** rather than building a parallel 0–7 level system. One
+extra `u64` per wet block, stored sparsely; `popcount` is the volume; settling
+is shifts, ANDs, ORs and popcounts — the SWAR vocabulary stage 27 already
+speaks. A damaged block and a partly-filled block become one representation,
+and rays that already read micro detail get sub-voxel water for free. Fully
+wet blocks collapse to a "full" flag so only the shell of a body costs
+anything.
+
+Conservation comes from a falling-sand rule — fall first, then spread to
+lower neighbours — with a small compressibility allowance so stacked water
+equalises in communicating vessels without a pressure field. Stability comes
+from a minimum-flow threshold, hysteresis, and **settle-to-sleep**: a body
+that has not changed stops ticking.
+
+**Determinism comes from the update scheme, and this is the part that cannot
+be skipped.** A naive sequential sweep depends on iteration order. A **two-pass
+checkerboard** or a **Margolus block automaton** makes the new state a pure
+function of the old one, independent of traversal order, and every tie-break
+comes from `hash(cell, tick)`. Rendering is a per-column height-field mesh,
+not marching cubes.
+
+### Weather, last, because fire closes the loop
+
+Weather is a **pure function of (seed, tick, region)**: low-frequency noise
+over coarse regions for temperature, humidity, wind and pressure, plus a
+seeded Markov chain for the discrete states, advected by a slow wind vector so
+fronts move across the map. No stored state, no side RNG — Minecraft's weather
+is famously *not* reproducible from seed, and that is the mistake to avoid.
+
+**Rain fills basins.** Priority-Flood (Barnes, Lehman & Mulla 2014) is the
+right offline primitive: flood inward from the edges with a priority queue,
+label the watersheds, and precompute each basin's spill elevation. Then
+rainfall routes runoff into basins, the micro-cell fluid fills them to the
+spill, the overflow runs downhill, and only the active front ticks. The bogs
+flood first and hold longest, which is what makes them bogs.
+
+**Lightning ignites, rarely and unevenly.** Strikes are hash-selected within
+a storm, biased toward tall and isolated stems. Ignition is gated by fuel
+moisture: roughly one fire per fifty discharges in the wetter half of the
+literature and one in fourteen hundred in the drier neighbouring region, dry
+strikes 30–50% likelier to ignite than wet ones, and the whole thing rising
+sharply once dead-fuel moisture drops below about 20%.
+
+**Fire spreads as a cellular automaton with Rothermel's shape.** Per-cell
+states, and a neighbour ignition probability built from fuel, wind and slope
+as the standard multiplicative `(1 + φ_w + φ_s)` — fire runs uphill and
+downwind, and the direction of maximum spread is the vector sum of the two.
+Crown fire where ladder fuels allow it, and low-probability ember spotting
+downwind. Per biome: **hardwood coves resist** and act as refugia, **black
+spruce explodes** — ground-to-crown ladder fuels, semi-serotinous cones, an
+aerial seed bank that opens *because* of the fire — and **subalpine burns
+rarely but totally**.
+
+**And burnout writes the ledger.** A cell that finishes burning records
+`disturbed_at = tick`, and a succession clock regrows the stand through
+meadow, pioneer thicket, mixed and old growth. That is the payoff and the
+reason weather is last: fire plus succession is the ecological cycle made
+mechanical, and by then almost every part of it already exists.
+
+### The build order, and what not to build
+
+Biomes first (done), then felling, then fluid, then weather. Explicitly not
+worth building: fixed-point rigid-body physics for trees; a true
+Navier–Stokes or shallow-water solver; the full Rothermel parameter set; a
+global flow-accumulation index recomputed per tick; and marching-cubes or
+screen-space water.
+
+**The compression is deliberate.** Real stands take 80–400 years to mature,
+a hardwood canopy turns over in ~128, subalpine regeneration runs 300–400,
+krummholz individuals reach a thousand, and black spruce burns on a 50–150
+year cycle. The game compresses all of it into tens of seasons. Keep the
+*sequence* and the *relative* rates faithful — pioneers before climax, black
+spruce resetting hardest — and compress the absolute durations by one to two
+orders of magnitude.
+
+---
+
 ## Planned — the civic layer: permits, offices, elections
 
 The town-law arc, in three rounds. The user's design, recorded whole so none of
@@ -2089,20 +2292,23 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-The hunt note above is finished: its engine landed in 28, its director half
-in 29, and its stalker in 31 alongside the deep resources it hunts you
-through. The toy is finished too: the pocket arcade shipped in 34. What is
-left of the plan is the civic layer, which is the last note still holding
-rounds.
+The hunt note is finished: its engine landed in 28, its director half in 29,
+and its stalker in 31 alongside the deep resources it hunts you through. The
+toy is finished too — the pocket arcade shipped in 34 — and the forest note's
+first quarter shipped as the three forests in 35. Two notes are still holding
+rounds: the rest of the forest note, and the civic layer.
 
 | Stage | What | Why here |
 |---|---|---|
-| 35 | Civic layer B2 | Town offices, residents who run the player's own economic loop, and the warrant chain |
-| 36 | Civic layer B3 | Elections on the beacon console, votes cast on trade goodwill, and offices the player can hold |
+| 36 | Felling | The notch, the hinge and the thirty per cent rule on the micro-mask; a kinematic fall arc; impact energy that scales from a bonk to a catastrophe; log blocks and graded timber; ancient trees that need better tools and do not burn |
+| 37 | Fine fluid | The micro-mask as a 0–64 fill level, a conserving checkerboard automaton that settles and sleeps, and a height-field surface |
+| 38 | Weather | Regional weather as a pure function of the tick, rain filling Priority-Flood basins, lightning gated by fuel moisture, fire spreading with wind and slope — and burnout writing the disturbance ledger the succession clock reads |
+| 39 | Civic layer B2 | Town offices, residents who run the player's own economic loop, and the warrant chain |
+| 40 | Civic layer B3 | Elections on the beacon console, votes cast on trade goodwill, and offices the player can hold |
 
 ## The feature map
 
-The whole game at a glance, as of stage 34.
+The whole game at a glance, as of stage 35.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -2205,10 +2411,16 @@ the gold panel, which is why one ships and the other is compiled out);
 a pocket arcade on the handheld's own glass (a printed cartridge, an
 original corridor shooter computed pixel by pixel, floors that loop meaner and
 a cabinet that keeps the record);
+three forests decided by height and wetness (peat bog under sphagnum, mixed
+hardwood cove with emergent giants, subalpine conifer thinning to krummholz at
+a wandering treeline and bare rock above it);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** the civic layer B2 (offices, the NPC economic
-loop, the warrant chain) and B3 (elections on trade goodwill).
+**Planned, in arc order:** felling (notch, hinge, kinematic arc, ancient
+trees); fine fluid on the micro-mask; weather, flood, lightning and fire
+closing the loop into a disturbance ledger and a succession clock; then the
+civic layer B2 (offices, the NPC economic loop, the warrant chain) and B3
+(elections on trade goodwill).
 
 **Outstanding engineering:** floating-origin rebase; journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the

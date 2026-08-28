@@ -164,7 +164,7 @@ build in it, and it survives quitting — skills included.
 | Crate | What it does | State |
 |---|---|---|
 | `vx-core` | Block registry, coordinate spaces, event bus | Done |
-| `vx-world` | Chunk storage, worldgen, ore, town lattice, flora, raycast, line of sight, physics, editing, content hashes, saves | Done |
+| `vx-world` | Chunk storage, worldgen, ore, town lattice, biomes and flora, raycast, line of sight, physics, editing, content hashes, saves | Done |
 | `vx-mesh` | Greedy meshing + crossed-quad plants, packed into 8-byte quads | Done |
 | `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
@@ -704,6 +704,32 @@ that would squash it by however far the unit happens to be tilted.
 And while it is up, your drill and your launcher are away. You have two hands
 and both of them are holding the thing — which is what turns checking on your
 drones into a decision rather than a free pause.
+
+### Three forests, and the ground decides which
+
+The country is no longer one kind of tree. Every column belongs to one of
+three forests, and which one it is falls out of two things the terrain already
+knows: how high the ground is, and how wet.
+
+Down in the flat hollows — where the ground is level and everything around it
+drains inward — is **peat bog**: thin crooked black spruce you can see clean
+through, standing on a carpet of sphagnum instead of grass. Through the middle
+elevations is the **hardwood cove**: broad crowns, an open floor to walk, and
+one stand in a dozen carrying an **emergent giant** that stands a head above
+everything else and can be picked out from a ridge away. Up high it is
+**subalpine conifer** — dark tapered spires that thin as they climb, giving
+way at the **treeline** to knee-high **krummholz** mats hugging the rock, and
+then to nothing at all, which is what makes a summit look like a summit.
+
+The bands are not drawn on. They wander by a few blocks, so a treeline
+meanders the way a real one does, and cold air pools in hollows — so a deep
+enough draw is colder than its height says, and spruce comes fingering down
+the drainages into hardwood country.
+
+Nothing about it is stored. Which forest a column grows is a function of the
+seed and the column, worked out from the land's own shape rather than the
+flattened plot a town sits on, so the same hillside grows the same wood
+whichever direction you walk onto it from.
 
 ### There is a game on the handheld
 
@@ -1488,6 +1514,12 @@ cargo run --release -p vx-app -- --replay --world myworld
 
 # put a bigger crew on the next dispatch
 cargo run --release -p vx-app -- --drones 8
+
+# a stand of each forest, found rather than hard-coded
+cargo run --release -p vx-app -- --screenshot cove.ppm --at 0,10 --forest cove
+cargo run --release -p vx-app -- --screenshot high.ppm --at 0,10 --forest high
+cargo run --release -p vx-app -- --screenshot bog.ppm --at 0,10 --forest bog
+cargo run --release -p vx-app -- --screenshot mats.ppm --at 0,10 --forest treeline
 
 # the pocket arcade, mid-fight, on the raised handheld
 cargo run --release -p vx-app -- --screenshot arcade.ppm --at 0,10 --arcade

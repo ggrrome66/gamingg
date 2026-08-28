@@ -68,6 +68,15 @@ pub struct TerrainBlocks {
     pub counter: BlockId,
     pub log: BlockId,
     pub leaves: BlockId,
+    /// Subalpine spruce: darker bark, tighter rings, blue-dark needles.
+    pub spruce_log: BlockId,
+    pub needles: BlockId,
+    /// Black spruce off the bog: thin grey bark and a sparse crown you can
+    /// see the next stem through.
+    pub bog_log: BlockId,
+    pub bog_needles: BlockId,
+    /// The moss carpet a peat bog stands on.
+    pub sphagnum: BlockId,
     pub tall_grass: BlockId,
     pub metal_wall: BlockId,
     /// The fabricator: place one, feed it the pile, print what you want.
@@ -164,6 +173,22 @@ impl TerrainBlocks {
             counter: register(BlockDef::uniform("engine:counter", 15).with_hardness(None)),
             log: register(BlockDef::columnar("engine:log", 19, 18, 19).with_hardness(Some(1.0))),
             leaves: register(BlockDef::uniform("engine:leaves", 20).with_hardness(Some(0.3))),
+            // The conifers. Softer than the hardwoods, which is both true of
+            // the wood and the reason a bog stand falls quickly.
+            spruce_log: register(
+                BlockDef::columnar("engine:spruce_log", 52, 51, 52).with_hardness(Some(0.85)),
+            ),
+            needles: register(BlockDef::uniform("engine:needles", 53).with_hardness(Some(0.3))),
+            bog_log: register(
+                BlockDef::columnar("engine:bog_log", 52, 54, 52).with_hardness(Some(0.6)),
+            ),
+            bog_needles: register(
+                BlockDef::uniform("engine:bog_needles", 55).with_hardness(Some(0.25)),
+            ),
+            // Peat moss: it is ground, and it is soft.
+            sphagnum: register(
+                BlockDef::uniform("engine:sphagnum", 56).with_hardness(Some(0.4)),
+            ),
             tall_grass: register(
                 BlockDef::uniform("engine:tall_grass", 21)
                     .cross()
@@ -263,6 +288,11 @@ impl TerrainBlocks {
             counter: registry.id_of("engine:counter")?,
             log: registry.id_of("engine:log")?,
             leaves: registry.id_of("engine:leaves")?,
+            spruce_log: registry.id_of("engine:spruce_log")?,
+            needles: registry.id_of("engine:needles")?,
+            bog_log: registry.id_of("engine:bog_log")?,
+            bog_needles: registry.id_of("engine:bog_needles")?,
+            sphagnum: registry.id_of("engine:sphagnum")?,
             tall_grass: registry.id_of("engine:tall_grass")?,
             metal_wall: registry.id_of("engine:metal_wall")?,
             rusted_metal: registry.id_of("engine:rusted_metal")?,
@@ -576,16 +606,23 @@ impl TerrainGenerator {
             BlockPos::new(origin.x + CHUNK_SIZE, CHUNK_HEIGHT, origin.z + CHUNK_SIZE),
         );
 
+        // Which forest a column stands in is read off the country's own
+        // shape, never the blended field: a town's plateau must not decide
+        // what grows on the hill behind it.
+        let natural_at = |x: i32, z: i32| self.natural_height_at(x, z);
+
         for local_z in 0..CHUNK_SIZE {
             for local_x in 0..CHUNK_SIZE {
                 let world_x = origin.x + local_x;
                 let world_z = origin.z + local_z;
                 let surface = self.height_with_sites(world_x, world_z, &sites);
+                let biome = crate::forest::biome_at(self.seed, world_x, world_z, &natural_at);
                 self.fill_column(
                     &mut chunk,
                     [local_x, local_z],
                     [world_x, world_z],
                     surface,
+                    biome,
                     &deposits,
                     &reservoirs,
                     &sites,
@@ -603,6 +640,7 @@ impl TerrainGenerator {
             (origin.x, origin.z),
             (origin.x + CHUNK_SIZE - 1, origin.z + CHUNK_SIZE - 1),
             &height_at,
+            &natural_at,
             &sites,
         );
         // No tree grows over a cave mouth: its base block was never placed.
@@ -627,9 +665,21 @@ impl TerrainGenerator {
                         else {
                             continue;
                         };
-                        let block = match part {
-                            crate::flora::TreePart::Trunk => self.blocks.log,
-                            crate::flora::TreePart::Leaves => self.blocks.leaves,
+                        let block = match (part, tree.species) {
+                            (crate::flora::TreePart::Trunk, crate::flora::Species::Spruce) => {
+                                self.blocks.spruce_log
+                            }
+                            (crate::flora::TreePart::Trunk, crate::flora::Species::BogSpruce) => {
+                                self.blocks.bog_log
+                            }
+                            (crate::flora::TreePart::Trunk, _) => self.blocks.log,
+                            (crate::flora::TreePart::Leaves, crate::flora::Species::BogSpruce) => {
+                                self.blocks.bog_needles
+                            }
+                            (crate::flora::TreePart::Leaves, species) if species.conifer() => {
+                                self.blocks.needles
+                            }
+                            (crate::flora::TreePart::Leaves, _) => self.blocks.leaves,
                         };
                         if let Some(cell) = LocalPos::new(local_x, y, local_z) {
                             // Leaves fill only air (or a tuft caught under
@@ -689,6 +739,7 @@ impl TerrainGenerator {
         local: [i32; 2],
         world: [i32; 2],
         surface: i32,
+        biome: crate::forest::Biome,
         deposits: &[Deposit],
         reservoirs: &[crate::reservoir::Reservoir],
         sites: &[TownSite],
@@ -702,9 +753,18 @@ impl TerrainGenerator {
         // and nobody should be tempted to dig up a town.
         let in_village = crate::town::footprint_contains(sites, world_x, world_z);
 
-        // Beaches: columns near sea level get sand instead of grass.
+        // Beaches: columns near sea level get sand instead of grass. A bog
+        // gets its moss, which is the one place the ground itself says which
+        // forest you are standing in before you look up.
         let coastal = surface <= SEA_LEVEL + 1;
-        let top = if coastal { blocks.sand } else { blocks.grass };
+        let peat = !coastal && !in_village && biome == crate::forest::Biome::Bog;
+        let top = if coastal {
+            blocks.sand
+        } else if peat {
+            blocks.sphagnum
+        } else {
+            blocks.grass
+        };
         let subsoil = if coastal { blocks.sand } else { blocks.dirt };
 
         chunk.fill_column(x, z, 0, 1, blocks.bedrock);
@@ -803,9 +863,12 @@ impl TerrainGenerator {
         // A scattering of grass tufts on plain grass tops — never on an
         // outcrop, which players need to be able to spot at distance, and
         // never floating over a mouth.
+        // Tufts are a hardwood-country thing: moss carpets the bog and the
+        // high country is too cold and too thin for a lawn.
         if !coastal
             && !outcrop
             && !mouth
+            && biome == crate::forest::Biome::Hardwood
             && crate::flora::tuft_at(self.seed, world_x, world_z, surface, sites)
         {
             place(chunk, surface + 1, blocks.tall_grass);
@@ -1625,6 +1688,7 @@ mod tests {
     fn a_canopy_crossing_a_chunk_border_is_whole_on_both_sides() {
         let (_, generator) = generator(2024);
         let height = |x: i32, z: i32| generator.height_at(x, z);
+        let natural = |x: i32, z: i32| generator.natural_height_at(x, z);
 
         // Find a tree whose canopy reaches over an x-border between chunks.
         let sites = generator.towns_overlapping((-400, -400), (400, 400));
@@ -1633,6 +1697,7 @@ mod tests {
             (-400, -400),
             (400, 400),
             &height,
+            &natural,
             &sites,
         );
         let straddler = trees
@@ -1646,8 +1711,9 @@ mod tests {
 
         let mut chunks = std::collections::HashMap::new();
         let top = straddler.base.y + straddler.height + 2;
-        for x in straddler.base.x - 2..=straddler.base.x + 2 {
-            for z in straddler.base.z - 2..=straddler.base.z + 2 {
+        let reach = crate::flora::CANOPY_REACH;
+        for x in straddler.base.x - reach..=straddler.base.x + reach {
+            for z in straddler.base.z - reach..=straddler.base.z + reach {
                 for y in straddler.base.y + 1..=top {
                     let Some(part) = crate::flora::tree_part_at(straddler, x, y, z) else {
                         continue;
