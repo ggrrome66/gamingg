@@ -106,7 +106,14 @@ pub mod slot {
     /// Sphagnum: the moss carpet a peat bog stands on.
     pub const SPHAGNUM: u32 = 56;
 
-    pub const COUNT: u32 = 57;
+    /// An ancient's bark: deep-furrowed, grey with age.
+    pub const ANCIENT_BARK: u32 = 57;
+    /// Its end grain, which is mostly rings.
+    pub const ANCIENT_TOP: u32 = 58;
+    /// Prime timber: milled heartwood off an emergent stem.
+    pub const PRIME_TIMBER: u32 = 59;
+
+    pub const COUNT: u32 = 60;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -341,6 +348,38 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.44, 0.55, 0.32], noise * 0.10)
                     } else {
                         shade([0.34, 0.47, 0.30], noise * 0.11)
+                    }
+                }
+                slot::ANCIENT_BARK => {
+                    // Deep furrows running the height of the trunk, grey
+                    // where the ridges have weathered.
+                    let furrow = jitter(tile ^ 0x57, x, y / 6) > 0.15;
+                    if furrow {
+                        shade([0.17, 0.14, 0.11], noise * 0.06)
+                    } else if x % 5 == 0 {
+                        shade([0.42, 0.38, 0.32], noise * 0.08)
+                    } else {
+                        shade([0.31, 0.26, 0.20], noise * 0.09)
+                    }
+                }
+                slot::ANCIENT_TOP => {
+                    // Rings, and a lot of them. That is the whole story of
+                    // the block.
+                    let cx = x as f32 - 7.5;
+                    let cy = y as f32 - 7.5;
+                    let ring = (cx * cx + cy * cy).sqrt() as u32;
+                    if ring.is_multiple_of(2) {
+                        shade([0.35, 0.26, 0.15], noise * 0.05)
+                    } else {
+                        shade([0.52, 0.40, 0.24], noise * 0.06)
+                    }
+                }
+                slot::PRIME_TIMBER => {
+                    // Heartwood: straight grain, no bark, and pale.
+                    if y % 4 == 0 {
+                        shade([0.48, 0.34, 0.19], noise * 0.06)
+                    } else {
+                        shade([0.66, 0.50, 0.30], noise * 0.08)
                     }
                 }
                 slot::TUFT => {

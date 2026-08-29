@@ -77,6 +77,11 @@ pub struct TerrainBlocks {
     pub bog_needles: BlockId,
     /// The moss carpet a peat bog stands on.
     pub sphagnum: BlockId,
+    /// An ancient's trunk: hard enough that a starter drill barely marks it.
+    pub ancient_log: BlockId,
+    /// What an emergent stem lies down as, and the feedstock a fabricator
+    /// would rather have than a dozen ordinary logs.
+    pub prime_timber: BlockId,
     pub tall_grass: BlockId,
     pub metal_wall: BlockId,
     /// The fabricator: place one, feed it the pile, print what you want.
@@ -189,6 +194,14 @@ impl TerrainBlocks {
             sphagnum: register(
                 BlockDef::uniform("engine:sphagnum", 56).with_hardness(Some(0.4)),
             ),
+            // Ancient wood. Forty is "bring the good drill", where the
+            // bunker shell's four hundred is "do not bother".
+            ancient_log: register(
+                BlockDef::columnar("engine:ancient_log", 58, 57, 58).with_hardness(Some(40.0)),
+            ),
+            prime_timber: register(
+                BlockDef::uniform("engine:prime_timber", 59).with_hardness(Some(1.4)),
+            ),
             tall_grass: register(
                 BlockDef::uniform("engine:tall_grass", 21)
                     .cross()
@@ -293,6 +306,8 @@ impl TerrainBlocks {
             bog_log: registry.id_of("engine:bog_log")?,
             bog_needles: registry.id_of("engine:bog_needles")?,
             sphagnum: registry.id_of("engine:sphagnum")?,
+            ancient_log: registry.id_of("engine:ancient_log")?,
+            prime_timber: registry.id_of("engine:prime_timber")?,
             tall_grass: registry.id_of("engine:tall_grass")?,
             metal_wall: registry.id_of("engine:metal_wall")?,
             rusted_metal: registry.id_of("engine:rusted_metal")?,
@@ -671,6 +686,9 @@ impl TerrainGenerator {
                             }
                             (crate::flora::TreePart::Trunk, crate::flora::Species::BogSpruce) => {
                                 self.blocks.bog_log
+                            }
+                            (crate::flora::TreePart::Trunk, crate::flora::Species::Ancient) => {
+                                self.blocks.ancient_log
                             }
                             (crate::flora::TreePart::Trunk, _) => self.blocks.log,
                             (crate::flora::TreePart::Leaves, crate::flora::Species::BogSpruce) => {

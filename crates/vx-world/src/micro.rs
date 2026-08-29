@@ -195,6 +195,15 @@ pub enum Shape {
     DrillFace,
     /// A blast: everything within three cells of the impact.
     Blast,
+    /// A feller's face notch, `cells` deep into the struck face.
+    ///
+    /// Not a layer and not a ball: a wedge that starts low, in the middle,
+    /// against the face, and grows — which is the shape a notch actually is,
+    /// and which gives the cut a resolution of one cell in sixty-four
+    /// instead of the four steps a layer-at-a-time drill has. The felling
+    /// rule is written in fractions of the cross-section, so it needs the
+    /// finer step to say "a third of the way through" at all.
+    Notch { cells: u32 },
 }
 
 impl Shape {
@@ -209,6 +218,7 @@ impl Shape {
             Shape::SlugBite => ball(x, y, z, 1) | bit(x, y, z),
             Shape::DrillFace => face_layer(face),
             Shape::Blast => ball(x, y, z, 3),
+            Shape::Notch { cells } => notch(face, cells),
         }
     }
 }
@@ -245,6 +255,74 @@ pub fn face_layer(face: usize) -> Mask {
     }
 }
 
+/// The `count` cells a notch takes out through `face`.
+///
+/// Cells are taken in the order a feller's saw reaches them: depth into the
+/// block first, then low before high, then near the centre line before the
+/// corners. Sixty-four cells means the cut can be spoken of in percentages,
+/// which is what the notch and hinge rules are written in.
+pub fn notch(face: usize, count: u32) -> Mask {
+    if count == 0 {
+        return 0;
+    }
+    let axis = face / 2;
+    let from_far = face % 2 == 1;
+    let mut taken = 0;
+    let mut mask = 0;
+    // Keys are small and bounded, so the order comes out of counting rather
+    // than a sort — and counting cannot allocate.
+    for key in 0..=16 {
+        for y in 0..SIDE {
+            for z in 0..SIDE {
+                for x in 0..SIDE {
+                    if taken >= count {
+                        return mask;
+                    }
+                    let along = [x, y, z][axis];
+                    let depth = if from_far { SIDE - 1 - along } else { along };
+                    // The two axes the notch spreads across: the height it is
+                    // cut at, and how far off the centre line it reaches.
+                    let across = match axis {
+                        0 => z,
+                        1 => x,
+                        _ => x,
+                    };
+                    let lateral = if across < SIDE / 2 {
+                        SIDE / 2 - 1 - across
+                    } else {
+                        across - SIDE / 2
+                    };
+                    let rise = if axis == 1 { z } else { y };
+                    // Depth counts least: a saw drives a slot through the
+                    // middle of the trunk long before it has taken the
+                    // corners, which is why the wood left holding a felled
+                    // stem is at the edges rather than the far face.
+                    if depth + 2 * lateral + rise != key {
+                        continue;
+                    }
+                    let cell = bit(x, y, z);
+                    if mask & cell != 0 {
+                        continue;
+                    }
+                    mask |= cell;
+                    taken += 1;
+                }
+            }
+        }
+    }
+    mask
+}
+
+/// How much holding wood is left on the side away from `face`: the hinge, in
+/// cells out of the sixteen that layer started with.
+///
+/// The hinge is what steers a falling tree. When it is gone the tree goes
+/// where it is heavy instead of where it was aimed.
+#[inline]
+pub fn hinge_left(mask: Mask, face: usize) -> u32 {
+    remaining(mask & face_layer(face ^ 1))
+}
+
 /// Take a shape out of a mask, dropping anything it knocked loose.
 ///
 /// One AND against a precomputed constant, then the register flood fill.
@@ -264,6 +342,49 @@ pub fn lod_solid(mask: Mask) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_notch_is_a_wedge_that_grows_from_the_struck_face() {
+        for face in 0..6 {
+            let mut last = 0u64;
+            for count in [1u32, 4, 8, 19, 32, 64] {
+                let cut = notch(face, count);
+                assert_eq!(
+                    remaining(cut),
+                    count,
+                    "face {face} at {count} cells took {}",
+                    remaining(cut)
+                );
+                // Deeper cuts contain shallower ones: the saw does not
+                // un-cut wood it has already been through.
+                assert_eq!(cut & last, last, "face {face} notch went backwards");
+                last = cut;
+            }
+            // The first cells are against the struck face, and the last wood
+            // to go is the holding wood on the far side.
+            assert_eq!(notch(face, 1) & face_layer(face), notch(face, 1));
+            assert_eq!(notch(face, 4) & face_layer(face ^ 1), 0);
+            assert_eq!(notch(face, 64), FULL);
+        }
+        assert_eq!(notch(0, 0), 0);
+    }
+
+    #[test]
+    fn the_hinge_is_the_wood_left_on_the_far_side() {
+        // An intact block has its whole hinge; a block cut halfway from one
+        // face still has it; only a cut that reaches the far side spends it.
+        for face in 0..6 {
+            assert_eq!(hinge_left(FULL, face), 16);
+            let half = carve(FULL, notch(face, 32));
+            assert!(hinge_left(half, face) > 0, "face {face} lost its hinge early");
+            let through = carve(FULL, notch(face, 62));
+            assert!(
+                hinge_left(through, face) <= 2,
+                "face {face} kept {} cells of hinge after a cut through",
+                hinge_left(through, face)
+            );
+        }
+    }
     use super::*;
 
     /// Every cell, as coordinates, for the exhaustive tests below.

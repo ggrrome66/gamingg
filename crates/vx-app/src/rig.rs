@@ -452,6 +452,37 @@ impl Rig {
     /// face, so the screen sits at a negative X and looks back at you. Like
     /// the drill and the launcher it hangs off the camera, so parts sit at
     /// negative Y and the ground-origin convention does not apply.
+    /// A trunk on its way down.
+    ///
+    /// Built along +X from the hinge, so `objects_pitched` swings it about
+    /// its own base — the same transform the handheld rides on, and no
+    /// renderer change at all. The pitch to pass is `π/2 − angle`, because a
+    /// stem at angle zero is standing up and the rig lies along +X.
+    pub fn trunk(height: i32, thickness: f32, tile: u32, crown: u32) -> Self {
+        let length = height as f32;
+        let segments = height.clamp(2, 24);
+        let step = length / segments as f32;
+        let mut parts = Vec::with_capacity(segments as usize + 1);
+        for index in 0..segments {
+            // Tapered: a stem is thicker at the butt than at the tip.
+            let along = (index as f32 + 0.5) * step;
+            let taper = 1.0 - 0.45 * (along / length);
+            parts.push(Part::fixed(
+                Vec3::new(along, 0.0, 0.0),
+                Vec3::new(step, thickness * taper, thickness * taper),
+                tile,
+            ));
+        }
+        // The crown, still on it. A tree does not shed its head on the way
+        // down.
+        parts.push(Part::fixed(
+            Vec3::new(length * 0.9, 0.0, 0.0),
+            Vec3::splat(thickness * 3.5),
+            crown,
+        ));
+        Rig { parts }
+    }
+
     pub fn handheld() -> Self {
         let width = screen::HALF_WIDTH;
         let height = screen::HALF_HEIGHT;

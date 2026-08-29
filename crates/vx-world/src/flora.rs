@@ -37,6 +37,12 @@ const KRUMMHOLZ_PRESENCE: f32 = 0.72;
 /// hardwood — the tulip poplar standing a head above the closed canopy.
 const GIANT_IN: u32 = 13;
 
+/// And one giant in this many is older than the town, the fort and the road:
+/// an ancient, with wood the hardness tier of poured shelter and a crown you
+/// can see from the next valley. Rare on purpose — a thing you go and find,
+/// not a thing you walk past.
+const ANCIENT_IN: u64 = 9;
+
 /// Density of grass tufts on eligible columns.
 const TUFT_DENSITY: f32 = 0.07;
 
@@ -52,6 +58,9 @@ pub enum Species {
     Hardwood,
     /// The same, but a head taller than everything around it.
     Giant,
+    /// Older than anything built near it, and hard enough that a starter
+    /// drill barely marks the bark.
+    Ancient,
     /// Narrow subalpine spire.
     Spruce,
     /// Thin black spruce off the peat.
@@ -74,6 +83,12 @@ impl Species {
     /// to know, and neither wants to learn the whole list.
     pub fn conifer(self) -> bool {
         matches!(self, Species::Spruce | Species::BogSpruce | Species::Krummholz)
+    }
+
+    /// Does this stem stand clear of the canopy? The giants and the ancients,
+    /// which is what makes them worth walking to.
+    pub fn emergent(self) -> bool {
+        matches!(self, Species::Giant | Species::Ancient)
     }
 }
 
@@ -176,7 +191,20 @@ fn tree_in_cell(
                 )
                 .is_multiple_of(GIANT_IN as u64) =>
             {
-                (Species::Giant, 11 + (roll * 5.0) as i32) // 11..=15
+                // A few of the emergents are older than everything around
+                // them. Same lattice, one more hash, so an ancient comes out
+                // identical from whichever chunk asks about it.
+                let ancient = crate::seed::finalise(
+                    seed ^ 0x0a17
+                        ^ (cell_x as i64 as u64).wrapping_mul(0xff51_afd7_ed55_8ccd)
+                        ^ (cell_z as i64 as u64).wrapping_mul(0xc4ce_b9fe_1a85_ec53),
+                )
+                .is_multiple_of(ANCIENT_IN);
+                if ancient {
+                    (Species::Ancient, 15 + (roll * 6.0) as i32) // 15..=20
+                } else {
+                    (Species::Giant, 11 + (roll * 5.0) as i32) // 11..=15
+                }
             }
             Species::Hardwood => (Species::Hardwood, 5 + (roll * 3.0) as i32), // 5..=7
             Species::Spruce => (Species::Spruce, 9 + (roll * 6.0) as i32),     // 9..=14
@@ -250,7 +278,9 @@ pub fn tree_part_at(tree: &Tree, x: i32, y: i32, z: i32) -> Option<TreePart> {
         },
         // An emergent crown: wider, deeper, and rounded, because the tree it
         // belongs to is standing clear of everything around it.
-        Species::Giant => match above {
+        // An ancient wears the same crown as a giant. The difference is in
+        // the trunk, the years and what it takes to cut it — not the leaves.
+        Species::Giant | Species::Ancient => match above {
             -3 | -2 => adx + adz <= 4 && adx <= 3 && adz <= 3,
             -1 => adx <= 3 && adz <= 3 && !(adx == 3 && adz == 3),
             0 => adx <= 2 && adz <= 2,
@@ -539,6 +569,57 @@ mod tests {
         assert!(bog_deep > 2 * bog_r, "the bog spruce is not a whisker");
         // And the mat is the other way round: wider than it is tall.
         assert!(mat_r * 2 > mat_deep, "krummholz stood up");
+    }
+
+    #[test]
+    fn the_ancients_are_rare_and_stand_in_the_same_place_every_time() {
+        // Over a wide sweep of flat hardwood country: giants are uncommon,
+        // ancients are rare among the giants, and both come out of the same
+        // lattice — so the same cell grows the same tree however it is asked.
+        let (mut trees, mut giants, mut ancients) = (0, 0, 0);
+        let all = trees_overlapping(
+            19,
+            (-600, -600),
+            (600, 600),
+            &flat_height,
+            &flat_height,
+            &home(),
+        );
+        for tree in &all {
+            trees += 1;
+            match tree.species {
+                Species::Giant => giants += 1,
+                Species::Ancient => ancients += 1,
+                _ => {}
+            }
+        }
+        assert!(trees > 400, "not enough forest to judge: {trees}");
+        assert!(ancients > 0, "no ancient anywhere in a 1200-block square");
+        assert!(
+            ancients < giants,
+            "{ancients} ancients against {giants} giants is not rare"
+        );
+        assert!(
+            (giants + ancients) * 4 < trees,
+            "the emergents are not emergent: {} of {trees}",
+            giants + ancients
+        );
+
+        // Asked about a smaller window, an ancient comes back the same tree:
+        // the shape a chunk border sees from either side.
+        let ancient = all
+            .iter()
+            .find(|tree| tree.species == Species::Ancient)
+            .expect("an ancient was counted and then lost");
+        let window = trees_overlapping(
+            19,
+            (ancient.base.x, ancient.base.z),
+            (ancient.base.x, ancient.base.z),
+            &flat_height,
+            &flat_height,
+            &home(),
+        );
+        assert!(window.contains(ancient), "the ancient moved when asked again");
     }
 
     #[test]

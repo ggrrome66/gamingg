@@ -705,6 +705,40 @@ And while it is up, your drill and your launcher are away. You have two hands
 and both of them are holding the thing — which is what turns checking on your
 drones into a decision rather than a free pause.
 
+### You can put a tree on the ground
+
+Get your drill on a trunk — **low, near the roots** — and hold it. You are not
+chipping a block any more, you are cutting a **notch**, and the notch is cut
+into the trunk's own cross-section rather than into the face of one block.
+
+Cut about a third of the way through and the tree is *aimed*; keep going until
+the holding wood on the far side is down to the corners and it lets go. That
+is the real thing: a feller's face notch is 15–33% of the trunk's diameter and
+the hinge behind it about a tenth, the notch aims the tree and the hinge steers
+it down.
+
+**It falls toward the side you cut from** — which is where you are standing, so
+move. On a slope the lean has a say, and if you cut a hard leaner against its
+lean the trunk splits and goes where it is heavy instead of where you aimed it.
+Drill higher up a trunk and nothing special happens; you just take a block off
+a tree. Cut low, or you are only nibbling.
+
+A sapling will bruise you. An old-growth giant weighs as much as a truck and
+brings down whatever is under it, including the trees beside it — a stem in the
+arc comes over too if the one falling is carrying enough. Rock and steel stop
+it dead and leave it **hung up**, leaning where it stopped. Everything else in
+the way goes.
+
+When it lands it is a line of **logs** along the way it fell, following the
+ground. Off an emergent giant or an ancient it is **prime timber** instead,
+which the fabricator mills into three times the planks. Ancient trees are rare,
+older than anything built near them, and hard enough that a starter drill
+barely marks the bark.
+
+Fell the same tree the same way twice and it lands in exactly the same place
+both times. The fall is worked out from the tree, the direction and the tick —
+no physics engine having a different opinion on a different machine.
+
 ### Three forests, and the ground decides which
 
 The country is no longer one kind of tree. Every column belongs to one of
@@ -1092,6 +1126,7 @@ Controls:
 | — | Vaulting a waist-high ledge is automatic; you do not press anything |
 | Click | Capture the mouse |
 | Hold left button | Run the drill — harder rock takes longer |
+| Hold left button (low on a trunk) | Cut a notch: about a third through aims the tree, and past the hinge it falls — toward the side you are cutting from |
 | Right click | Place the selected block |
 | `1`–`6` | Choose stone, dirt, grass, sand, the base container or your chest |
 | `8` | Choose the fabricator, to place it (buy one at the counter first) |
@@ -1514,6 +1549,10 @@ cargo run --release -p vx-app -- --replay --world myworld
 
 # put a bigger crew on the next dispatch
 cargo run --release -p vx-app -- --drones 8
+
+# a tree mid-fall, and the logs it left
+cargo run --release -p vx-app -- --screenshot swing.ppm --at 0,10 --fell swing
+cargo run --release -p vx-app -- --screenshot logs.ppm --at 0,10 --fell down
 
 # a stand of each forest, found rather than hard-coded
 cargo run --release -p vx-app -- --screenshot cove.ppm --at 0,10 --forest cove

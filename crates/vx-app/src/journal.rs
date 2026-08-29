@@ -151,7 +151,14 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // itself in sphagnum instead of grass, and nothing at all stands above the
 // tree limit. A log recorded over the old forest would replay a crew driving
 // through trunks that are no longer there and around ones that are.
-const VERSION: u32 = 22;
+// Twenty-three adds `Fell`. A tree coming down is the largest single edit
+// the player can make to the ground: the stem leaves, the crown leaves,
+// whatever the arc swept through leaves, a neighbour may come down with it,
+// and a line of logs is written along where it landed. All of that is
+// re-derived from the cut — the stump and the face — by the same kinematic
+// arc, so the order stays an order. A log recorded before this replays a
+// forest that never fell.
+const VERSION: u32 = 23;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -290,6 +297,15 @@ pub enum Command {
     /// a visibly different hole. Both sides run `Wear::repair`, one
     /// function, no second implementation to drift.
     Repair { machine: MachineTag },
+    /// A tree put on the ground: the stump block that was cut, and the face
+    /// it was cut from.
+    ///
+    /// The order is the cut, never the outcome. Where the stem lands, what it
+    /// smashes on the way, which neighbour it takes with it and where the
+    /// logs come to rest are all re-derived by the same kinematic arc the
+    /// live game swept — a pure function of the tree, the direction and the
+    /// tick, which is exactly why the fall is not a rigid body.
+    Fell { at: BlockPos, face: u8 },
 }
 
 /// Which machine an order names, on the wire.
@@ -531,6 +547,10 @@ pub struct Rebuilt {
     held: MoveCommand,
     /// Slugs in the air, stepped one integration per `Advance` tick.
     pub shots: Vec<crate::arsenal::Shot>,
+    /// Stems on their way down, stepped on the same clock and for the same
+    /// reason: what they smash and what they leave lying is ground, and
+    /// ground is the hash.
+    pub falls: Vec<crate::felling::Falling>,
     /// Every town's strongroom. Carried because a deposit moves the pile,
     /// and the pile is what half the log's arithmetic runs over.
     pub banks: crate::bank::Bank,
@@ -551,6 +571,7 @@ impl Default for Rebuilt {
             movement: Movement::default(),
             held: MoveCommand::default(),
             shots: Vec::new(),
+            falls: Vec::new(),
             banks: crate::bank::Bank::default(),
         }
     }
@@ -673,6 +694,19 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 state.mining.wear.repair(machine.machine(), &mut base.stockpile);
             }
         }
+        Command::Fell { at, face } => {
+            // Find the tree the same way the live game did — off worldgen,
+            // which is pure — and start the same stem falling. The arc is
+            // ticked below, on the same clock as the slugs.
+            let sites = world.generator().towns_near((at.x, at.z), 96);
+            if let Some(tree) = crate::felling::standing_tree(world, *at, &sites) {
+                let lean = crate::felling::lean_at(world, tree.base.x, tree.base.z);
+                let (direction, chair) = crate::felling::aim(*face as usize, lean);
+                state
+                    .falls
+                    .push(crate::felling::start(world, &tree, direction, chair));
+            }
+        }
         Command::Gift { good, .. } => {
             // One good, off the pile, both sides. What it earned is in the
             // disposition ledger, outside the hash.
@@ -787,6 +821,12 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                     world,
                     &state.movement.tuning,
                 );
+                // And the trees. The sweeps are dropped for the same reason
+                // the slugs' are: the blocks are the part the hash checks,
+                // and who got flattened was the live game's business.
+                if !state.falls.is_empty() {
+                    let _ = crate::felling::advance_falls(&mut state.falls, world);
+                }
             }
         }
     }
@@ -915,6 +955,11 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             file.write_all(&town.0.to_le_bytes())?;
             file.write_all(&town.1.to_le_bytes())?;
             file.write_all(&[*person])?;
+        }
+        Command::Fell { at, face } => {
+            file.write_all(&[23u8])?;
+            write_pos(file, *at)?;
+            file.write_all(&[*face])?;
         }
         Command::Repair { machine } => {
             file.write_all(&[21u8])?;
@@ -1239,6 +1284,12 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
                 }
             };
             Command::Repair { machine }
+        }
+        23 => {
+            let at = read_pos(file)?;
+            let mut face = [0u8; 1];
+            file.read_exact(&mut face)?;
+            Command::Fell { at, face: face[0] }
         }
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
@@ -1963,6 +2014,116 @@ mod fire_tests {
         let first = fight(&mut world());
         let second = fight(&mut world());
         assert_eq!(first, second, "the firefight itself is not deterministic");
+    }
+
+    /// The cut survives the wire: the stump and the face, and nothing else,
+    /// because everything else is re-derived.
+    #[test]
+    fn a_cut_survives_the_wire() {
+        let directory =
+            std::env::temp_dir().join(format!("vx-journal-fell-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let mut journal = CommandLog::default();
+        let cut = Command::Fell {
+            at: vx_core::BlockPos::new(-412, 97, 883),
+            face: 5,
+        };
+        journal.record(cut.clone());
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        assert_eq!(
+            read_back.entries().last().map(|entry| entry.command.clone()),
+            Some(cut)
+        );
+    }
+
+    /// A tree put on the ground replays block for block.
+    ///
+    /// The one that matters this round: the order is the cut, and everything
+    /// else — where the stem swept, what it flattened, which neighbour came
+    /// down with it and where the logs came to rest — is re-derived by the
+    /// same arc on the same clock. If the fall were a rigid body this test
+    /// would be the one that failed.
+    #[test]
+    fn a_felled_tree_replays_to_the_same_ground() {
+        // Away from the home town, where the trees are.
+        let woods = (96, 96);
+        let patch = || {
+            let mut world = World::new(2024);
+            world.load_around(ChunkPos::new(woods.0 / 16, woods.1 / 16), 4);
+            world
+        };
+        let span = (
+            vx_core::BlockPos::new(woods.0 - 60, 40, woods.1 - 60),
+            vx_core::BlockPos::new(woods.0 + 60, 200, woods.1 + 60),
+        );
+
+        let fell = |world: &mut World| -> u64 {
+            let events = EventBus::new();
+            let mut journal = CommandLog::default();
+            let mut rebuilt = Rebuilt::default();
+
+            // Find a standing tree the same way the game does.
+            let sites = world
+                .generator()
+                .towns_near((woods.0, woods.1), crate::felling::TOWN_REACH);
+            let generator = world.generator();
+            let height_at = |x: i32, z: i32| generator.height_with_sites(x, z, &sites);
+            let natural_at = |x: i32, z: i32| generator.natural_height_at(x, z);
+            let trees = vx_world::flora::trees_overlapping(
+                world.seed(),
+                (woods.0 - 24, woods.1 - 24),
+                (woods.0 + 24, woods.1 + 24),
+                &height_at,
+                &natural_at,
+                &sites,
+            );
+            let tree = trees
+                .into_iter()
+                .find(|tree| {
+                    tree.height >= 6
+                        && (tree.base.x - woods.0).abs() <= 24
+                        && (tree.base.z - woods.1).abs() <= 24
+                        && world.block(vx_core::BlockPos::new(
+                            tree.base.x,
+                            tree.base.y + 1,
+                            tree.base.z,
+                        )) != vx_core::BlockId::AIR
+                })
+                .expect("no standing tree to fell");
+            let stump = vx_core::BlockPos::new(tree.base.x, tree.base.y + 1, tree.base.z);
+
+            let cut = Command::Fell { at: stump, face: 1 };
+            apply(&cut, world, &events, &mut rebuilt);
+            journal.record(cut);
+            // Long enough for the stem to go all the way over and lie down.
+            let advance = Command::Advance { ticks: 64 * 6 };
+            apply(&advance, world, &events, &mut rebuilt);
+            journal.record(advance);
+            assert!(rebuilt.falls.is_empty(), "the stem never came down");
+
+            let live = region_hash(world, span.0, span.1);
+
+            // The other side of the oracle: a fresh world, orders only.
+            let mut fresh = patch();
+            replay(&journal, &mut fresh, &EventBus::new());
+            assert_eq!(
+                live,
+                region_hash(&fresh, span.0, span.1),
+                "the felled tree landed somewhere else on replay"
+            );
+            live
+        };
+
+        let first = fell(&mut patch());
+        let second = fell(&mut patch());
+        assert_eq!(first, second, "felling is not deterministic in the first place");
+
+        // And it actually changed the ground: a log that fells a tree cannot
+        // hash the same as one that never touched the woods.
+        let untouched = region_hash(&patch(), span.0, span.1);
+        assert_ne!(first, untouched, "the tree is still standing");
     }
 
     /// Every scout order survives the wire, and a log full of them replays

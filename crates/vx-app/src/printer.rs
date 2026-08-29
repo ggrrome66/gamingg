@@ -130,6 +130,19 @@ pub const CATALOGUE: &[Recipe] = &[
         floor: 1,
     },
     Recipe {
+        label: "PLANKS X12",
+        output: Output::Good {
+            name: "engine:plank",
+            count: 12,
+        },
+        // Prime timber is heartwood off an emergent stem, and it mills like
+        // it: three times the planks out of one block, which is the whole
+        // reason a giant is worth the walk and the danger.
+        inputs: &[("engine:prime_timber", 1)],
+        seconds: 9.0,
+        floor: 1,
+    },
+    Recipe {
         label: "SPARE PARTS X4",
         output: Output::Good {
             name: crate::wear::SPARE_PART,
@@ -543,6 +556,7 @@ mod tests {
                 "SLUGS X8",
                 "COPPER BAR",
                 "PLANKS X4",
+                "PLANKS X12",
                 "SPARE PARTS X4",
                 "METAL WALL X2",
                 "HIGH BEAM LAMP",

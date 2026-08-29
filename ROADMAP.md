@@ -110,7 +110,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 32 | `8c6d21a` | Faces, walls and a ward: the townsfolk get eyes that follow what they are watching and a grunt for anyone who crowds them, every town on the frontier walls itself with at least a mini star, and a free cot in every clinic mends you and scrubs the dose |
 | 33 | `3b29a4d` | The handheld you hold: the fleet uplink becomes a cased unit that swings up into your hands with its screen coming on, the readout is projected onto the model's own glass through the frame's camera matrix, and your drill is away while it is up |
 | 34 | `7cd3c26` | The pocket arcade: a cartridge printed at the fabricator turns the handheld into a games machine — an original corridor shooter, every wall and every pixel of it computed, floors that loop meaner, and a record the cabinet keeps |
-| 35 | _this_ | Three forests: every column belongs to a peat bog, a mixed hardwood cove or subalpine conifer, decided by how high and how wet the ground is — with emergent giants over the cove, krummholz mats at the treeline, bare rock above them and sphagnum underfoot in the lows |
+| 35 | `b3ae393` | Three forests: every column belongs to a peat bog, a mixed hardwood cove or subalpine conifer, decided by how high and how wet the ground is — with emergent giants over the cove, krummholz mats at the treeline, bare rock above them and sphagnum underfoot in the lows |
+| 36 | _this_ | Felling: cut low into a trunk and you are cutting a notch on its own cross-section, not chipping a block — past the notch and down to the hinge it goes over, toward the side you cut from, on a kinematic arc that flattens what it lands on, takes its neighbours with it and lies down as logs |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -1963,6 +1964,82 @@ pit-and-mound microtopography, which needs treefall first.
 
 ---
 
+## Shipped — Stage 36: felling
+
+**Stage 35 grew three forests and nothing could touch them.** A tree was
+scenery. This round it is a thing with consequences: a cut that has to be
+aimed, a fall that goes where the cut says, and a mass that flattens whatever
+is under it.
+
+**The thirty per cent rule turned out to be real forestry.** Directional
+felling puts the face notch at 15–33% of trunk diameter and the hinge at about
+a tenth: the notch *aims* the tree, the hinge *steers* it, and when the cut
+takes the holding wood past the hinge the stem cannot carry its own lean any
+more. All of that landed on machinery that already existed — stage 27's
+sixty-four-cell mask **is** the trunk's cross-section, so "a third of the way
+through" is a popcount and `Shape::Notch` is the cut. The notch is a wedge
+that starts low, in the middle, against the struck face, and drives a slot
+through the middle of the stem before it takes the corners — which is why the
+wood left holding a felled tree is at the edges, exactly where a feller finds
+it.
+
+**One honest compromise, stated rather than hidden.** Four cells across a
+block makes a hinge of a tenth of the diameter *a quarter of one cell*, which
+the mask cannot say. So the rule is written as two conditions that measure
+different things — how much of the whole section has gone, and how much of the
+far layer is still holding — and calibrated so the stem drops at about two
+thirds cut. The note's own advice about impact energy applies to its own
+felling numbers: compress the span, keep the ordering.
+
+**It falls toward you.** The notch faces the way the tree goes, and the notch
+is the face you are standing at. Lean biases it, and a hard leaner cut against
+its lean **barber chairs** — the trunk splits and goes where it is heavy
+rather than where it was aimed. Cut low: only the bottom two blocks of a trunk
+are a stump, and drilling higher up still just takes a block off a tree.
+
+**The arc is kinematic, and that is the determinism decision.** Float
+rigid-body integration diverges across runs and machines and the replay oracle
+would not survive it. A trunk rotating about its hinge under the honest
+pendulum — `3g·sinθ / 2L`, one line, and it is the whole of the physics — is a
+pure function of the tree, the direction and the tick. Tall stems go over
+slowly and saplings snap down, for the reason they do in the world.
+
+**Shaped exactly like the arsenal, because the arsenal already solved this.**
+The world edits happen *inside* `advance_falls`; the sweeps it returns carry
+the live-only half. Live and replay call the same function on the same 64 Hz
+clock, so the same blocks change in the same order — and the sweeps the replay
+gets are dropped, precisely as the slugs' are. `Command::Fell` records the cut
+and nothing else: the stump and the face. Where the stem swept, what it
+flattened, which neighbour came down with it and where the logs came to rest
+are all re-derived.
+
+**What it does on the way down.** Foliage, soil and planks give way; rock and
+steel stop it dead and the stem is **hung up**, which is a real morning in the
+woods. Another trunk in the arc comes down too if the incoming energy is
+enough — the domino, resolved inside the same call so a replay sees it the
+same way. Impact energy is the note's own arithmetic, `E = m·g·h/2` with
+`m = π·r²·h·ρ`: about 1.6 kJ for a sapling, 150 kJ for a mature stem,
+1.9 MJ for an old-growth giant, and you are hit for the compressed version of
+that span. A tree coming down is also the loudest thing in the woods —
+everything that listens hears it, including whatever is out in the dark.
+
+**Ancient trees.** One emergent in nine is older than anything built near it:
+hash-selected on the same lattice, at a hardness tier that wants the good
+drill rather than the starter one, and yielding **prime timber** — heartwood
+the fabricator mills into three times the planks. Their promised fire immunity
+waits for fire, in 38.
+
+**Surface.** Hold the drill low on a trunk. `--fell swing` catches a stem
+mid-arc; `--fell down` catches the stump and the line of logs afterwards.
+Journal **VERSION 23**.
+
+**Deliberately not in 36:** a felling saw of its own (the drill does it, and a
+faster tool is a later round's reward); stumps that regrow; timber grades
+beyond ordinary and prime; the fall crushing a *building* differently from a
+hillside; and any change to what a standing tree looks like.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -2294,13 +2371,12 @@ if the traffic it produces reads as dull.
 
 The hunt note is finished: its engine landed in 28, its director half in 29,
 and its stalker in 31 alongside the deep resources it hunts you through. The
-toy is finished too — the pocket arcade shipped in 34 — and the forest note's
-first quarter shipped as the three forests in 35. Two notes are still holding
-rounds: the rest of the forest note, and the civic layer.
+toy is finished too — the pocket arcade shipped in 34 — and the forest note is
+half done: the three forests landed in 35 and felling in 36. What is left of
+it is the water and the weather, and after that the civic layer.
 
 | Stage | What | Why here |
 |---|---|---|
-| 36 | Felling | The notch, the hinge and the thirty per cent rule on the micro-mask; a kinematic fall arc; impact energy that scales from a bonk to a catastrophe; log blocks and graded timber; ancient trees that need better tools and do not burn |
 | 37 | Fine fluid | The micro-mask as a 0–64 fill level, a conserving checkerboard automaton that settles and sleeps, and a height-field surface |
 | 38 | Weather | Regional weather as a pure function of the tick, rain filling Priority-Flood basins, lightning gated by fuel moisture, fire spreading with wind and slope — and burnout writing the disturbance ledger the succession clock reads |
 | 39 | Civic layer B2 | Town offices, residents who run the player's own economic loop, and the warrant chain |
@@ -2308,7 +2384,7 @@ rounds: the rest of the forest note, and the civic layer.
 
 ## The feature map
 
-The whole game at a glance, as of stage 35.
+The whole game at a glance, as of stage 36.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -2414,10 +2490,15 @@ a cabinet that keeps the record);
 three forests decided by height and wetness (peat bog under sphagnum, mixed
 hardwood cove with emergent giants, subalpine conifer thinning to krummholz at
 a wandering treeline and bare rock above it);
+felling on the forestry numbers (a notch cut into the trunk's own
+cross-section, a hinge that lets go, a kinematic arc that falls toward the
+side you cut from, flattens what it lands on, chain-fells its neighbours and
+lies down as logs — with ancient trees at the top of the hardness ladder
+yielding prime timber);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** felling (notch, hinge, kinematic arc, ancient
-trees); fine fluid on the micro-mask; weather, flood, lightning and fire
+**Planned, in arc order:** fine fluid on the micro-mask; weather, flood,
+lightning and fire
 closing the loop into a disturbance ledger and a succession clock; then the
 civic layer B2 (offices, the NPC economic loop, the warrant chain) and B3
 (elections on trade goodwill).

@@ -24,6 +24,7 @@ mod device;
 mod disposition;
 mod dose;
 mod economy;
+mod felling;
 mod garage;
 mod garrison;
 #[cfg(feature = "gold")]
@@ -252,6 +253,7 @@ struct Options {
     raising: bool,
     arcade: bool,
     forest: Option<String>,
+    fell: Option<String>,
 }
 
 /// Which method a `--dig` run should use.
@@ -304,6 +306,7 @@ fn parse_args() -> Result<Options, String> {
         raising: false,
         arcade: false,
         forest: None,
+        fell: None,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -394,6 +397,7 @@ fn parse_args() -> Result<Options, String> {
             "--ward" => options.ward = true,
             "--raising" => options.raising = true,
             "--forest" => options.forest = Some(value()?),
+            "--fell" => options.fell = Some(value()?),
             "--arcade" => {
                 options.device = true;
                 options.arcade = true;
@@ -463,6 +467,7 @@ fn parse_args() -> Result<Options, String> {
                      --handheld-map      draw the handheld's map page instead\n  \
                      --arcade            play the pocket arcade on the raised handheld\n  \
                      --forest <which>    frame a stand of bog, cove or high forest\n  \
+                     --fell <when>       a stem mid-arc (swing) or lying down (down)\n  \
                      --view-distance <n> chunks visible in every direction (4-16, default 8)\n  \
                      --gold              enable the operator console (F10; dev builds only)\n  \
                      --sheriff           wear the badge (dev override; won at the ballot box later)\n  \
@@ -1813,6 +1818,123 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
     // The wellhead, over a field the seed actually put there. Late like the
     // posse fixture, and for the same reason.
+    if let Some(when) = options.fell.as_deref() {
+        // Fell a real tree and photograph it. The stem is found off worldgen,
+        // cut on the face the camera stands on, and stepped on the game's own
+        // clock — so the picture is a moment in a fall the game would have
+        // had, not a pose.
+        let swinging = match when {
+            "swing" | "mid" | "arc" => true,
+            "down" | "after" | "logs" => false,
+            other => return Err(format!("--fell wants swing or down (got {other})")),
+        };
+        let seed = world.seed();
+        let generator = world.generator().clone();
+        let natural = |x: i32, z: i32| generator.natural_height_at(x, z);
+
+        // A tall stem in hardwood country, well clear of any town.
+        let mut found = None;
+        'hunt: for ring in 0..70 {
+            for step in -ring..=ring {
+                for (cx, cz) in [
+                    (options.at.0 + step * 16, options.at.1 + ring * 16),
+                    (options.at.0 + step * 16, options.at.1 - ring * 16),
+                    (options.at.0 + ring * 16, options.at.1 + step * 16),
+                    (options.at.0 - ring * 16, options.at.1 + step * 16),
+                ] {
+                    if vx_world::forest::biome_at(seed, cx, cz, &natural)
+                        != vx_world::forest::Biome::Hardwood
+                    {
+                        continue;
+                    }
+                    if !generator.towns_near((cx, cz), 110).is_empty() {
+                        continue;
+                    }
+                    let sites = generator.towns_near((cx, cz), felling::TOWN_REACH);
+                    let height_at = |x: i32, z: i32| generator.height_with_sites(x, z, &sites);
+                    let trees = vx_world::flora::trees_overlapping(
+                        seed,
+                        (cx - 8, cz - 8),
+                        (cx + 8, cz + 8),
+                        &height_at,
+                        &natural,
+                        &sites,
+                    );
+                    if let Some(tree) = trees.into_iter().find(|tree| tree.height >= 6) {
+                        found = Some(tree);
+                        break 'hunt;
+                    }
+                }
+            }
+        }
+        let tree = found.ok_or("no tree worth felling within a kilometre of --at")?;
+
+        // Bring its ground with it, and cut it.
+        let centre = vx_core::BlockPos::new(tree.base.x, 0, tree.base.z).chunk();
+        world.load_around(centre, 8);
+        let face = 1; // cut from the +X side, so it comes toward the camera
+        let lean = felling::lean_at(&world, tree.base.x, tree.base.z);
+        let (direction, chair) = felling::aim(face, lean);
+        let mut falls = vec![felling::start(&mut world, &tree, direction, chair)];
+
+        // Step it: half way over for the swing, all the way down for the
+        // aftermath.
+        let mut logs = 0;
+        for _ in 0..64 * 8 {
+            if swinging && falls.first().is_some_and(|fall| fall.angle > 0.9) {
+                break;
+            }
+            for sweep in felling::advance_falls(&mut falls, &mut world) {
+                if let Some(landing) = sweep.landing {
+                    logs += landing.logs;
+                }
+            }
+            if falls.is_empty() {
+                break;
+            }
+        }
+        remesh_all(&context, &mut renderer, &mut world);
+
+        // Stand off to the side of the fall line, so the arc reads across the
+        // frame rather than coming at the lens.
+        let hinge = glam::Vec3::new(
+            tree.base.x as f32 + 0.5,
+            tree.base.y as f32 + 1.0,
+            tree.base.z as f32 + 0.5,
+        );
+        let across = glam::Vec3::new(-direction.z, 0.0, direction.x);
+        let eye = hinge + direction * 9.0 + across * 15.0 + glam::Vec3::Y * 7.0;
+        camera.position = eye;
+        look_at(&mut camera, hinge + direction * 4.0 + glam::Vec3::Y * 2.5);
+        // Camera before objects: `set_objects` culls against the last
+        // uploaded frustum, the trap stage 31 found the hard way.
+        renderer.update_camera(&context.queue, &camera);
+
+        let mut objects = Vec::new();
+        for fall in &falls {
+            let rig = trunk_rig(fall);
+            if let Some(yaw) = rig::yaw_towards(fall.direction.x, fall.direction.z) {
+                objects.extend(rig.objects_pitched(
+                    fall.hinge_point(),
+                    yaw,
+                    std::f32::consts::FRAC_PI_2 - fall.angle,
+                    0.0,
+                ));
+            }
+        }
+        renderer.set_objects(&context.device, &context.queue, &objects);
+
+        println!(
+            "fell capture: {:?} {} high at {},{} — angle {:.2} rad, {logs} logs down{}",
+            tree.species,
+            tree.height,
+            tree.base.x,
+            tree.base.z,
+            falls.first().map_or(std::f32::consts::FRAC_PI_2, |fall| fall.angle),
+            if chair { ", barber chair" } else { "" }
+        );
+    }
+
     if let Some(which) = options.forest.as_deref() {
         // Frame a stand of one of the three forests. The site is *found*
         // rather than written down: the fixture walks out from `--at` looking
@@ -3305,6 +3427,22 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 ///
 /// Derived from the same yaw/pitch convention `Camera::forward` uses, so a
 /// framing that looks right here looks the same in the window.
+/// The rig for a stem on its way down, in its own species' wood.
+fn trunk_rig(fall: &felling::Falling) -> rig::Rig {
+    use vx_render::tiles::slot;
+    let (bark, crown) = match fall.species {
+        vx_world::flora::Species::Ancient => (slot::ANCIENT_BARK, slot::LEAVES),
+        vx_world::flora::Species::BogSpruce => (slot::BOG_BARK, slot::BOG_NEEDLES),
+        species if species.conifer() => (slot::SPRUCE_SIDE, slot::NEEDLES),
+        _ => (slot::LOG_SIDE, slot::LEAVES),
+    };
+    // A standing trunk is a whole block wide however slender the timber
+    // is, so the falling one has to be too, or the tree visibly thins the
+    // moment it lets go. The physical radius still does the arithmetic.
+    let thickness = (felling::radius(fall.species) * 2.0).max(0.9);
+    rig::Rig::trunk(fall.height, thickness, bark, crown)
+}
+
 fn look_at(camera: &mut Camera, target: glam::Vec3) {
     let to = target - camera.position;
     camera.yaw = to.x.atan2(-to.z);
@@ -3514,6 +3652,9 @@ struct Active {
     arsenal: arsenal::Arsenal,
     /// Slugs in the air right now — the live twin of `Rebuilt::shots`.
     shots: Vec<arsenal::Shot>,
+    /// And stems on their way down: the live twin of `Rebuilt::falls`,
+    /// stepped on the same clock so both sides edit the same ground.
+    falls: Vec<felling::Falling>,
     /// The speaker, when the machine has one.
     audio: audio::Audio,
     /// The launcher's viewmodel shape, built once.
@@ -4050,6 +4191,9 @@ impl App {
         // Slugs in the air step on the same clock, through the same function
         // replay uses — the sweeps are where the live game reads the bills.
         Self::advance_gunfire(active, active.mining.last_ticks());
+        // And so do stems on their way down, for the same reason: what a
+        // trunk sweeps through is ground, and ground is the hash.
+        Self::advance_felling(active, active.mining.last_ticks());
         Self::collect_crashes(active);
         Self::advance_scouts(active, active.mining.last_ticks());
         Self::advance_printing(active, active.mining.last_ticks());
@@ -4246,6 +4390,21 @@ impl App {
         }
         if let Some(stalker) = active.dark.present() {
             objects.extend(active.stalker_rig.objects(stalker.position, stalker.yaw, 0.0));
+        }
+        // Stems on their way down. The rig is built along +X from the hinge,
+        // so a pitch of the arc's own angle swings it about its base — the
+        // same transform the handheld rides on, and no renderer change.
+        for fall in &active.falls {
+            let rig = trunk_rig(fall);
+            let Some(yaw) = rig::yaw_towards(fall.direction.x, fall.direction.z) else {
+                continue;
+            };
+            objects.extend(rig.objects_pitched(
+                fall.hinge_point(),
+                yaw,
+                std::f32::consts::FRAC_PI_2 - fall.angle,
+                0.0,
+            ));
         }
         for holder in active.garrisons.squads.iter().flat_map(|squad| &squad.holders) {
             if holder.mode == hostile::Mode::Down {
@@ -4744,6 +4903,135 @@ impl App {
         };
         active.terminal.say(terminal::Kind::Warn, line.clone());
         active.greeting = Some((line, Instant::now()));
+    }
+
+    /// The tree under the drill bit, and the face being cut, if this block is
+    /// a stump rather than a block of somebody's trunk.
+    ///
+    /// Cut low — inside the stump band — and you are felling. Cut higher up
+    /// and the drill does what it has always done, which is the rule a feller
+    /// learns first and the one this teaches by doing.
+    fn stump_under_the_bit(
+        active: &Active,
+        hit: &vx_world::raycast::RayHit,
+    ) -> Option<(vx_world::flora::Tree, usize)> {
+        let name = &active.world.registry().get_or_air(hit.id).name;
+        if !name.ends_with("log") {
+            return None;
+        }
+        let sites = active.world.generator().towns_near(
+            (hit.block.x, hit.block.z),
+            felling::TOWN_REACH,
+        );
+        let tree = felling::standing_tree(&active.world, hit.block, &sites)?;
+        if !felling::is_stump(&tree, hit.block) {
+            return None;
+        }
+        let face = vx_core::Face::ALL
+            .iter()
+            .position(|other| *other == hit.face)?;
+        // Cutting the top or the bottom of a stump is not a notch. A feller
+        // stands beside a tree, not on it.
+        (!(2..4).contains(&face)).then_some((tree, face))
+    }
+
+    /// Put the tree over: record the cut, and start the stem falling.
+    fn fell_the_tree(
+        active: &mut Active,
+        tree: &vx_world::flora::Tree,
+        stump: vx_core::BlockPos,
+        face: usize,
+    ) {
+        // Felling somebody's tree is felling somebody's property.
+        if let Some(line) = Self::charge_for_refusal(active, stump, permits::BOUNTY_PRYING) {
+            active.greeting = Some((line, Instant::now()));
+        }
+        let lean = felling::lean_at(&active.world, tree.base.x, tree.base.z);
+        let (direction, chair) = felling::aim(face, lean);
+        active.journal.record(Command::Fell {
+            at: stump,
+            face: face as u8,
+        });
+        active
+            .falls
+            .push(felling::start(&mut active.world, tree, direction, chair));
+        let line = if chair {
+            "IT SPLIT - SHE'S GOING WHERE SHE'S HEAVY".to_string()
+        } else {
+            "TIMBER".to_string()
+        };
+        active.terminal.say(terminal::Kind::Warn, line.clone());
+        active.greeting = Some((line, Instant::now()));
+        active.audio.play(audio::Cue::Thud, 0.7);
+    }
+
+    /// Step every stem on its way down, and spend what the sweeps say.
+    ///
+    /// Shaped exactly like [`Self::advance_gunfire`], and for the same
+    /// reason: the world edits already happened inside `advance_falls`, so
+    /// what is left here is the live-only half — who was standing under it,
+    /// and how loud it was.
+    fn advance_felling(active: &mut Active, ticks: u32) {
+        if active.falls.is_empty() {
+            return;
+        }
+        for _ in 0..ticks {
+            if active.falls.is_empty() {
+                break;
+            }
+            let sweeps = felling::advance_falls(&mut active.falls, &mut active.world);
+            for sweep in &sweeps {
+                // A stem sweeping through somebody is a line passing through
+                // them, which is the test the posse and the garrisons already
+                // answer — they simply do not care what drew the line.
+                let _ = active.posse.under_fire(sweep.from, sweep.to);
+                let _ = active.garrisons.under_fire(sweep.from, sweep.to);
+                let _ = active.dark.under_fire(sweep.from, sweep.to);
+
+                // And you — tested as the box you are, with the same
+                // segment-against-box the arsenal already uses for rounds
+                // going past. The energy span from a sapling to an
+                // old-growth giant is a thousandfold; the hits are the
+                // compressed version of it, and the ordering is the design.
+                let body = active.player.position + glam::Vec3::Y * 0.9;
+                if arsenal::segment_hits_box(
+                    sweep.from,
+                    sweep.to,
+                    body,
+                    glam::Vec3::new(0.5, 1.0, 0.5),
+                ) {
+                    let hits = (sweep.energy / 120_000.0).clamp(1.0, 6.0) as u8;
+                    if active.health.take(hits) {
+                        let line = "A TREE PUT YOU DOWN".to_string();
+                        active.terminal.say(terminal::Kind::Warn, line.clone());
+                        active.greeting = Some((line, Instant::now()));
+                    } else {
+                        let line = format!("THE TRUNK CAUGHT YOU - {hits} HIT");
+                        active.terminal.say(terminal::Kind::Warn, line.clone());
+                        active.greeting = Some((line, Instant::now()));
+                    }
+                }
+
+                let Some(landing) = sweep.landing else { continue };
+                // The loudest thing in the woods. Everything that listens,
+                // hears it — including whatever is out in the dark.
+                active.villagers.startled(landing.at);
+                active.garrisons.hear(landing.at);
+                active.dark.hear(landing.at, 6.0);
+                let heard = (landing.at - active.player.eye_position()).length();
+                let volume = (1.0 - heard / 90.0).clamp(0.1, 1.0);
+                active.audio.play(audio::Cue::Thud, volume);
+                let line = if landing.hung_up {
+                    "IT'S HUNG UP".to_string()
+                } else if landing.chained > 0 {
+                    format!("DOWN - AND IT TOOK {} WITH IT", landing.chained)
+                } else {
+                    format!("DOWN - {} LOGS", landing.logs)
+                };
+                active.terminal.say(terminal::Kind::Note, line.clone());
+                active.greeting = Some((line, Instant::now()));
+            }
+        }
     }
 
     fn advance_gunfire(active: &mut Active, ticks: u32) {
@@ -6317,6 +6605,35 @@ impl App {
                 active.digging = Some((hit.block, carried));
                 return;
             }
+        } else if let Some((tree, face)) = Self::stump_under_the_bit(active, &hit) {
+            // A trunk cut low is not a block being broken, it is a tree being
+            // felled. The hold goes into a notch on the trunk's own
+            // cross-section instead of into the block's four layers, because
+            // the rule that drops the tree is written in fractions of the
+            // section and needs a finer step than a quarter to say a third.
+            let before = match &active.digging {
+                Some((target, progress)) if *target == hit.block => *progress,
+                _ => 0.0,
+            };
+            let after = (before + step).min(1.0);
+            active.digging = Some((hit.block, after));
+            // Every step of the hold takes another few cells out of the
+            // section, and the mask is where the state lives — so a cut you
+            // walked away from is still there when you come back.
+            let cells = (after * vx_world::micro::CELLS as f32) as u32;
+            active
+                .world
+                .carve(hit.block, vx_world::micro::Shape::Notch { cells }.cells(0, 0, 0, face));
+            let mask = active
+                .world
+                .mask(hit.block)
+                .unwrap_or(vx_world::micro::FULL);
+            if !felling::ready(mask, face) {
+                return;
+            }
+            active.digging = None;
+            Self::fell_the_tree(active, &tree, hit.block, face);
+            return;
         } else {
             // Drilling is the same amount of work it always was; it is
             // simply visible now. Each quarter of the way through takes the
@@ -9682,6 +9999,7 @@ impl ApplicationHandler for App {
             last_network: u64::MAX,
             arsenal: rack,
             shots: Vec::new(),
+            falls: Vec::new(),
             audio: audio::Audio::open(),
             launcher_rig: Rig::launcher(),
             shake: 0.0,
