@@ -85,6 +85,13 @@ pub struct TerrainBlocks {
     /// The pump: stand it in water and it lifts, which is the one thing
     /// gravity will not do for you.
     pub pump: BlockId,
+    /// Wood that is currently alight. A block rather than a particle: the
+    /// mesher already draws blocks, and a burning stand should be something
+    /// you can see from the next ridge.
+    pub ember: BlockId,
+    /// And what it leaves. Ash is ground, and it is what a burn looks like
+    /// for as long as it takes the stand to come back.
+    pub ash: BlockId,
     pub tall_grass: BlockId,
     pub metal_wall: BlockId,
     /// The fabricator: place one, feed it the pile, print what you want.
@@ -209,6 +216,10 @@ impl TerrainBlocks {
             // fabricator: a pump in the wrong place is a mistake, not a
             // monument.
             pump: register(BlockDef::uniform("engine:pump", 60).with_hardness(Some(1.6))),
+            // Alight. Soft, because what is left of a burning stem is not
+            // much, and it is on its way to being nothing.
+            ember: register(BlockDef::uniform("engine:ember", 61).with_hardness(Some(0.2))),
+            ash: register(BlockDef::uniform("engine:ash", 62).with_hardness(Some(0.4))),
             tall_grass: register(
                 BlockDef::uniform("engine:tall_grass", 21)
                     .cross()
@@ -316,6 +327,8 @@ impl TerrainBlocks {
             ancient_log: registry.id_of("engine:ancient_log")?,
             prime_timber: registry.id_of("engine:prime_timber")?,
             pump: registry.id_of("engine:pump")?,
+            ember: registry.id_of("engine:ember")?,
+            ash: registry.id_of("engine:ash")?,
             tall_grass: registry.id_of("engine:tall_grass")?,
             metal_wall: registry.id_of("engine:metal_wall")?,
             rusted_metal: registry.id_of("engine:rusted_metal")?,

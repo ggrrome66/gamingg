@@ -787,6 +787,48 @@ seed and the column, worked out from the land's own shape rather than the
 flattened plot a town sits on, so the same hillside grows the same wood
 whichever direction you walk onto it from.
 
+### There is weather, and it will burn you out
+
+The sky goes over. The wind picks a direction and holds it, the light goes
+flat and grey, and it starts to rain — and it rains *across* the map, so a
+front comes at you over the hills rather than switching on where you happen to
+be standing. It wets the ground down as it goes: hollows fill, the surplus runs
+off downhill through the same water that has been moving since the last round,
+and it drains away after. Type `WEATHER` at the terminal and it will tell you
+what the sky is doing, which way it is blowing, and how dry the woods are.
+
+Then the storm gets mean, and the lightning starts. It goes for the tall and
+the lonely — whatever stands proud of the ground around it, which is the
+emergent giant over a cove or the one spruce on a ridge, not the middle of a
+flat wood. Most strikes do nothing at all. About one in fifty lights, and how
+likely that is depends on how long it has been since it rained and on what the
+bolt actually hit.
+
+And then the woods go up. Fire runs **uphill and downwind**, because that is
+what fire does: the chance of it taking the next block along is the no-wind
+chance multiplied by the wind blowing that way and the ground tilting that way,
+so the direction it spreads fastest is the sum of the two. A black spruce bog
+is kindling with cones on. A damp hardwood cove barely catches. Subalpine
+burns rarely and then totally. And it does not care whose wood it is: your
+house, a shop's plank walls, the fabricator you left sitting in a clearing.
+Cut yourself a firebreak or lose the lot.
+
+One thing will not burn, and that is **ancient** wood. A grove of those old
+things is the safest ground on the map, which is the point of having gone
+looking for one.
+
+The best part is that it grows back. Burnt ground remembers when it burnt — and
+so does ground you cut — and over the seasons it comes back through weeds, then
+a scrubby mess of saplings, then half-grown trees, then the forest that was
+always there in the seed. Black spruce comes back fastest, hardwood next,
+subalpine slowest. Nothing is stored except the ground something disturbed, so
+a forest nobody has touched still costs the game nothing at all.
+
+The whole chain — the sky, the rain, the strike, the fire, the regrowth — is
+worked out from the world seed and the tick. Two machines on the same tick get
+the same storm over the same hill, and a saved game replayed from its own
+journal burns exactly the ground it burned the first time.
+
 ### There is a game on the handheld
 
 Print a `POCKET ARCADE` cartridge at a fabricator — it is dear, and it sits
@@ -1179,7 +1221,7 @@ Controls:
 | `0` | The pump, once you have printed one |
 | `E` | A pump you have placed: switch it on, and it lifts whatever water it can reach out of the top |
 | `E` | A word with the nearest townsperson when nothing solid is in reach — or, if somebody nearby has their hands up, take them in for the board's pay |
-| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `patch` spends a medkit on you, `law` reads the deputies, `standing` your name with both peoples, `wells` every hole you have sunk |
+| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `patch` spends a medkit on you, `law` reads the deputies, `standing` your name with both peoples, `wells` every hole you have sunk, `weather` the sky, the wind and how dry the woods are |
 | `E` | A printed wellhead, once it is standing: the mud log says whether anything shows under this column, and `Enter` spuds the hole in |
 | `E` | A cot in any town's clinic: rest for nothing, or buy a medkit for the road |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
@@ -1581,6 +1623,13 @@ cargo run --release -p vx-app -- --screenshot level.ppm --at 0,10 --flood level
 # a tree mid-fall, and the logs it left
 cargo run --release -p vx-app -- --screenshot swing.ppm --at 0,10 --fell swing
 cargo run --release -p vx-app -- --screenshot logs.ppm --at 0,10 --fell down
+
+# rain over the country, at a tick the seed actually rains on
+cargo run --release -p vx-app -- --screenshot storm.ppm --at 0,10 --storm
+
+# a stand alight running upslope, and the same ground once it has come back
+cargo run --release -p vx-app -- --screenshot fire.ppm --at 0,10 --fire burning
+cargo run --release -p vx-app -- --screenshot after.ppm --at 0,10 --fire after
 
 # a stand of each forest, found rather than hard-coded
 cargo run --release -p vx-app -- --screenshot cove.ppm --at 0,10 --forest cove

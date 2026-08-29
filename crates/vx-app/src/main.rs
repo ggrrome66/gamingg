@@ -25,6 +25,7 @@ mod disposition;
 mod dose;
 mod economy;
 mod felling;
+mod fire;
 mod garage;
 mod garrison;
 #[cfg(feature = "gold")]
@@ -45,6 +46,7 @@ mod fuel;
 mod movement;
 mod optics;
 mod printer;
+mod rain;
 mod reputation;
 mod rig;
 mod salvage;
@@ -56,6 +58,7 @@ mod shop;
 mod skills;
 mod stalker;
 mod streaming;
+mod succession;
 mod terminal;
 mod tuning;
 mod view;
@@ -255,6 +258,8 @@ struct Options {
     forest: Option<String>,
     fell: Option<String>,
     flood: Option<String>,
+    storm: bool,
+    fire: Option<String>,
 }
 
 /// Which method a `--dig` run should use.
@@ -309,6 +314,8 @@ fn parse_args() -> Result<Options, String> {
         forest: None,
         fell: None,
         flood: None,
+        storm: false,
+        fire: None,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -401,6 +408,8 @@ fn parse_args() -> Result<Options, String> {
             "--forest" => options.forest = Some(value()?),
             "--fell" => options.fell = Some(value()?),
             "--flood" => options.flood = Some(value()?),
+            "--storm" => options.storm = true,
+            "--fire" => options.fire = Some(value()?),
             "--arcade" => {
                 options.device = true;
                 options.arcade = true;
@@ -472,6 +481,8 @@ fn parse_args() -> Result<Options, String> {
                      --forest <which>    frame a stand of bog, cove or high forest\n  \
                      --fell <when>       a stem mid-arc (swing) or lying down (down)\n  \
                      --flood <when>      a gallery cut into a lake (cut) or settled (level)\n  \
+                     --storm             rain over the country with the sky down\n  \
+                     --fire <when>       a stand alight (burning) or the ash after (after)\n  \
                      --view-distance <n> chunks visible in every direction (4-16, default 8)\n  \
                      --gold              enable the operator console (F10; dev builds only)\n  \
                      --sheriff           wear the badge (dev override; won at the ballot box later)\n  \
@@ -751,6 +762,11 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
     let (mut world, mut camera) = build_scene(&context, &mut renderer, options.seed, 6, options.at);
     camera.aspect = width as f32 / height as f32;
+
+    // A capture's sky is normally the hour alone. The weather fixtures set
+    // this instead, and the sun uniform at the bottom of this function reads
+    // it — the same tint the running game applies, out of the same struct.
+    let mut weather_over: Option<vx_world::weather::Conditions> = None;
 
     if options.bunker {
         // Find the nearest bunker to the requested spot and frame it: the
@@ -1970,6 +1986,305 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             "flood capture: {when} at {x},{z} (ground {ground}) — {steps} steps, {wet} cells of \
              water down the gallery, {} bodies still moving",
             water.len()
+        );
+    }
+
+    if options.storm {
+        // Weather over real country. The conditions are not invented: the
+        // fixture walks the clock forward until `weather::at` says this
+        // region is under rain or a storm, so the sky in the picture is one
+        // the seed actually produces on a tick the game would have run.
+        let seed = world.seed();
+        let mut found = None;
+        for step in 0..40_000u64 {
+            let tick = step * 64;
+            let sky = vx_world::weather::at(seed, tick, options.at.0, options.at.1);
+            if sky.rain > 0.75 {
+                found = Some((tick, sky));
+                break;
+            }
+        }
+        let (tick, sky) = found.ok_or("no downpour over --at inside ten hours of the clock")?;
+
+        // Stand on a rise looking out, so the sheet is between the lens and
+        // the country rather than all around one hollow.
+        let generator = world.generator().clone();
+        let mut best = (options.at, generator.natural_height_at(options.at.0, options.at.1));
+        for ring in 1..14 {
+            for step in -ring..=ring {
+                for (x, z) in [
+                    (options.at.0 + step * 10, options.at.1 + ring * 10),
+                    (options.at.0 + step * 10, options.at.1 - ring * 10),
+                    (options.at.0 + ring * 10, options.at.1 + step * 10),
+                    (options.at.0 - ring * 10, options.at.1 + step * 10),
+                ] {
+                    let here = generator.natural_height_at(x, z);
+                    if here > best.1 {
+                        best = ((x, z), here);
+                    }
+                }
+            }
+        }
+        let ((x, z), top) = best;
+        world.load_around(vx_core::BlockPos::new(x, 0, z).chunk(), 7);
+
+        // Rain wets the ground it falls on, which is stage 37's automaton
+        // taking a source term rather than anything new: a scatter of
+        // exposed columns take a few cells and then settle.
+        let mut water = Vec::new();
+        let mut wetted = 0;
+        let wet_id = world.registry().id_of("engine:water").unwrap_or(vx_core::BlockId::AIR);
+        for dx in -20..=20i32 {
+            for dz in -20..=20i32 {
+                if (dx.rem_euclid(7), dz.rem_euclid(7)) != (0, 0) {
+                    continue;
+                }
+                let (cx, cz) = (x + dx, z + dz);
+                let Some(surface) = world.surface_y(cx, cz) else {
+                    continue;
+                };
+                if surface <= vx_world::gen::SEA_LEVEL {
+                    continue;
+                }
+                let at = vx_core::BlockPos::new(cx, surface + 1, cz);
+                vx_world::fluid::set_level(&mut world, wet_id, at, 12);
+                if world.block(at) == wet_id {
+                    journal::wake_water(&mut water, &mut world, at);
+                    wetted += 1;
+                }
+            }
+        }
+        for _ in 0..64 * 3 {
+            if water.is_empty() {
+                break;
+            }
+            journal::settle_water(&mut water, &mut world);
+        }
+        remesh_all(&context, &mut renderer, &mut world);
+
+        // Eye well above the rise — over the canopy rather than inside it —
+        // looking out along the wind, so the streaks lean across the frame
+        // and the country is under them rather than behind one trunk.
+        let eye = glam::Vec3::new(x as f32 + 0.5, top as f32 + 13.0, z as f32 + 0.5);
+        camera.position = eye;
+        let along = glam::Vec3::new(sky.wind.0, 0.0, sky.wind.1).normalize_or_zero();
+        let out = if along == glam::Vec3::ZERO { glam::Vec3::Z } else { along };
+        look_at(&mut camera, eye + out * 60.0 - glam::Vec3::Y * 22.0);
+        renderer.update_camera(&context.queue, &camera);
+        renderer.set_objects(
+            &context.device,
+            &context.queue,
+            &rain::streaks(seed, tick as f32 / 64.0, eye, &sky),
+        );
+        weather_over = Some(sky);
+
+        println!(
+            "storm capture: {} at tick {tick} over {x},{z} (top {top}) — rain {:.2}, wind {:.1} m/s, \
+             {} streaks, {wetted} columns wetted",
+            sky.state.label(),
+            sky.rain,
+            sky.wind_speed(),
+            rain::drops(&sky)
+        );
+    }
+
+    if let Some(when) = options.fire.as_deref() {
+        // A stand actually alight, run on the fire's own clock. Nothing here
+        // is painted: the fixture lights one stem and lets `advance_fire` eat
+        // outward under the real weather at a real tick, then photographs it
+        // either mid-run or once it has gone out and started coming back.
+        let after = match when {
+            "burning" | "alight" | "running" => false,
+            "after" | "ash" | "out" => true,
+            other => return Err(format!("--fire wants burning or after (got {other})")),
+        };
+        let seed = world.seed();
+        let generator = world.generator().clone();
+        let natural = |x: i32, z: i32| generator.natural_height_at(x, z);
+
+        // Woods on a slope, clear of any town: fire runs uphill, so a flat
+        // site would photograph the least interesting half of the model. The
+        // score is slope times how much of the stand is actually fuel, so a
+        // bare scree face does not win it.
+        let mut best: Option<((i32, i32), f32, f32)> = None;
+        for ring in 1..30 {
+            for step in -ring..=ring {
+                for (x, z) in [
+                    (options.at.0 + step * 14, options.at.1 + ring * 14),
+                    (options.at.0 + step * 14, options.at.1 - ring * 14),
+                    (options.at.0 + ring * 14, options.at.1 + step * 14),
+                    (options.at.0 - ring * 14, options.at.1 + step * 14),
+                ] {
+                    if !generator.towns_near((x, z), 96).is_empty() {
+                        continue;
+                    }
+                    let ground = vx_world::forest::survey(seed, x, z, &natural);
+                    if ground.height <= vx_world::gen::SEA_LEVEL + 6 {
+                        continue;
+                    }
+                    // How much of a small window grows something that burns.
+                    // Off the flora field rather than the world, so this
+                    // costs nothing before the chunks are loaded.
+                    let sites = generator.towns_near((x, z), 96);
+                    let height_at = |hx: i32, hz: i32| generator.height_with_sites(hx, hz, &sites);
+                    let stand = vx_world::flora::trees_overlapping(
+                        seed,
+                        (x - 16, z - 16),
+                        (x + 16, z + 16),
+                        &height_at,
+                        &natural,
+                        &sites,
+                    );
+                    let fuel: f32 = stand
+                        .iter()
+                        .map(|tree| match tree.species {
+                            vx_world::flora::Species::BogSpruce => 1.4,
+                            vx_world::flora::Species::Spruce => 1.2,
+                            vx_world::flora::Species::Ancient => 0.0,
+                            _ => 0.7,
+                        })
+                        .sum();
+                    // Slope is a gate, not the score. Maximising it lands on
+                    // a cliff with three trees on it; what a fire wants is a
+                    // stand thick enough for the crowns to touch, on ground
+                    // that tilts enough for the uphill term to show.
+                    // Slope is a gate, not the score. Maximising it lands on
+                    // a cliff with three trees on it; what carries a fire is
+                    // a stand thick enough for the crowns to touch, and the
+                    // tilt only has to be enough for the uphill term to show.
+                    if ground.slope < 0.45 {
+                        continue;
+                    }
+                    let score = fuel;
+                    if best.is_none_or(|(_, top, _)| score > top) {
+                        best = Some(((x, z), score, ground.slope));
+                    }
+                }
+            }
+        }
+        let ((x, z), score, slope) =
+            best.ok_or("no forested slope within half a kilometre of --at")?;
+        world.load_around(vx_core::BlockPos::new(x, 0, z).chunk(), 7);
+
+        // A tick the country is actually dry and windy on. Hunted for rather
+        // than written down, so the numbers the spread model reads are ones
+        // the seed produces — the same discipline the storm capture uses.
+        let mut weather_at = None;
+        for step in 0..80_000u64 {
+            let tick = step * 64;
+            let sky = vx_world::weather::at(seed, tick, x, z);
+            if sky.state.wet() || sky.wind_speed() < 7.0 {
+                continue;
+            }
+            if vx_world::weather::fuel_moisture(seed, tick, x, z) > 0.9 {
+                weather_at = Some((tick, sky));
+                break;
+            }
+        }
+        let (tick, sky) = weather_at.ok_or("no dry windy hour over --at in a day of the clock")?;
+
+        // Light a crown, not a stem. A lone trunk's neighbours are air and
+        // dirt, so a fire started at the base of one has nothing to catch:
+        // what carries a fire is the fine fuel — needles and leaves — packed
+        // against more of itself. The first capture of this fixture lit a
+        // tuft of grass in a clearing and photographed a puff of smoke.
+        let fine = |name: &str| name.ends_with("needles") || name.ends_with("leaves");
+        let mut lit = None;
+        'search: for radius in 0..20i32 {
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    if dx.abs() != radius && dz.abs() != radius {
+                        continue;
+                    }
+                    let (cx, cz) = (x + dx, z + dz);
+                    let Some(surface) = world.surface_y(cx, cz) else {
+                        continue;
+                    };
+                    for dy in 0..10 {
+                        let at = vx_core::BlockPos::new(cx, surface - dy, cz);
+                        let name = world.registry().get_or_air(world.block(at)).name.clone();
+                        if fine(&name) && fire::fuel(&name).is_some() {
+                            lit = Some(at);
+                            break 'search;
+                        }
+                    }
+                }
+            }
+        }
+        let start = lit.ok_or("no crown to light within twenty blocks")?;
+        let mut blaze = fire::Fire::new(start);
+        if !blaze.light(&mut world, start) {
+            return Err("the strike did not take".into());
+        }
+        let mut fires = vec![blaze];
+        let want = if after { 60_000 } else { 2_400 };
+        let mut steps = 0u64;
+        // Counted off the reports rather than off the fires: a fire that has
+        // finished is removed from the vector, so reading the totals at the
+        // end of an `after` run would always say nothing ever burned.
+        let mut eaten = 0;
+        let mut caught = 0;
+        // The ledger is written from the burn's own reports, exactly as
+        // `journal::burn_and_grow` writes it — so the stands that come back
+        // are the stands that actually went, not a square drawn round the
+        // site by the fixture.
+        let mut stands = succession::Ledger::default();
+        while steps < want && !fires.is_empty() {
+            for report in fire::advance_fire(&mut fires, &mut world, seed, tick + steps, &sky) {
+                eaten += report.spent;
+                caught += report.caught;
+                if let Some(gone) = report.at.filter(|_| report.spent > 0) {
+                    stands.disturb(gone, tick + steps);
+                }
+            }
+            steps += 1;
+            // `burning` wants the fire caught in the act rather than the
+            // ashes: stop once a front is properly running, which is a
+            // condition rather than a step count because how fast a stand
+            // goes up is the model's business, not the fixture's.
+            if !after && caught > 50 {
+                break;
+            }
+        }
+        let alight: usize = fires.iter().map(|blaze| blaze.burning().len()).sum();
+
+        // And, for `after`, the first green coming back: the ledger takes the
+        // burn and the clock stamps the stand it grew back to.
+        let mut regrown = 0;
+        if after {
+            let sites = world.generator().towns_near((x, z), 160);
+            // Far enough on that the slowest thing here is back to a mixed
+            // stand rather than bare ground: the clock runs per species, and
+            // conifer is the slowest of the three.
+            let seasons = succession::STEP_TICKS * 7;
+            regrown = stands.advance(&mut world, tick + steps + seasons, &sites).len();
+        }
+        remesh_all(&context, &mut renderer, &mut world);
+
+        // Stand downhill and look up the run, which is the direction the
+        // model says the fire went.
+        let uphill = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .into_iter()
+            .max_by_key(|(dx, dz)| natural(x + dx * 10, z + dz * 10))
+            .unwrap_or((1, 0));
+        let back = glam::Vec3::new(uphill.0 as f32, 0.0, uphill.1 as f32);
+        // Aimed at what actually burned, not at the site the search picked:
+        // on a steep hillside those are tens of blocks apart in height, and
+        // the first version of this photographed a hill with the fire off
+        // the bottom of the frame.
+        let heart = glam::Vec3::new(start.x as f32 + 0.5, start.y as f32, start.z as f32 + 0.5);
+        let eye = heart + glam::Vec3::Y * 11.0 - back * 24.0;
+        camera.position = eye;
+        look_at(&mut camera, heart + back * 6.0);
+        renderer.update_camera(&context.queue, &camera);
+        renderer.set_objects(&context.device, &context.queue, &[]);
+
+        println!(
+            "fire capture: {when} at {x},{z} (slope {slope:.2}, stand {score:.1}) at tick {tick} \
+             — wind {:.1} m/s, lit {start:?}, {steps} steps, {caught} caught, {eaten} eaten, \
+             {alight} still alight in {} fronts, {regrown} stands stamped",
+            sky.wind_speed(),
+            fires.len()
         );
     }
 
@@ -3562,6 +3877,24 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         Some(other) => eprintln!("--optic {other} is not lamp, nvg or thermal"),
         None => {}
     }
+    // The weather fixtures tint the sky the same way `Game::frame` does, so
+    // an overcast capture reads as overcast rather than as a strange dusk.
+    if let Some(sky) = weather_over {
+        let overcast = match sky.state {
+            vx_world::weather::State::Clear => 0.0,
+            vx_world::weather::State::Cloud => 0.45,
+            vx_world::weather::State::Rain => 0.75,
+            vx_world::weather::State::Storm => 1.0,
+        };
+        if overcast > 0.0 {
+            let grey = [0.36, 0.38, 0.41];
+            for (channel, tone) in grey.iter().enumerate() {
+                sun.sky[channel] = sun.sky[channel] * (1.0 - overcast) + tone * overcast;
+            }
+            sun.light[0] *= 1.0 - 0.55 * overcast;
+            sun.light[1] = (sun.light[1] + 0.10 * overcast).min(0.6);
+        }
+    }
     renderer.set_sun(&context.queue, sun);
 
     let capture = capture_frame(&context, &renderer, width, height);
@@ -3817,6 +4150,11 @@ struct Active {
     /// closed is off when you come back.
     pumps: Vec<vx_core::BlockPos>,
     pump_step: u32,
+    /// What is burning — the live twin of `Rebuilt::fires`.
+    fires: Vec<fire::Fire>,
+    /// And what is growing back, which is the one part of this round that
+    /// outlives a session.
+    stands: succession::Ledger,
     /// The speaker, when the machine has one.
     audio: audio::Audio,
     /// The launcher's viewmodel shape, built once.
@@ -4357,6 +4695,7 @@ impl App {
         // trunk sweeps through is ground, and ground is the hash.
         Self::advance_felling(active, active.mining.last_ticks());
         Self::advance_water(active, active.mining.last_ticks());
+        Self::advance_weather(active, active.mining.last_ticks());
         Self::collect_crashes(active);
         Self::advance_scouts(active, active.mining.last_ticks());
         Self::advance_printing(active, active.mining.last_ticks());
@@ -4517,6 +4856,30 @@ impl App {
             .renderer
             .update_camera(&active.context.queue, &active.camera);
         let mut sun = clock::sun_uniform(clock::sky_at(active.clock));
+        // Weather rides the sun uniform the way the optics do: a storm greys
+        // the sky, takes the sun off the hills and lifts the ambient, so an
+        // overcast noon reads as overcast rather than as dusk. No shader
+        // change — the values were always there to be written.
+        let sky = vx_world::weather::at(
+            active.world.seed(),
+            active.journal.tick(),
+            active.player.position.x as i32,
+            active.player.position.z as i32,
+        );
+        let overcast = match sky.state {
+            vx_world::weather::State::Clear => 0.0,
+            vx_world::weather::State::Cloud => 0.45,
+            vx_world::weather::State::Rain => 0.75,
+            vx_world::weather::State::Storm => 1.0,
+        };
+        if overcast > 0.0 {
+            let grey = [0.36, 0.38, 0.41];
+            for (channel, tone) in grey.iter().enumerate() {
+                sun.sky[channel] = sun.sky[channel] * (1.0 - overcast) + tone * overcast;
+            }
+            sun.light[0] *= 1.0 - 0.55 * overcast;
+            sun.light[1] = (sun.light[1] + 0.10 * overcast).min(0.6);
+        }
         // The optics ride the sun uniform: the lamp is a light from the
         // active eye, the visors are how the eye reads what arrives.
         if active.optics.mode == optics::Mode::Lamp {
@@ -4575,6 +4938,17 @@ impl App {
             }
             let rig = &active.villager_rigs[holder.variant % active.villager_rigs.len()];
             objects.extend(rig.objects(holder.position, holder.yaw, 0.0));
+        }
+        // And the rain, on the same instanced path as everything above it —
+        // a sheet of streaks around the eye, derived from the clock rather
+        // than spawned, so it costs no state and no allocation per drop.
+        if sky.rain > 0.0 {
+            objects.extend(rain::streaks(
+                active.world.seed(),
+                active.journal.tick() as f32 / 64.0,
+                active.camera.position,
+                &sky,
+            ));
         }
 
         // Trade traffic. A load in the air is not simulated — where it is now
@@ -5118,6 +5492,10 @@ impl App {
         active
             .falls
             .push(felling::start(&mut active.world, tree, direction, chair));
+        // The stump goes in the ledger, same as a burn does: what took the
+        // trees off a cell does not change how the cell comes back.
+        let tick = active.journal.tick();
+        active.stands.disturb(tree.base, tick);
         let line = if chair {
             "IT SPLIT - SHE'S GOING WHERE SHE'S HEAVY".to_string()
         } else {
@@ -5243,6 +5621,89 @@ impl App {
         if before > 0 && active.water.is_empty() {
             let line = "THE WATER'S FOUND ITS LEVEL".to_string();
             active.terminal.say(terminal::Kind::Note, line.clone());
+            active.greeting = Some((line, Instant::now()));
+        }
+    }
+
+    /// The sky, the lightning, the fire and the forest coming back.
+    ///
+    /// The simulation is `journal::burn_and_grow`, which the replay calls
+    /// too; what is left here is the live-only half — the thunder, the rain
+    /// wetting the ground, and the lines that tell you the woods are alight.
+    fn advance_weather(active: &mut Active, ticks: u32) {
+        let seed = active.world.seed();
+        let standing = active.player.position;
+        let at = vx_core::BlockPos::new(
+            standing.x.floor() as i32,
+            standing.y.floor() as i32,
+            standing.z.floor() as i32,
+        );
+        for step in 0..ticks {
+            let tick = active.journal.tick().saturating_sub(u64::from(ticks - 1 - step));
+            let before = active.fires.len();
+            journal::burn_and_grow(
+                &mut active.fires,
+                &mut active.stands,
+                &mut active.world,
+                tick,
+                standing,
+            );
+            // A strike that lights something is the loudest thing in the
+            // country, and everything that listens hears it.
+            if active.fires.len() > before {
+                let line = "LIGHTNING - SOMETHING'S ALIGHT".to_string();
+                active.terminal.say(terminal::Kind::Warn, line.clone());
+                active.greeting = Some((line, Instant::now()));
+                active.audio.play(audio::Cue::Boom, 0.9);
+                if let Some(fire) = active.fires.last() {
+                    let struck = fire.origin;
+                    let spot = glam::Vec3::new(
+                        struck.x as f32,
+                        struck.y as f32,
+                        struck.z as f32,
+                    );
+                    active.villagers.startled(spot);
+                    active.garrisons.hear(spot);
+                    active.dark.hear(spot, 10.0);
+                }
+            }
+        }
+
+        // Rain wets the ground: a few cells on an exposed column near you,
+        // handed to the automaton stage 37 already built. It fills the
+        // hollows, runs off downhill, and drains away after.
+        let sky = vx_world::weather::at(seed, active.journal.tick(), at.x, at.z);
+        if sky.state.wet() && active.journal.tick().is_multiple_of(64) {
+            let spread = 10;
+            let hash = vx_world::seed::finalise(
+                seed ^ active.journal.tick().wrapping_mul(0x9e37_79b9_7f4a_7c15),
+            );
+            let pick = vx_world::seed::unit(hash);
+            let (dx, dz) = (
+                ((pick * 2.0 - 1.0) * spread as f32) as i32,
+                ((vx_world::seed::unit(hash ^ 0x51) * 2.0 - 1.0) * spread as f32) as i32,
+            );
+            let (x, z) = (at.x + dx, at.z + dz);
+            if let (Some(ground), Some(water)) = (
+                active.world.surface_y(x, z),
+                active.world.registry().id_of("engine:water"),
+            ) {
+                let onto = vx_core::BlockPos::new(x, ground + 1, z);
+                let held = vx_world::fluid::level_at(&active.world, water, onto);
+                let fall = (sky.rain * 12.0) as u32;
+                if held + fall <= vx_world::fluid::FULL {
+                    vx_world::fluid::set_level(&mut active.world, water, onto, held + fall);
+                    journal::wake_water(&mut active.water, &mut active.world, onto);
+                }
+            }
+        }
+
+        // What the fires are doing, said once rather than every tick.
+        if !active.fires.is_empty() && active.journal.tick().is_multiple_of(64 * 3) {
+            let eaten: u32 = active.fires.iter().map(|fire| fire.eaten).sum();
+            let alight: usize = active.fires.iter().map(|fire| fire.burning().len()).sum();
+            let line = format!("FIRE: {alight} ALIGHT, {eaten} GONE");
+            active.terminal.say(terminal::Kind::Warn, line.clone());
             active.greeting = Some((line, Instant::now()));
         }
     }
@@ -5689,6 +6150,88 @@ impl App {
                     }
                     lines
                 }
+            }
+            "weather" => {
+                // The whole stage-38 chain, said in five lines: what the sky
+                // is doing, which way it is blowing, how dry the fuel is,
+                // what is alight, and whether the ground you stand on is
+                // still coming back from the last time something took it.
+                let at = active.player.position;
+                let column = vx_core::BlockPos::new(
+                    at.x.floor() as i32,
+                    at.y.floor() as i32,
+                    at.z.floor() as i32,
+                );
+                let seed = active.world.seed();
+                let tick = active.journal.tick();
+                let sky = vx_world::weather::at(seed, tick, column.x, column.z);
+                // Which way it is blowing, in the same eight points the
+                // beacon map names a town in.
+                let bearing = if sky.wind_speed() < 0.5 {
+                    "CALM".to_string()
+                } else {
+                    let reach = 1_000.0 / sky.wind_speed().max(0.1);
+                    map::bearing(
+                        (0, 0),
+                        (
+                            (sky.wind.0 * reach) as i32,
+                            (sky.wind.1 * reach) as i32,
+                        ),
+                    )
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("CALM")
+                    .to_string()
+                };
+                let dryness = vx_world::weather::fuel_moisture(seed, tick, column.x, column.z);
+                let mut lines = vec![
+                    format!("SKY       {}", sky.state.label()),
+                    format!(
+                        "WIND      {} AT {:.0} M/S",
+                        bearing,
+                        sky.wind_speed()
+                    ),
+                    format!(
+                        "FUEL      {:.0}% DRY{}",
+                        dryness * 100.0,
+                        if dryness > 0.75 { "  - IT WILL LIGHT" } else { "" }
+                    ),
+                ];
+                if active.fires.is_empty() {
+                    lines.push("FIRE      NOTHING BURNING".to_string());
+                } else {
+                    let alight: usize =
+                        active.fires.iter().map(|fire| fire.burning().len()).sum();
+                    let eaten: u32 = active.fires.iter().map(|fire| fire.eaten).sum();
+                    lines.push(format!(
+                        "FIRE      {} FRONT{} - {alight} ALIGHT, {eaten} GONE",
+                        active.fires.len(),
+                        if active.fires.len() == 1 { "" } else { "S" }
+                    ));
+                }
+                let generator = active.world.generator().clone();
+                let natural = |x: i32, z: i32| generator.natural_height_at(x, z);
+                let biome = vx_world::forest::biome_at(seed, column.x, column.z, &natural);
+                let species = vx_world::flora::Species::of(biome);
+                let cell = succession::Ledger::cell_of(column);
+                match active.stands.stand(cell) {
+                    Some(_) => {
+                        let stage = active.stands.due(cell, tick, species) as usize;
+                        lines.push(format!(
+                            "STAND     COMING BACK - {}",
+                            succession::LABELS[stage.min(succession::LABELS.len() - 1)]
+                        ));
+                    }
+                    None => lines.push("STAND     UNTOUCHED".to_string()),
+                }
+                if !active.stands.is_empty() {
+                    lines.push(format!(
+                        "LEDGER    {} DISTURBED STAND{}",
+                        active.stands.len(),
+                        if active.stands.len() == 1 { "" } else { "S" }
+                    ));
+                }
+                lines
             }
             "who" => {
                 let site = *active.villagers.site();
@@ -9930,6 +10473,11 @@ impl App {
         if let Err(error) = active.health.save(save.root()) {
             log::error!("could not save the player's condition: {error}");
         }
+        // The one part of the weather that outlives a session: which stands
+        // something cleared, and how far back they have come.
+        if let Err(error) = active.stands.save(save.root()) {
+            log::error!("could not save the disturbed stands: {error}");
+        }
         if let Err(error) = active.reputation.save(save.root()) {
             log::error!("could not save the player's reputation: {error}");
         }
@@ -10127,6 +10675,7 @@ impl ApplicationHandler for App {
         let mut crew_wear = wear::Wear::default();
         let mut holes = well::Wells::default();
         let mut cabinet = arcade::Arcade::default();
+        let mut stands = succession::Ledger::default();
         let mut condition = health::Health::default();
         let mut name = reputation::Reputation::default();
         let mut vaults = bank::Bank::default();
@@ -10160,6 +10709,9 @@ impl ApplicationHandler for App {
             // The cabinet keeps what a cabinet keeps: the cartridge, the
             // record and how deep anybody ever got.
             cabinet.load(save.root());
+            // And which stands are still coming back, because a burn that a
+            // reload forgot would be a burn that never healed.
+            stands.load(save.root());
             condition.load(save.root());
             name.load(save.root());
             vaults.load(save.root());
@@ -10275,6 +10827,8 @@ impl ApplicationHandler for App {
             water: Vec::new(),
             pumps: Vec::new(),
             pump_step: 0,
+            fires: Vec::new(),
+            stands,
             audio: audio::Audio::open(),
             launcher_rig: Rig::launcher(),
             shake: 0.0,

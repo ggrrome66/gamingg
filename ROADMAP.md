@@ -112,7 +112,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 34 | `7cd3c26` | The pocket arcade: a cartridge printed at the fabricator turns the handheld into a games machine — an original corridor shooter, every wall and every pixel of it computed, floors that loop meaner, and a record the cabinet keeps |
 | 35 | `b3ae393` | Three forests: every column belongs to a peat bog, a mixed hardwood cove or subalpine conifer, decided by how high and how wet the ground is — with emergent giants over the cove, krummholz mats at the treeline, bare rock above them and sphagnum underfoot in the lows |
 | 36 | `98a0a7c` | Felling: cut low into a trunk and you are cutting a notch on its own cross-section, not chipping a block — past the notch and down to the hinge it goes over, toward the side you cut from, on a kinematic arc that flattens what it lands on, takes its neighbours with it and lies down as logs |
-| 37 | _this_ | Water that moves: a wet block carries its fill in the same sixty-four cells a wounded block carries its damage, so cutting into a lake floods the gallery, an inland pool drains by exactly what ran out of it, and a printed pump lifts water over its own head |
+| 37 | `2b61043` | Water that moves: a wet block carries its fill in the same sixty-four cells a wounded block carries its damage, so cutting into a lake floods the gallery, an inland pool drains by exactly what ran out of it, and a printed pump lifts water over its own head |
+| 38 | _this_ | Weather, fire and what comes back: the sky is a pure function of the seed and the tick, so a storm crosses the country the same way twice — it rains, the hollows fill, lightning takes the tall and the lonely, and about one strike in fifty lights a fire that runs uphill and downwind through anything wooden, your house included, until it meets an ancient grove or wet ground; then the burnt cell remembers, and comes back through meadow, thicket and mixed stand to the forest it was |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2110,6 +2111,103 @@ partial blocks ride the micro path stage 27 already built.
 
 ---
 
+## Shipped — Stage 38: weather, fire and what comes back
+
+**The forest note's last item, and the one it argues everything else was
+for.** 35 grew the forests, 36 gave them a way to come down, 37 set the water
+moving. What was missing was the thing that disturbs a stand with nobody
+standing there — and the thing that heals it afterwards, without which a burn
+is a scar rather than a cycle.
+
+**The sky is a pure function of `(seed, tick, region)`.** No stored front, no
+side generator, nothing to save. Coarse regions about 512 blocks across are
+sampled off the same signed noise the water table uses, at
+`(region, tick / PERIOD)`, and lerped between steps so a front crosses the
+country rather than snapping into place. The sample point itself is advected
+by a slow drift, which is what makes a storm *travel*. Minecraft's weather is
+famously not reproducible from its seed; here it costs nothing to make it so,
+and everything downstream — the rain, the strikes, the fire — inherits that
+for free.
+
+`Conditions` carries temperature, humidity, a wind vector, a rain fraction and
+one of four states — clear, cloud, rain, storm. `fuel_moisture` back-samples
+six weather steps with a decay, so the woods stay wet for a while after the
+rain stops and dry out slowly, which is the single number the whole fire half
+reads.
+
+**What you see and hear is the uniform that was already there.** A storm greys
+the sky colour, takes the sun off the hills and lifts the ambient floor — the
+same three values `clock::sun_uniform` has always written, so an overcast noon
+reads as overcast instead of as dusk, with no shader change. The rain rides
+the instanced object path the falling trunk rides: a fixed sheet of thin
+streaks around the eye, each one's position derived from its index and the
+clock rather than spawned, slanted along the drop's own velocity so a gale
+visibly leans the weather over. Thunder is a cue beside the launcher's, and a
+strike is *loud* — the garrisons hear it, the stalker hears it, and the
+townsfolk startle, the same three ears felling already fed.
+
+**Rain is a source term on the water that already moves.** No second system:
+while it rains, an exposed column near you takes a few cells through
+`fluid::set_level` and wakes a body exactly the way a broken block does.
+Hollows fill, the surplus runs downhill, and it drains away after. The note
+offers Priority-Flood for unbounded pooling; this fluid is bounded by design,
+so it is not needed.
+
+**Lightning goes for the tall and the lonely, and mostly does nothing.** A
+strike is hashed off `(seed, tick)` inside a storm, on its own slow clock; the
+column it takes is the highest thing in a small neighbourhood, so an emergent
+giant or a ridgeline spruce takes it and the stand below does not. Whether it
+lights anything is the real statistic: roughly one in fifty, scaled by how dry
+the fuel is and by what it hit.
+
+**Spread is Rothermel's shape, not his parameter set.** A neighbour's ignition
+chance is `p0 · fuel · (1 + φ_w + φ_s) · dryness`, wind and slope as
+intensification factors, so **fire runs uphill and downwind** and the
+direction of maximum spread is the vector sum. Per species, faithful to the
+note: bog needles and spruce foliage go up like kindling, hardwood leaves and
+logs resist, planks and roofs burn at a middling rate — and **ancient wood
+does not burn at all**, which is the promise stage 36 made when it put
+ancients at the top of the hardness ladder. Wood burns *wherever it stands*:
+your house, a town's plank walls, the fabricator you left in a clearing. A
+firebreak is a thing you cut, and an ancient grove is the safest ground on the
+map.
+
+**The ledger and the clock, which the note wrongly assumed already existed.**
+`succession.rs` stores only *disturbed* stands, keyed by lattice cell, holding
+when they were disturbed and how many stages have been stamped — untouched
+forest stays a pure function of the seed and costs nothing, the same sparse
+trick the damage mask uses for wounds. The clock is the note's four stages —
+meadow, thicket, mixed, old growth — advanced on the day clock and *written
+into the world as blocks*, so worldgen stays pure and regrowth is an edit like
+every other. Each stage is the same tree the seed describes at a fraction of
+its height, so a stand comes back as itself and the last stage is bit-for-bit
+what worldgen would have grown. Black spruce comes back fastest, hardwood next
+and subalpine slowest, which is the note's ordering rather than its absolute
+durations. Felling writes the ledger too: stage 36's stumps are the first
+thing that grows back.
+
+**The oracle, for the fourth round running.** None of this records an order.
+The weather is pure in the tick, the strike is hashed off the same tick, and
+the player's position — the only other input — is already replayed. So both
+sides call one shared function per tick, `journal::burn_and_grow`, the world
+edits happen inside it and the reports carry the live-only half. The test that
+matters is the one that has mattered since 36: let a strike land, let it burn,
+replay the log on a fresh world, and the region hash matches.
+
+**Surface.** No new key. `WEATHER` at the terminal reads the sky, the wind
+bearing, how dry the fuel is, what is alight and whether the ground you are
+standing on is still coming back. `--storm` catches rain over the country with
+the sky down; `--fire burning` catches a stand alight running upslope, and
+`--fire after` the ash and snags it left. Journal **VERSION 25**.
+
+**Deliberately not in 38:** crown fire as a separate state, ember spotting
+downwind, smoke of any kind, wind that pushes you or the drones, snow or
+freezing, and lightning that hurts you directly. The note's absolute
+succession durations are compressed by two orders of magnitude, on purpose —
+the sequence is faithful, the calendar is not.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -2208,15 +2306,17 @@ the note blocks the civic half, which shipped in stage 23.
 ## Planned — the forest note: felling, fluid and weather
 
 A design note arrived covering the forest, the water and the weather, and it
-is recorded whole here as every note before it has been. Its first quarter
-shipped as stage 35 above; what follows is the rest, in the order the note
-itself argues for, because the ordering is the most useful thing in it.
+is recorded whole here as every note before it has been. **It is finished**:
+the three forests shipped as stage 35, felling as 36, the fluid as 37 and the
+weather, fire and succession as 38. What follows is the note's own reasoning,
+kept because the ordering and the arithmetic in it are the most useful things
+it contains, and because the shipped sections above assume it.
 
 **Two of its premises were wrong about this engine and are worth stating
-plainly**: there is no succession clock and no flora ledger here yet — the
-note assumes both exist. They do not. The forest is a pure function of the
-ground with nothing stored, so the ledger arrives with the first thing that
-can *disturb* a stand, which is felling.
+plainly**: it assumed a succession clock and a flora ledger already existed
+here. They did not. The forest was a pure function of the ground with nothing
+stored, so the ledger arrived with the first things that can *disturb* a stand
+— felling in 36, and fire in 38, which is also where the clock landed.
 
 ### Felling, and the thirty per cent rule
 
@@ -2441,20 +2541,20 @@ if the traffic it produces reads as dull.
 
 The hunt note is finished: its engine landed in 28, its director half in 29,
 and its stalker in 31 alongside the deep resources it hunts you through. The
-toy is finished too — the pocket arcade shipped in 34 — and the forest note is
-three quarters done: the three forests landed in 35, felling in 36 and the
-fluid in 37. What is left of it is the weather, and after that the civic
-layer.
+toy is finished too — the pocket arcade shipped in 34 — and **the forest note
+is finished as of 38**: three forests in 35, felling in 36, the fluid in 37,
+and the weather, the fire and the succession clock in 38. What is left on the
+board is the civic layer, which has been waiting since 11.
 
 | Stage | What | Why here |
 |---|---|---|
-| 38 | Weather | Regional weather as a pure function of the tick, rain filling Priority-Flood basins, lightning gated by fuel moisture, fire spreading with wind and slope — and burnout writing the disturbance ledger the succession clock reads |
 | 39 | Civic layer B2 | Town offices, residents who run the player's own economic loop, and the warrant chain |
 | 40 | Civic layer B3 | Elections on the beacon console, votes cast on trade goodwill, and offices the player can hold |
+| 41 | Seasons on the weather clock | The sky is already pure in the tick and the succession clock already runs on days; a slow annual term over both is what turns a burn scar into a thing you watch across a year |
 
 ## The feature map
 
-The whole game at a glance, as of stage 37.
+The whole game at a glance, as of stage 38.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -2568,12 +2668,22 @@ cross-section, a hinge that lets go, a kinematic arc that falls toward the
 side you cut from, flattens what it lands on, chain-fells its neighbours and
 lies down as logs — with ancient trees at the top of the hardness ladder
 yielding prime timber);
+weather that is a pure function of the seed and the tick (fronts that drift
+across the country rather than snapping, a greyed sky and a lifted ambient on
+the uniform that was already there, rain drawn as a derived sheet of streaks
+and fed into the water automaton as a source term, fuel moisture that lags the
+rain both ways, and thunder every ear in the game already listens with);
+fire that closes the loop (lightning biased to the tall and the lonely, about
+one strike in fifty lighting anything, spread on Rothermel's shape so it runs
+uphill and downwind, every wooden thing burnable wherever it stands and
+ancient wood burnable nowhere) and the succession clock behind it (only
+disturbed cells stored, cut or burnt alike, coming back through meadow,
+thicket and mixed stand as the tree the seed always described);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** weather, flood, lightning and fire
-closing the loop into a disturbance ledger and a succession clock; then the
-civic layer B2 (offices, the NPC economic loop, the warrant chain) and B3
-(elections on trade goodwill).
+**Planned, in arc order:** the civic layer B2 (offices, the NPC economic loop,
+the warrant chain) and B3 (elections on trade goodwill); then seasons over the
+weather and succession clocks that already run.
 
 **Outstanding engineering:** floating-origin rebase; journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the

@@ -25,6 +25,7 @@ pub mod seed;
 pub mod sight;
 pub mod storage;
 pub mod town;
+pub mod weather;
 pub mod world;
 
 pub use chunk::{BlockView, Chunk, SoloChunkView};

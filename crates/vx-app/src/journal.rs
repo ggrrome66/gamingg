@@ -163,7 +163,15 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // hole cut beside water wakes an automaton that pours, levels and settles
 // over the ticks that follow. Water that moves is ground that moves, so a log
 // recorded before this replays a lake that never went anywhere.
-const VERSION: u32 = 24;
+// Twenty-five hands the world a sky and lets it burn. Weather is a pure
+// function of the seed, the tick and the region, so no order records it —
+// but it now edits the ground twice over. Lightning, hashed off the same
+// tick, lights the tall and the lonely; the fire eats uphill and downwind
+// and leaves ash and snags behind it; and the stands it cleared — along with
+// every stand a saw cleared — come back through meadow, thicket and mixed
+// forest on the day clock. A log recorded before this replays a country with
+// no weather, no fire and no regrowth, over ground that all three moved.
+const VERSION: u32 = 25;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -568,6 +576,17 @@ pub struct Rebuilt {
     /// lift on the water's own quarter clock, not the player's.
     pub pumps: Vec<BlockPos>,
     pump_step: u32,
+    /// Fires burning, on the same clock and for the same reason as the rest:
+    /// what a fire eats is ground.
+    pub fires: Vec<crate::fire::Fire>,
+    /// Stands that something cleared, and what they have grown back to.
+    pub stands: crate::succession::Ledger,
+    /// The absolute tick, counted by the `Advance` orders themselves.
+    ///
+    /// The weather and the lightning are pure functions of it, so both sides
+    /// need the same number — and counting the ticks the log carries is the
+    /// only way to get it that cannot drift from what the live game did.
+    pub tick: u64,
     /// Every town's strongroom. Carried because a deposit moves the pile,
     /// and the pile is what half the log's arithmetic runs over.
     pub banks: crate::bank::Bank,
@@ -592,6 +611,9 @@ impl Default for Rebuilt {
             water: Vec::new(),
             pumps: Vec::new(),
             pump_step: 0,
+            fires: Vec::new(),
+            stands: crate::succession::Ledger::default(),
+            tick: 0,
             banks: crate::bank::Bank::default(),
         }
     }
@@ -739,6 +761,10 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 state
                     .falls
                     .push(crate::felling::start(world, &tree, direction, chair));
+                // A cut stand is a disturbed stand. The clock that brings a
+                // burn back is the clock that brings a cut back, and both
+                // sides write the same cell on the same tick.
+                state.stands.disturb(tree.base, state.tick);
             }
         }
         Command::Gift { good, .. } => {
@@ -841,6 +867,7 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
             // game makes, which is what makes the log an oracle for the
             // player's path rather than a second implementation of it.
             for _ in 0..*ticks {
+                state.tick += 1;
                 movement::advance_journal_tick(
                     &mut state.movement,
                     &mut state.player,
@@ -871,6 +898,18 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 if !state.water.is_empty() {
                     settle_water(&mut state.water, world);
                 }
+                // The sky, the lightning and what it lights. None of it is
+                // recorded: the weather is a pure function of the tick and
+                // the strike is hashed off the same, so both sides get the
+                // same storm over the same ground.
+                let standing = state.player.position;
+                burn_and_grow(
+                    &mut state.fires,
+                    &mut state.stands,
+                    world,
+                    state.tick,
+                    standing,
+                );
             }
         }
     }
@@ -905,6 +944,51 @@ pub fn wake_water(bodies: &mut Vec<vx_world::fluid::Water>, world: &mut World, a
     body.wake_around(world, water, at);
     if body.busy() {
         bodies.push(body);
+    }
+}
+
+/// One tick of weather, fire and regrowth.
+///
+/// Live and replay call this, which is what makes a burned hillside the same
+/// burned hillside on both sides. Everything it needs is the tick and where
+/// the player is standing — and the player's path is replayed, so both are
+/// known without an order of any kind.
+pub fn burn_and_grow(
+    fires: &mut Vec<crate::fire::Fire>,
+    stands: &mut crate::succession::Ledger,
+    world: &mut World,
+    tick: u64,
+    standing: glam::Vec3,
+) {
+    let seed = world.seed();
+    let at = BlockPos::new(
+        standing.x.floor() as i32,
+        standing.y.floor() as i32,
+        standing.z.floor() as i32,
+    );
+    let sky = vx_world::weather::at(seed, tick, at.x, at.z);
+
+    // Lightning, and the one strike in fifty that lights anything.
+    if let Some(hit) = crate::fire::strike(seed, tick, at, world, &sky) {
+        let mut fire = crate::fire::Fire::new(hit);
+        if fire.light(world, hit) {
+            fires.push(fire);
+        }
+    }
+
+    // What is alight, and what it leaves.
+    if !fires.is_empty() {
+        for report in crate::fire::advance_fire(fires, world, seed, tick, &sky) {
+            if let Some(gone) = report.at.filter(|_| report.spent > 0) {
+                stands.disturb(gone, tick);
+            }
+        }
+    }
+
+    // And what is coming back. Once a day is plenty for a forest.
+    if tick.is_multiple_of(64 * 30) && !stands.is_empty() {
+        let sites = world.generator().towns_near((at.x, at.z), 160);
+        stands.advance(world, tick, &sites);
     }
 }
 
@@ -2320,6 +2404,64 @@ mod fire_tests {
             read_back.entries().last().map(|entry| entry.command.clone()),
             Some(cut)
         );
+    }
+
+    /// Lightning lands, the woods burn, and the burn replays block for block.
+    ///
+    /// The fourth round of the same test and the one this round exists for.
+    /// Nothing here is recorded: the storm is a pure function of the seed and
+    /// the tick, the strike is hashed off the same tick, and the only other
+    /// input — where the player is standing — is already replayed. So the
+    /// whole chain rides on `Advance` and nothing else, and if any part of it
+    /// reached for a clock, a generator or a wall time, the two sides would
+    /// part company here.
+    ///
+    /// **The tick is a fact about the seed, not a fixture.** Seed 2024's
+    /// first storm strike that lights anything falls at tick 158 400, on a
+    /// stand of dry grass at (-6, 67, 85). Nothing sets that up; it is what
+    /// the weather does over that ground, found by walking the clock.
+    #[test]
+    fn a_strike_and_a_burn_replay_to_the_same_ground() {
+        const STRIKE_TICK: u32 = 158_400;
+        // Wide enough that the strike, its 13-block neighbourhood and the
+        // fire's whole reach are inside the loaded ground on both sides — a
+        // fire that ran off the edge of what was loaded would be a fire the
+        // two sides disagreed about for a boring reason.
+        let patch = || {
+            let mut world = World::new(2024);
+            world.load_around(ChunkPos::new(0, 0), 8);
+            world
+        };
+        let span = (
+            vx_core::BlockPos::new(-100, 40, 0),
+            vx_core::BlockPos::new(60, 200, 140),
+        );
+
+        // One order, covering the strike and long enough after it for the
+        // fire to run itself out.
+        let mut journal = CommandLog::default();
+        journal.record(Command::Advance {
+            ticks: STRIKE_TICK + 64 * 30,
+        });
+
+        let mut live = patch();
+        let played = replay(&journal, &mut live, &EventBus::new());
+        assert_eq!(played.tick, (STRIKE_TICK + 64 * 30) as u64);
+        let burned = region_hash(&live, span.0, span.1);
+
+        // The other side of the oracle: the same orders, a fresh world.
+        let mut fresh = patch();
+        replay(&journal, &mut fresh, &EventBus::new());
+        assert_eq!(
+            burned,
+            region_hash(&fresh, span.0, span.1),
+            "the fire burned somewhere else on replay"
+        );
+
+        // And it actually burned: a log that sat through a lightning strike
+        // cannot hash the same as ground nothing ever happened to.
+        let untouched = region_hash(&patch(), span.0, span.1);
+        assert_ne!(burned, untouched, "nothing caught");
     }
 
     /// A tree put on the ground replays block for block.

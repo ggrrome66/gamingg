@@ -116,7 +116,12 @@ pub mod slot {
     /// The pump: a housing, a band of ports, and wet metal.
     pub const PUMP: u32 = 60;
 
-    pub const COUNT: u32 = 61;
+    /// Wood alight: the one tile in the game that is meant to be too bright.
+    pub const EMBER: u32 = 61;
+    /// And what it leaves behind.
+    pub const ASH: u32 = 62;
+
+    pub const COUNT: u32 = 63;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -397,6 +402,26 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.24, 0.26, 0.28], noise * 0.07)
                     } else {
                         shade([0.42, 0.45, 0.48], noise * 0.09)
+                    }
+                }
+                slot::EMBER => {
+                    // Char with fire in the cracks. Bright on purpose: a
+                    // stand alight has to read from the next ridge.
+                    let crack = jitter(tile ^ 0x61, x / 2, y / 2);
+                    if crack > 0.28 {
+                        shade([0.98, 0.72, 0.18], noise * 0.10)
+                    } else if crack > 0.05 {
+                        shade([0.82, 0.30, 0.07], noise * 0.12)
+                    } else {
+                        shade([0.16, 0.10, 0.08], noise * 0.08)
+                    }
+                }
+                slot::ASH => {
+                    // Grey, soft, and faintly warm where it has not cooled.
+                    if jitter(tile ^ 0x62, x, y) > 0.42 {
+                        shade([0.30, 0.27, 0.26], noise * 0.09)
+                    } else {
+                        shade([0.20, 0.18, 0.18], noise * 0.10)
                     }
                 }
                 slot::TUFT => {
