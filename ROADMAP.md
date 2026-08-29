@@ -111,7 +111,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 33 | `3b29a4d` | The handheld you hold: the fleet uplink becomes a cased unit that swings up into your hands with its screen coming on, the readout is projected onto the model's own glass through the frame's camera matrix, and your drill is away while it is up |
 | 34 | `7cd3c26` | The pocket arcade: a cartridge printed at the fabricator turns the handheld into a games machine — an original corridor shooter, every wall and every pixel of it computed, floors that loop meaner, and a record the cabinet keeps |
 | 35 | `b3ae393` | Three forests: every column belongs to a peat bog, a mixed hardwood cove or subalpine conifer, decided by how high and how wet the ground is — with emergent giants over the cove, krummholz mats at the treeline, bare rock above them and sphagnum underfoot in the lows |
-| 36 | _this_ | Felling: cut low into a trunk and you are cutting a notch on its own cross-section, not chipping a block — past the notch and down to the hinge it goes over, toward the side you cut from, on a kinematic arc that flattens what it lands on, takes its neighbours with it and lies down as logs |
+| 36 | `98a0a7c` | Felling: cut low into a trunk and you are cutting a notch on its own cross-section, not chipping a block — past the notch and down to the hinge it goes over, toward the side you cut from, on a kinematic arc that flattens what it lands on, takes its neighbours with it and lies down as logs |
+| 37 | _this_ | Water that moves: a wet block carries its fill in the same sixty-four cells a wounded block carries its damage, so cutting into a lake floods the gallery, an inland pool drains by exactly what ran out of it, and a printed pump lifts water over its own head |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2040,6 +2041,75 @@ hillside; and any change to what a standing tree looks like.
 
 ---
 
+## Shipped — Stage 37: water that moves
+
+**Water was painted on.** You could drive a gallery into the bottom of a lake
+and the lake would sit there. This round it comes in after you.
+
+**The fill level is the damage mask, and that is the whole design.** Stage 27
+cut every block into sixty-four cells so a wounded block could say what was
+missing. A wet block now uses the same sixty-four to say how full it is: one
+`u64` in the sparse map the chunk already keeps, `popcount` for the volume,
+and the mesher already draws masked blocks — so a half-full block comes out as
+a slab with a surface on it, with no new pipeline and no second vertex stream.
+Sixty-four steps of fill against the seven or eight a level-per-block system
+gives, for nothing.
+
+**The layout is canonical, which is the trick that makes it cheap.** The mask
+fills from the bottom layer up, so a part-filled block is always flat-topped
+and the *only* state is the count. The automaton moves integers and rebuilds
+masks; it never reasons about which sub-cell went where, and two blocks
+holding the same volume are the same block. That is the note's own
+compromise — store the fill as a popcount, treat the layout as settled flat —
+and taking it is what kept the round to one module.
+
+**The sea is a source; everything else is conserved.** A full water block at
+or below sea level supplies without draining, because the ocean is larger than
+anything this automaton is allowed to touch and one player with a drill should
+not be able to empty a coastline. Above the line every drop is honestly
+conserved: cut a channel out of a pond and the pond goes down by exactly what
+ran out, which is what makes draining a cave pool to get at its floor a real
+thing to do.
+
+**Determinism comes from the update order, not from luck.** The wake set is
+kept sorted, so the sweep visits cells in one canonical order however they
+were woken; the step is split into two passes by cell parity so a cell never
+levels against another of its own colour mid-pass; nothing asks the clock or a
+thread. Shuffle the wake list and the water ends up in exactly the same
+place — there is a test that does precisely that.
+
+**And it is bounded on purpose.** A body flows no further than twenty-eight
+blocks from where it woke and retires after eight quiet steps. An unbounded
+automaton would wander out of the ground a replay has loaded and the two sides
+would disagree, so this is bucket-scale water: flooding a gallery, draining a
+pool, filling a cistern. Redistributing an ocean is not a thing that happens
+here, and the source rule is the other half of that same decision.
+
+**Nothing new to record.** Cutting into water wakes it, and the break is
+*already* an order — so both sides wake the same cells on the same tick and
+the flood that follows is re-derived rather than replayed. The tick runs
+beside the slugs and the falling trees, in the same shape for the third time.
+
+**The pump.** A fabricator print at floor three, placed out of the pile, and
+`E` switches it: one state, so no panel — a machine with a single switch does
+not need a screen to say what it is doing, it says it in the water coming out
+of the top. It takes from whatever it can reach and puts it out of a spout
+above itself, and the automaton carries it from there. No facing and no
+plumbing, and it does the one thing gravity will not: move water *uphill*, to
+fill a cistern on a rise or get a gallery back that you flooded on yourself.
+
+**Surface.** `0` selects the pump on the belt, `E` runs it. `--flood cut`
+catches the moment a gallery is opened into the sea; `--flood level` is the
+same gallery once the water has found its level. Journal **VERSION 24**.
+
+**Deliberately not in 37:** pumps that survive a reload (a body of water in
+motion is not saved either, and both settle in seconds); pressure of any kind,
+so no siphons and no fountains; water that pushes you or slows you down;
+anything that freezes; and the height-field surface mesh the note wants —
+partial blocks ride the micro path stage 27 already built.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -2372,19 +2442,19 @@ if the traffic it produces reads as dull.
 The hunt note is finished: its engine landed in 28, its director half in 29,
 and its stalker in 31 alongside the deep resources it hunts you through. The
 toy is finished too — the pocket arcade shipped in 34 — and the forest note is
-half done: the three forests landed in 35 and felling in 36. What is left of
-it is the water and the weather, and after that the civic layer.
+three quarters done: the three forests landed in 35, felling in 36 and the
+fluid in 37. What is left of it is the weather, and after that the civic
+layer.
 
 | Stage | What | Why here |
 |---|---|---|
-| 37 | Fine fluid | The micro-mask as a 0–64 fill level, a conserving checkerboard automaton that settles and sleeps, and a height-field surface |
 | 38 | Weather | Regional weather as a pure function of the tick, rain filling Priority-Flood basins, lightning gated by fuel moisture, fire spreading with wind and slope — and burnout writing the disturbance ledger the succession clock reads |
 | 39 | Civic layer B2 | Town offices, residents who run the player's own economic loop, and the warrant chain |
 | 40 | Civic layer B3 | Elections on the beacon console, votes cast on trade goodwill, and offices the player can hold |
 
 ## The feature map
 
-The whole game at a glance, as of stage 36.
+The whole game at a glance, as of stage 37.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -2490,6 +2560,9 @@ a cabinet that keeps the record);
 three forests decided by height and wetness (peat bog under sphagnum, mixed
 hardwood cove with emergent giants, subalpine conifer thinning to krummholz at
 a wandering treeline and bare rock above it);
+water that moves (a fill level carried in the same sixty-four cells a wound
+is, an endless sea and finite inland pools, a bounded automaton that settles
+flat and goes to sleep, and a printed pump that lifts over its own head);
 felling on the forestry numbers (a notch cut into the trunk's own
 cross-section, a hinge that lets go, a kinematic arc that falls toward the
 side you cut from, flattens what it lands on, chain-fells its neighbours and
@@ -2497,8 +2570,7 @@ lies down as logs — with ancient trees at the top of the hardness ladder
 yielding prime timber);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** fine fluid on the micro-mask; weather, flood,
-lightning and fire
+**Planned, in arc order:** weather, flood, lightning and fire
 closing the loop into a disturbance ledger and a succession clock; then the
 civic layer B2 (offices, the NPC economic loop, the warrant chain) and B3
 (elections on trade goodwill).

@@ -143,6 +143,19 @@ pub const CATALOGUE: &[Recipe] = &[
         floor: 1,
     },
     Recipe {
+        label: "PUMP",
+        output: Output::Good {
+            name: "engine:pump",
+            count: 1,
+        },
+        // A housing, a rotor and a run of pipe. Cheap on purpose: the pump is
+        // the answer to a mine you flooded on yourself, and a rescue you
+        // cannot afford is not a rescue.
+        inputs: &[("engine:copper_bar", 2), ("engine:plank", 2)],
+        seconds: 14.0,
+        floor: 3,
+    },
+    Recipe {
         label: "SPARE PARTS X4",
         output: Output::Good {
             name: crate::wear::SPARE_PART,
@@ -557,6 +570,7 @@ mod tests {
                 "COPPER BAR",
                 "PLANKS X4",
                 "PLANKS X12",
+                "PUMP",
                 "SPARE PARTS X4",
                 "METAL WALL X2",
                 "HIGH BEAM LAMP",

@@ -113,7 +113,10 @@ pub mod slot {
     /// Prime timber: milled heartwood off an emergent stem.
     pub const PRIME_TIMBER: u32 = 59;
 
-    pub const COUNT: u32 = 60;
+    /// The pump: a housing, a band of ports, and wet metal.
+    pub const PUMP: u32 = 60;
+
+    pub const COUNT: u32 = 61;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -380,6 +383,20 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                         shade([0.48, 0.34, 0.19], noise * 0.06)
                     } else {
                         shade([0.66, 0.50, 0.30], noise * 0.08)
+                    }
+                }
+                slot::PUMP => {
+                    // A squat housing with a band of intake ports round its
+                    // middle, wet enough to read as a water machine.
+                    let band = (6..10).contains(&y);
+                    if band && x % 4 < 2 {
+                        shade([0.10, 0.20, 0.26], noise * 0.06)
+                    } else if band {
+                        shade([0.32, 0.46, 0.52], noise * 0.08)
+                    } else if !(2..=13).contains(&y) {
+                        shade([0.24, 0.26, 0.28], noise * 0.07)
+                    } else {
+                        shade([0.42, 0.45, 0.48], noise * 0.09)
                     }
                 }
                 slot::TUFT => {

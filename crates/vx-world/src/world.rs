@@ -260,6 +260,32 @@ impl World {
         Carved::Wounded(after)
     }
 
+    /// Set a block's mask outright.
+    ///
+    /// [`World::carve`] only ever takes cells away, which is right for
+    /// damage: a wound does not heal. A fill level *rises*, so the fluid
+    /// needs the other direction — and it needs it to mark the same
+    /// neighbours dirty, or a shoreline on a chunk edge would only redraw on
+    /// one side of the seam.
+    ///
+    /// Returns false when the chunk is not loaded, which is the same answer
+    /// [`World::set_block`] gives and the same contract every edit here has.
+    pub fn set_mask(&mut self, pos: BlockPos, mask: crate::micro::Mask) -> bool {
+        let Some(local) = pos.local() else {
+            return false;
+        };
+        let Some(chunk) = self.chunks.get_mut(&pos.chunk()) else {
+            return false;
+        };
+        if chunk.get(local).is_air() {
+            return false;
+        }
+        chunk.set_mask(local, mask);
+        self.dirty_touching_neighbours(pos);
+        self.edit_count += 1;
+        true
+    }
+
     /// Mark neighbouring chunks dirty when `pos` sits on a shared edge.
     fn dirty_touching_neighbours(&mut self, pos: BlockPos) {
         let own = pos.chunk();

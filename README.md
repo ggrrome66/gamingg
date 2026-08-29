@@ -705,6 +705,28 @@ And while it is up, your drill and your launcher are away. You have two hands
 and both of them are holding the thing — which is what turns checking on your
 drones into a decision rather than a free pause.
 
+### The water moves now
+
+Drive a gallery into the side of a lake and the lake comes in after you. It
+runs down the tunnel, finds the low ground, and settles out flat — and it keeps
+coming for as long as the hole is open, because the sea is bigger than you are.
+
+Inland it is a different story: a pond, a cave pool, anything above the tide
+line holds a fixed amount of water and every drop of it is counted. Cut a
+channel out of one and it goes down by exactly what ran out. That is how you
+get at the floor of a flooded cave — drain it somewhere lower and walk in.
+
+The clever part costs nothing. Every block in this game is already cut into
+sixty-four little cells so that a damaged block can say which bits of it are
+missing. A wet block uses the same sixty-four to say how full it is. Sixty-four
+steps of fill, which looks smooth rather than steppy, on machinery that was
+already there.
+
+And you can print a **pump** at the fabricator. Stand it in the water, press
+`E`, and it lifts what it can reach out of a spout on its top — which is the
+one thing gravity will not do for you. Fill a cistern up a rise, or get back a
+gallery you flooded on yourself.
+
 ### You can put a tree on the ground
 
 Get your drill on a trunk — **low, near the roots** — and hold it. You are not
@@ -1154,6 +1176,8 @@ Controls:
 | `N` | Toggle the minimap |
 | `[` / `]` | Zoom the minimap out / in |
 | `9` | The electrolyser, to place on a shore |
+| `0` | The pump, once you have printed one |
+| `E` | A pump you have placed: switch it on, and it lifts whatever water it can reach out of the top |
 | `E` | A word with the nearest townsperson when nothing solid is in reach — or, if somebody nearby has their hands up, take them in for the board's pay |
 | `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `patch` spends a medkit on you, `law` reads the deputies, `standing` your name with both peoples, `wells` every hole you have sunk |
 | `E` | A printed wellhead, once it is standing: the mud log says whether anything shows under this column, and `Enter` spuds the hole in |
@@ -1549,6 +1573,10 @@ cargo run --release -p vx-app -- --replay --world myworld
 
 # put a bigger crew on the next dispatch
 cargo run --release -p vx-app -- --drones 8
+
+# a gallery cut into a lake, and the same gallery once it has filled
+cargo run --release -p vx-app -- --screenshot cut.ppm --at 0,10 --flood cut
+cargo run --release -p vx-app -- --screenshot level.ppm --at 0,10 --flood level
 
 # a tree mid-fall, and the logs it left
 cargo run --release -p vx-app -- --screenshot swing.ppm --at 0,10 --fell swing

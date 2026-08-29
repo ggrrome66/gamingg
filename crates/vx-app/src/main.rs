@@ -254,6 +254,7 @@ struct Options {
     arcade: bool,
     forest: Option<String>,
     fell: Option<String>,
+    flood: Option<String>,
 }
 
 /// Which method a `--dig` run should use.
@@ -307,6 +308,7 @@ fn parse_args() -> Result<Options, String> {
         arcade: false,
         forest: None,
         fell: None,
+        flood: None,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -398,6 +400,7 @@ fn parse_args() -> Result<Options, String> {
             "--raising" => options.raising = true,
             "--forest" => options.forest = Some(value()?),
             "--fell" => options.fell = Some(value()?),
+            "--flood" => options.flood = Some(value()?),
             "--arcade" => {
                 options.device = true;
                 options.arcade = true;
@@ -468,6 +471,7 @@ fn parse_args() -> Result<Options, String> {
                      --arcade            play the pocket arcade on the raised handheld\n  \
                      --forest <which>    frame a stand of bog, cove or high forest\n  \
                      --fell <when>       a stem mid-arc (swing) or lying down (down)\n  \
+                     --flood <when>      a gallery cut into a lake (cut) or settled (level)\n  \
                      --view-distance <n> chunks visible in every direction (4-16, default 8)\n  \
                      --gold              enable the operator console (F10; dev builds only)\n  \
                      --sheriff           wear the badge (dev override; won at the ballot box later)\n  \
@@ -1818,6 +1822,157 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
     // The wellhead, over a field the seed actually put there. Late like the
     // posse fixture, and for the same reason.
+    if let Some(when) = options.flood.as_deref() {
+        // Cut a gallery into the side of a lake and let it in. The water is
+        // the real automaton on the real clock, so what the picture shows is
+        // what the game does, not a still life of blue blocks.
+        let settled = match when {
+            "cut" | "in" | "open" => false,
+            "level" | "settled" | "after" => true,
+            other => return Err(format!("--flood wants cut or level (got {other})")),
+        };
+        let generator = world.generator().clone();
+
+        // Find a shoreline: a column at the water's edge with dry land beside
+        // it, walking out from `--at`.
+        let mut shore = None;
+        'coast: for ring in 1..90 {
+            for step in -ring..=ring {
+                for (x, z) in [
+                    (options.at.0 + step * 12, options.at.1 + ring * 12),
+                    (options.at.0 + step * 12, options.at.1 - ring * 12),
+                    (options.at.0 + ring * 12, options.at.1 + step * 12),
+                    (options.at.0 - ring * 12, options.at.1 + step * 12),
+                ] {
+                    let here = generator.natural_height_at(x, z);
+                    // Land, with water within a few blocks of it and deep
+                    // enough to be worth letting in.
+                    if here <= vx_world::gen::SEA_LEVEL + 2 || here > vx_world::gen::SEA_LEVEL + 8 {
+                        continue;
+                    }
+                    let wet = [(6, 0), (-6, 0), (0, 6), (0, -6)]
+                        .iter()
+                        .filter(|(dx, dz)| {
+                            generator.natural_height_at(x + dx, z + dz)
+                                < vx_world::gen::SEA_LEVEL - 1
+                        })
+                        .count();
+                    if wet > 0 {
+                        shore = Some((x, z));
+                        break 'coast;
+                    }
+                }
+            }
+        }
+        let (x, z) = shore.ok_or("no shoreline within a kilometre of --at")?;
+        let centre = vx_core::BlockPos::new(x, 0, z).chunk();
+        world.load_around(centre, 7);
+
+        // Which way the water is. Cut the gallery in from the dry side, so
+        // the last block to go is the one holding the lake back.
+        let towards = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+            .into_iter()
+            .min_by_key(|(dx, dz)| generator.natural_height_at(x + dx * 6, z + dz * 6))
+            .unwrap_or((1, 0));
+        // The gallery is driven at the water's own level, not the hill's:
+        // a tunnel five blocks above the lake lets nothing in, which is the
+        // first thing this fixture got wrong.
+        let floor_y = vx_world::gen::SEA_LEVEL - 2;
+        let ground = floor_y;
+        let air = vx_core::BlockId::AIR;
+        for step in 0..15 {
+            for across in -1..=1 {
+                let (gx, gz) = (
+                    x - towards.0 * step - towards.1 * across,
+                    z - towards.1 * step - towards.0 * across,
+                );
+                // Four tall, not three: the sea settles to its own level
+                // two blocks up, and a gallery with no headroom over that is
+                // a gallery you can only photograph from inside the water.
+                for dy in 0..4 {
+                    world.set_block(vx_core::BlockPos::new(gx, floor_y + dy, gz), air);
+                }
+            }
+        }
+        // And the mouth: keep driving toward the lake until the next block
+        // *is* the lake. The shore slopes, so the water is rarely exactly one
+        // block out — the first cut of this fixture assumed it was and let
+        // nothing in at all.
+        let id = world.registry().id_of("engine:water").unwrap_or(air);
+        let mut plug = vx_core::BlockPos::new(x, floor_y + 1, z);
+        for step in 1..12 {
+            let ahead = vx_core::BlockPos::new(
+                x + towards.0 * step,
+                floor_y + 1,
+                z + towards.1 * step,
+            );
+            if world.block(ahead) == id {
+                plug = ahead;
+                break;
+            }
+            for across in -1..=1 {
+                for dy in 0..4 {
+                    world.set_block(
+                        vx_core::BlockPos::new(
+                            ahead.x - towards.1 * across,
+                            floor_y + dy,
+                            ahead.z - towards.0 * across,
+                        ),
+                        air,
+                    );
+                }
+            }
+            plug = ahead;
+        }
+        let mut water = Vec::new();
+        journal::wake_water(&mut water, &mut world, plug);
+
+        let mut steps = 0;
+        let want = if settled { 64 * 20 } else { 30 };
+        while steps < want {
+            journal::settle_water(&mut water, &mut world);
+            steps += 1;
+            if water.is_empty() {
+                break;
+            }
+        }
+        remesh_all(&context, &mut renderer, &mut world);
+
+        // Look down the gallery from the dry end, so the water is coming at
+        // the lens.
+        let eye = glam::Vec3::new(
+            (x - towards.0 * 13) as f32 + 0.5,
+            ground as f32 + 3.1,
+            (z - towards.1 * 13) as f32 + 0.5,
+        );
+        camera.position = eye;
+        look_at(
+            &mut camera,
+            glam::Vec3::new(x as f32 + 0.5, ground as f32 + 1.4, z as f32 + 0.5),
+        );
+        renderer.update_camera(&context.queue, &camera);
+
+        let wet: u32 = {
+            let mut sum = 0;
+            for step in 0..16 {
+                for dy in 0..4 {
+                    let at = vx_core::BlockPos::new(
+                        x - towards.0 * step,
+                        floor_y + dy,
+                        z - towards.1 * step,
+                    );
+                    sum += vx_world::fluid::level_at(&world, id, at);
+                }
+            }
+            sum
+        };
+        println!(
+            "flood capture: {when} at {x},{z} (ground {ground}) — {steps} steps, {wet} cells of \
+             water down the gallery, {} bodies still moving",
+            water.len()
+        );
+    }
+
     if let Some(when) = options.fell.as_deref() {
         // Fell a real tree and photograph it. The stem is found off worldgen,
         // cut on the face the camera stands on, and stepped on the game's own
@@ -3655,6 +3810,13 @@ struct Active {
     /// And stems on their way down: the live twin of `Rebuilt::falls`,
     /// stepped on the same clock so both sides edit the same ground.
     falls: Vec<felling::Falling>,
+    /// And water that is still moving: the live twin of `Rebuilt::water`.
+    water: Vec<vx_world::fluid::Water>,
+    /// Pumps switched on, and the step they lift on. Live-only: a pump is a
+    /// machine you stand and watch, and one left running in a world you
+    /// closed is off when you come back.
+    pumps: Vec<vx_core::BlockPos>,
+    pump_step: u32,
     /// The speaker, when the machine has one.
     audio: audio::Audio,
     /// The launcher's viewmodel shape, built once.
@@ -4194,6 +4356,7 @@ impl App {
         // And so do stems on their way down, for the same reason: what a
         // trunk sweeps through is ground, and ground is the hash.
         Self::advance_felling(active, active.mining.last_ticks());
+        Self::advance_water(active, active.mining.last_ticks());
         Self::collect_crashes(active);
         Self::advance_scouts(active, active.mining.last_ticks());
         Self::advance_printing(active, active.mining.last_ticks());
@@ -5031,6 +5194,56 @@ impl App {
                 active.terminal.say(terminal::Kind::Note, line.clone());
                 active.greeting = Some((line, Instant::now()));
             }
+        }
+    }
+
+    /// Let the water move, on the same clock the rest of the ground moves on.
+    ///
+    /// The whole of the simulation is in `journal::settle_water`, which the
+    /// replay calls too. What is left here is the live-only half: the noise a
+    /// flood makes, and telling you it has stopped.
+    fn advance_water(active: &mut Active, ticks: u32) {
+        // The pumps run first: what they lift is what the water then has to
+        // carry away, and both sides run them in that order.
+        for _ in 0..ticks {
+            active.pump_step = active.pump_step.wrapping_add(1);
+            if active.pumps.is_empty() {
+                break;
+            }
+            journal::run_pumps(
+                &active.pumps.clone(),
+                &mut active.water,
+                &mut active.world,
+                active.pump_step,
+            );
+        }
+        if active.water.is_empty() {
+            return;
+        }
+        let before = active.water.len();
+        let mut moved = 0;
+        for _ in 0..ticks {
+            if active.water.is_empty() {
+                break;
+            }
+            moved += journal::settle_water(&mut active.water, &mut active.world);
+        }
+        if moved > 0 {
+            // Running water is a noise, and a noise is a thing that carries.
+            let heard = match active.water.first().map(|body| body.origin) {
+                Some(at) => glam::Vec3::new(at.x as f32, at.y as f32, at.z as f32)
+                    .distance(active.player.eye_position()),
+                None => 0.0,
+            };
+            let volume = (1.0 - heard / 40.0).clamp(0.0, 0.5);
+            if volume > 0.05 && ticks > 0 {
+                active.audio.play(audio::Cue::Thud, volume * 0.4);
+            }
+        }
+        if before > 0 && active.water.is_empty() {
+            let line = "THE WATER'S FOUND ITS LEVEL".to_string();
+            active.terminal.say(terminal::Kind::Note, line.clone());
+            active.greeting = Some((line, Instant::now()));
         }
     }
 
@@ -6694,6 +6907,10 @@ impl App {
                 } else {
                     active.journal.record(Command::Break { at: hit.block });
                 }
+                // Cut into a lake and the lake notices. The break is already
+                // the order, so the replay wakes the same water on the same
+                // tick and the flood is re-derived rather than recorded.
+                journal::wake_water(&mut active.water, &mut active.world, hit.block);
                 // Everything you break is stock. Every block yields itself by
                 // name onto the same pile the drones haul into and the shop
                 // sells out of — one pile, no transfer minigame, and the
@@ -6928,6 +7145,27 @@ impl App {
             }
         }
 
+        // A pump is stock, not a block you always have: you print one, and
+        // placing it spends it. The refusal is at placement, for the reason
+        // the electrolyser's is — a machine that looks built and does
+        // nothing is the worse lie.
+        let pump = active.world.registry().id_of("engine:pump");
+        if pump == Some(block) {
+            let held = active
+                .mining
+                .fleet
+                .base
+                .as_ref()
+                .map_or(0, |base| base.stockpile.count("engine:pump"));
+            if held == 0 {
+                active.greeting = Some((
+                    "NO PUMP ON THE PILE. PRINT ONE AT A FABRICATOR".into(),
+                    Instant::now(),
+                ));
+                return;
+            }
+        }
+
         // The player's own box must not be built into, or you seal yourself in.
         let body = active.player.aabb();
         let result = place_block(
@@ -6952,6 +7190,15 @@ impl App {
             }
             if bath == Some(block) {
                 active.electrolyser.at = Some(position);
+            }
+            if pump == Some(block) {
+                if let Some(base) = active.mining.fleet.base.as_mut() {
+                    base.stockpile.take("engine:pump", 1);
+                }
+                active.greeting = Some((
+                    "PUMP DOWN. PRESS E TO RUN IT".into(),
+                    Instant::now(),
+                ));
             }
             let container = active.world.registry().id_of("engine:container");
             if container == Some(block) {
@@ -7696,8 +7943,8 @@ impl App {
             // Number keys pick a block to build with.
             // The belt: blocks on one to six, then the equipment — the
             // launcher on seven, the fabricator on eight, the electrolyser on
-            // nine. Six used to be unreachable, which quietly made the chest
-            // unplaceable.
+            // nine and the pump on zero. Six used to be unreachable, which
+            // quietly made the chest unplaceable.
             KeyCode::Digit1
             | KeyCode::Digit2
             | KeyCode::Digit3
@@ -7705,7 +7952,8 @@ impl App {
             | KeyCode::Digit5
             | KeyCode::Digit6
             | KeyCode::Digit8
-            | KeyCode::Digit9 => {
+            | KeyCode::Digit9
+            | KeyCode::Digit0 => {
                 if let Some(active) = &mut self.active {
                     let slot = match code {
                         KeyCode::Digit1 => 0,
@@ -7715,7 +7963,8 @@ impl App {
                         KeyCode::Digit5 => 4,
                         KeyCode::Digit6 => 5,
                         KeyCode::Digit8 => 6,
-                        _ => 7,
+                        KeyCode::Digit9 => 7,
+                        _ => 8,
                     };
                     if slot < active.palette.len() {
                         active.selected = slot;
@@ -7961,6 +8210,28 @@ impl App {
             }
             "engine:electrolyser" => {
                 active.electrolyser.open_at(hit.block);
+            }
+            "engine:pump" => {
+                // One switch, so no panel: a machine with a single state does
+                // not need a screen to say what that state is. It says it in
+                // the line it gives you and in the water coming out the top.
+                let running = active.pumps.contains(&hit.block);
+                let line: String = if running {
+                    active.pumps.retain(|other| *other != hit.block);
+                    "PUMP OFF".into()
+                } else {
+                    active.pumps.push(hit.block);
+                    // Wake whatever it is standing in, so the first lift has
+                    // somewhere to come from and somewhere to go.
+                    journal::wake_water(&mut active.water, &mut active.world, hit.block);
+                    "PUMP RUNNING - IT LIFTS WHAT IT CAN REACH OUT OF THE TOP".into()
+                };
+                active.journal.record(Command::Pump {
+                    at: hit.block,
+                    on: !running,
+                });
+                active.terminal.say(terminal::Kind::Note, line.clone());
+                active.greeting = Some((line, Instant::now()));
             }
             "engine:wellhead" => {
                 active.well_panel.open_at(hit.block);
@@ -9782,6 +10053,7 @@ impl ApplicationHandler for App {
             "engine:chest",
             "engine:printer",
             "engine:electrolyser",
+            "engine:pump",
         ]
         .iter()
         .filter_map(|name| world.registry().id_of(name))
@@ -10000,6 +10272,9 @@ impl ApplicationHandler for App {
             arsenal: rack,
             shots: Vec::new(),
             falls: Vec::new(),
+            water: Vec::new(),
+            pumps: Vec::new(),
+            pump_step: 0,
             audio: audio::Audio::open(),
             launcher_rig: Rig::launcher(),
             shake: 0.0,

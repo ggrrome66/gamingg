@@ -158,7 +158,12 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // re-derived from the cut — the stump and the face — by the same kinematic
 // arc, so the order stays an order. A log recorded before this replays a
 // forest that never fell.
-const VERSION: u32 = 23;
+// Twenty-four sets the water moving. A block of it now carries a fill level
+// in the same sixty-four cells a wounded block carries its damage in, and a
+// hole cut beside water wakes an automaton that pours, levels and settles
+// over the ticks that follow. Water that moves is ground that moves, so a log
+// recorded before this replays a lake that never went anywhere.
+const VERSION: u32 = 24;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -297,6 +302,11 @@ pub enum Command {
     /// a visibly different hole. Both sides run `Wear::repair`, one
     /// function, no second implementation to drift.
     Repair { machine: MachineTag },
+    /// A pump switched on or off.
+    ///
+    /// The order is the switch, never the water: what it lifts, and where
+    /// that runs to afterwards, is the automaton's business on both sides.
+    Pump { at: BlockPos, on: bool },
     /// A tree put on the ground: the stump block that was cut, and the face
     /// it was cut from.
     ///
@@ -551,6 +561,13 @@ pub struct Rebuilt {
     /// reason: what they smash and what they leave lying is ground, and
     /// ground is the hash.
     pub falls: Vec<crate::felling::Falling>,
+    /// Water that is not finished moving, for the third time the same
+    /// reason: a flood is an edit to the ground, spread over ticks.
+    pub water: Vec<vx_world::fluid::Water>,
+    /// Pumps that are switched on, and how many ticks they have run: they
+    /// lift on the water's own quarter clock, not the player's.
+    pub pumps: Vec<BlockPos>,
+    pump_step: u32,
     /// Every town's strongroom. Carried because a deposit moves the pile,
     /// and the pile is what half the log's arithmetic runs over.
     pub banks: crate::bank::Bank,
@@ -572,6 +589,9 @@ impl Default for Rebuilt {
             held: MoveCommand::default(),
             shots: Vec::new(),
             falls: Vec::new(),
+            water: Vec::new(),
+            pumps: Vec::new(),
+            pump_step: 0,
             banks: crate::bank::Bank::default(),
         }
     }
@@ -610,6 +630,11 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
     match command {
         Command::Break { at } => {
             let _ = vx_world::break_block(world, events, *at);
+            // Cut into a lake and the lake notices. No order of its own: the
+            // break is already recorded, so both sides wake the same water on
+            // the same tick and the flood that follows is re-derived rather
+            // than replayed.
+            wake_water(&mut state.water, world, *at);
         }
         Command::Place { at, block } => {
             if let Some(id) = world.registry().id_of(block) {
@@ -692,6 +717,15 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
             // ledger resets, or neither happens.
             if let Some(base) = state.mining.fleet.base.as_mut() {
                 state.mining.wear.repair(machine.machine(), &mut base.stockpile);
+            }
+        }
+        Command::Pump { at, on } => {
+            if *on {
+                if !state.pumps.contains(at) {
+                    state.pumps.push(*at);
+                }
+            } else {
+                state.pumps.retain(|other| other != at);
             }
         }
         Command::Fell { at, face } => {
@@ -827,9 +861,95 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 if !state.falls.is_empty() {
                     let _ = crate::felling::advance_falls(&mut state.falls, world);
                 }
+                // And the water, which settles on the same clock and edits
+                // the same ground. Its reports are dropped like the rest:
+                // the blocks are what the hash checks.
+                state.pump_step = state.pump_step.wrapping_add(1);
+                if !state.pumps.is_empty() {
+                    run_pumps(&state.pumps, &mut state.water, world, state.pump_step);
+                }
+                if !state.water.is_empty() {
+                    settle_water(&mut state.water, world);
+                }
             }
         }
     }
+}
+
+/// Wake whatever water a hole in the ground has just exposed.
+///
+/// One body per disturbance, and a disturbance inside an existing body's
+/// reach joins that body rather than starting another — otherwise cutting a
+/// gallery block by block would leave a dozen automata arguing over the same
+/// cells.
+pub fn wake_water(bodies: &mut Vec<vx_world::fluid::Water>, world: &mut World, at: BlockPos) {
+    let Some(water) = world.registry().id_of("engine:water") else {
+        return;
+    };
+    let mut touched = false;
+    for body in bodies.iter_mut() {
+        let reach = vx_world::fluid::REACH;
+        if (at.x - body.origin.x).abs() <= reach
+            && (at.y - body.origin.y).abs() <= reach
+            && (at.z - body.origin.z).abs() <= reach
+        {
+            body.wake_around(world, water, at);
+            touched = true;
+            break;
+        }
+    }
+    if touched {
+        return;
+    }
+    let mut body = vx_world::fluid::Water::new(at);
+    body.wake_around(world, water, at);
+    if body.busy() {
+        bodies.push(body);
+    }
+}
+
+/// Lift a step's worth of water out of every running pump.
+///
+/// On the water's own quarter clock rather than the player's, so a pump
+/// delivers at the rate the automaton can carry away.
+pub fn run_pumps(
+    pumps: &[BlockPos],
+    bodies: &mut Vec<vx_world::fluid::Water>,
+    world: &mut World,
+    step: u32,
+) -> u32 {
+    if !step.is_multiple_of(vx_world::fluid::EVERY) {
+        return 0;
+    }
+    let Some(water) = world.registry().id_of("engine:water") else {
+        return 0;
+    };
+    let mut lifted = 0;
+    for at in pumps {
+        // A pump that has been broken since it was switched on is a pump no
+        // longer: the block is the machine.
+        if world.registry().get_or_air(world.block(*at)).name != "engine:pump" {
+            continue;
+        }
+        if let Some(spout) = vx_world::fluid::pump(world, water, *at) {
+            lifted += 1;
+            wake_water(bodies, world, spout);
+        }
+    }
+    lifted
+}
+
+/// Step every body of water, and retire the ones that have settled.
+pub fn settle_water(bodies: &mut Vec<vx_world::fluid::Water>, world: &mut World) -> u32 {
+    let Some(water) = world.registry().id_of("engine:water") else {
+        return 0;
+    };
+    let mut moved = 0;
+    for body in bodies.iter_mut() {
+        moved += body.settle(world, water).moved;
+    }
+    bodies.retain(|body| body.busy());
+    moved
 }
 
 fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
@@ -955,6 +1075,11 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             file.write_all(&town.0.to_le_bytes())?;
             file.write_all(&town.1.to_le_bytes())?;
             file.write_all(&[*person])?;
+        }
+        Command::Pump { at, on } => {
+            file.write_all(&[24u8])?;
+            write_pos(file, *at)?;
+            file.write_all(&[u8::from(*on)])?;
         }
         Command::Fell { at, face } => {
             file.write_all(&[23u8])?;
@@ -1290,6 +1415,15 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
             let mut face = [0u8; 1];
             file.read_exact(&mut face)?;
             Command::Fell { at, face: face[0] }
+        }
+        24 => {
+            let at = read_pos(file)?;
+            let mut on = [0u8; 1];
+            file.read_exact(&mut on)?;
+            Command::Pump {
+                at,
+                on: on[0] != 0,
+            }
         }
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
@@ -2014,6 +2148,156 @@ mod fire_tests {
         let first = fight(&mut world());
         let second = fight(&mut world());
         assert_eq!(first, second, "the firefight itself is not deterministic");
+    }
+
+    /// A pump switched on replays to the same water it lifted.
+    #[test]
+    fn a_pump_replays_to_the_same_lift() {
+        let floor = 150;
+        let at = vx_core::BlockPos::new(4, floor + 1, 4);
+        let span = (
+            vx_core::BlockPos::new(-4, floor - 4, -4),
+            vx_core::BlockPos::new(14, floor + 10, 14),
+        );
+        let build = || {
+            let mut world = World::new(2024);
+            world.load_around(ChunkPos::new(0, 0), 2);
+            let stone = world.registry().id_of("engine:stone").unwrap();
+            let water = world.registry().id_of("engine:water").unwrap();
+            let pump = world.registry().id_of("engine:pump").unwrap();
+            for x in 0..10 {
+                for z in 0..10 {
+                    world.set_block(vx_core::BlockPos::new(x, floor, z), stone);
+                    for y in floor + 1..floor + 8 {
+                        world.set_block(vx_core::BlockPos::new(x, y, z), vx_core::BlockId::AIR);
+                    }
+                }
+            }
+            world.set_block(at, pump);
+            // A pool for it to drink from, held in a walled corner.
+            for x in 5..8 {
+                for z in 3..6 {
+                    vx_world::fluid::set_level(
+                        &mut world,
+                        water,
+                        vx_core::BlockPos::new(x, floor + 1, z),
+                        vx_world::fluid::FULL,
+                    );
+                }
+            }
+            world
+        };
+
+        let lift = |world: &mut World| -> u64 {
+            let events = EventBus::new();
+            let mut journal = CommandLog::default();
+            let mut rebuilt = Rebuilt::default();
+            let switch = Command::Pump { at, on: true };
+            apply(&switch, world, &events, &mut rebuilt);
+            journal.record(switch);
+            assert_eq!(rebuilt.pumps, vec![at], "the switch did not take");
+            let advance = Command::Advance { ticks: 64 * 4 };
+            apply(&advance, world, &events, &mut rebuilt);
+            journal.record(advance);
+
+            let live = region_hash(world, span.0, span.1);
+            let mut fresh = build();
+            replay(&journal, &mut fresh, &EventBus::new());
+            assert_eq!(
+                live,
+                region_hash(&fresh, span.0, span.1),
+                "the pump lifted somewhere else on replay"
+            );
+            live
+        };
+
+        let first = lift(&mut build());
+        assert_eq!(first, lift(&mut build()), "the pump is not deterministic");
+        assert_ne!(first, region_hash(&build(), span.0, span.1), "it lifted nothing");
+    }
+
+    /// Water let into a hole replays to the same water.
+    ///
+    /// The flood is not recorded — only the break that started it. Both sides
+    /// wake the same cells and run the same automaton on the same clock, so
+    /// the pond ends up in the same shape or the oracle is broken.
+    #[test]
+    fn a_flood_replays_to_the_same_water() {
+        // A basin cut into a hillside, filled by hand, with a plug in one
+        // wall. Breaking the plug is the order; everything after it is
+        // arithmetic.
+        let floor = 150;
+        let plug = vx_core::BlockPos::new(4, floor + 1, 0);
+        let span = (
+            vx_core::BlockPos::new(-12, floor - 6, -12),
+            vx_core::BlockPos::new(20, floor + 12, 20),
+        );
+
+        let build = || {
+            let mut world = World::new(2024);
+            world.load_around(ChunkPos::new(0, 0), 2);
+            let stone = world.registry().id_of("engine:stone").unwrap();
+            let water = world.registry().id_of("engine:water").unwrap();
+            // A shelf with a lip, and a trench beyond the lip to run into.
+            for x in 0..10 {
+                for z in -6..8 {
+                    world.set_block(vx_core::BlockPos::new(x, floor, z), stone);
+                    for y in floor + 1..floor + 6 {
+                        world.set_block(vx_core::BlockPos::new(x, y, z), vx_core::BlockId::AIR);
+                    }
+                }
+            }
+            for x in 0..10 {
+                for y in floor + 1..floor + 4 {
+                    world.set_block(vx_core::BlockPos::new(x, y, 0), stone);
+                }
+            }
+            // The pond, held behind the lip.
+            for x in 1..9 {
+                for z in 1..7 {
+                    for y in floor + 1..floor + 3 {
+                        vx_world::fluid::set_level(
+                            &mut world,
+                            water,
+                            vx_core::BlockPos::new(x, y, z),
+                            vx_world::fluid::FULL,
+                        );
+                    }
+                }
+            }
+            world
+        };
+
+        let flood = |world: &mut World| -> u64 {
+            let events = EventBus::new();
+            let mut journal = CommandLog::default();
+            let mut rebuilt = Rebuilt::default();
+
+            let pull = Command::Break { at: plug };
+            apply(&pull, world, &events, &mut rebuilt);
+            journal.record(pull);
+            assert!(!rebuilt.water.is_empty(), "nothing woke up");
+            let advance = Command::Advance { ticks: 64 * 8 };
+            apply(&advance, world, &events, &mut rebuilt);
+            journal.record(advance);
+
+            let live = region_hash(world, span.0, span.1);
+
+            // The other side of the oracle: the same basin, the same order.
+            let mut fresh = build();
+            replay(&journal, &mut fresh, &EventBus::new());
+            assert_eq!(
+                live,
+                region_hash(&fresh, span.0, span.1),
+                "the flood found a different level on replay"
+            );
+            live
+        };
+
+        let first = flood(&mut build());
+        let second = flood(&mut build());
+        assert_eq!(first, second, "the flood is not deterministic in the first place");
+        assert_ne!(first, region_hash(&build(), span.0, span.1), "nothing moved");
     }
 
     /// The cut survives the wire: the stump and the face, and nothing else,

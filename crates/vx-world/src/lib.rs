@@ -9,6 +9,7 @@ pub mod caves;
 pub mod chunk;
 pub mod edit;
 pub mod flora;
+pub mod fluid;
 pub mod forest;
 pub mod fort;
 pub mod gen;
