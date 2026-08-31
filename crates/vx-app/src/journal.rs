@@ -163,6 +163,10 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // hole cut beside water wakes an automaton that pours, levels and settles
 // over the ticks that follow. Water that moves is ground that moves, so a log
 // recorded before this replays a lake that never went anywhere.
+// Twenty-six adds `Stand`. It changes nothing about the ground — a seat is
+// paperwork — but it is a decision the player made, and the log is the record
+// of those. Replay drops it, the same honest line `Talk` and `Gift` already
+// take, and a log from before this simply has nobody standing for anything.
 // Twenty-five hands the world a sky and lets it burn. Weather is a pure
 // function of the seed, the tick and the region, so no order records it —
 // but it now edits the ground twice over. Lightning, hashed off the same
@@ -171,7 +175,7 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // every stand a saw cleared — come back through meadow, thicket and mixed
 // forest on the day clock. A log recorded before this replays a country with
 // no weather, no fire and no regrowth, over ground that all three moved.
-const VERSION: u32 = 25;
+const VERSION: u32 = 26;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -315,6 +319,14 @@ pub enum Command {
     /// The order is the switch, never the water: what it lifts, and where
     /// that runs to afterwards, is the automaton's business on both sides.
     Pump { at: BlockPos, on: bool },
+    /// Your name put on a town's ballot, or taken off it.
+    ///
+    /// The decision is the order; the *election* is not, because polling day
+    /// is a pure function of the town and the day and the count is a pure
+    /// function of ledgers both sides already hold. So this is recorded for
+    /// the same reason `Talk` and `Gift` are — it is a thing the player did —
+    /// and replay drops it, because nothing downstream of it touches a block.
+    Stand { town: (i32, i32), office: u8, on: bool },
     /// A tree put on the ground: the stump block that was cut, and the face
     /// it was cut from.
     ///
@@ -750,6 +762,12 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 state.pumps.retain(|other| other != at);
             }
         }
+        Command::Stand { .. } => {
+            // Live-only. Who holds a seat decides who signs a warrant and
+            // which locks open for you — credits, ledgers and paperwork, none
+            // of which is ground. `Rebuilt` carries no register for the same
+            // reason it carries no wallet.
+        }
         Command::Fell { at, face } => {
             // Find the tree the same way the live game did — off worldgen,
             // which is pure — and start the same stem falling. The arc is
@@ -1165,6 +1183,12 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             write_pos(file, *at)?;
             file.write_all(&[u8::from(*on)])?;
         }
+        Command::Stand { town, office, on } => {
+            file.write_all(&[25u8])?;
+            file.write_all(&town.0.to_le_bytes())?;
+            file.write_all(&town.1.to_le_bytes())?;
+            file.write_all(&[*office, u8::from(*on)])?;
+        }
         Command::Fell { at, face } => {
             file.write_all(&[23u8])?;
             write_pos(file, *at)?;
@@ -1507,6 +1531,20 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
             Command::Pump {
                 at,
                 on: on[0] != 0,
+            }
+        }
+        25 => {
+            let mut word = [0u8; 4];
+            file.read_exact(&mut word)?;
+            let x = i32::from_le_bytes(word);
+            file.read_exact(&mut word)?;
+            let z = i32::from_le_bytes(word);
+            let mut pair = [0u8; 2];
+            file.read_exact(&mut pair)?;
+            Command::Stand {
+                town: (x, z),
+                office: pair[0],
+                on: pair[1] != 0,
             }
         }
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
@@ -2984,6 +3022,62 @@ mod civic_tests {
     use vx_core::ChunkPos;
     use vx_world::region_hash;
 
+    /// Standing for office survives the wire, and changes no ground.
+    ///
+    /// The order is recorded because it is a decision the player made. What
+    /// follows from it — the poll, the badge, whose signature a warrant needs
+    /// — is arithmetic on ledgers, so replay drops the order and the ground
+    /// comes out identical either way.
+    #[test]
+    fn a_stand_order_round_trips_and_moves_nothing() {
+        let directory = std::env::temp_dir().join(format!("vx-stand-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let orders = [
+            Command::Stand {
+                town: (0, 0),
+                office: 1,
+                on: true,
+            },
+            Command::Stand {
+                town: (-512, 1_024),
+                office: 0,
+                on: false,
+            },
+        ];
+        let mut journal = CommandLog::default();
+        for order in &orders {
+            journal.record(order.clone());
+        }
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+        let recovered: Vec<Command> = read_back
+            .entries()
+            .iter()
+            .map(|entry| entry.command.clone())
+            .collect();
+        assert_eq!(recovered, orders);
+
+        // And it is ground-neutral, which is why replay may drop it.
+        let span = (
+            vx_core::BlockPos::new(-40, 40, -40),
+            vx_core::BlockPos::new(40, 200, 40),
+        );
+        let patch = || {
+            let mut world = World::new(2024);
+            world.load_around(ChunkPos::new(0, 0), 3);
+            world
+        };
+        let mut stood = patch();
+        replay(&read_back, &mut stood, &EventBus::new());
+        assert_eq!(
+            region_hash(&stood, span.0, span.1),
+            region_hash(&patch(), span.0, span.1),
+            "putting your name on a ballot moved a block"
+        );
+    }
+
     /// The whole civic layer leaves the ground exactly as it found it.
     ///
     /// The inverse of every other oracle test in this file, and the claim
@@ -3032,10 +3126,33 @@ mod civic_tests {
         // Business enough to be handed a key, which is a permits grant.
         let mut friends = crate::disposition::Disposition::default();
         let key = (site.centre, 1u8);
-        for day in 0..40 {
-            friends.trade(key, 900, day);
+        // Business with the whole town, not just the one who hands over a
+        // key: an election is a room, and a room needs a majority.
+        for voter in 0..crate::people::PEOPLE as u8 {
+            for day in 0..40 {
+                friends.trade((site.centre, voter), 900, day);
+            }
         }
         assert!(friends.trusted_with_a_key(key));
+
+        // A term of elections run over the top of it, including one the
+        // player wins — the stage 40 half.
+        let mut register = crate::ballot::Register::default();
+        register.stand(site.centre, crate::permits::Office::Sheriff, true);
+        let poll_day = crate::ballot::next_poll(&site, 0);
+        let field = crate::ballot::Field {
+            site: &site,
+            friends: &friends,
+            bounty: 0,
+            incumbent_troubled: false,
+            standing: true,
+            seat: crate::permits::Office::Sheriff,
+        };
+        let held = register
+            .hold(&field, crate::permits::Office::Sheriff, poll_day)
+            .expect("no election was held");
+        assert!(held.after.is_player(), "the town you bankrolled threw you out");
+        assert!(register.player_holds(site.centre, crate::permits::Office::Sheriff));
 
         // And paper filed, signed and paid for.
         let mut docket = crate::warrant::Docket::default();

@@ -37,7 +37,12 @@ use vx_world::town::{self, plan};
 use vx_world::{Role, Tier, TownSite};
 
 const MAGIC: &[u8; 4] = b"VXPM";
-const VERSION: u32 = 1;
+/// Two makes an office belong to a town. Version one held a bare list of
+/// offices with no town attached, which meant one badge opened every lock on
+/// the frontier — read as the hometown's, which is where the `--sheriff`
+/// override was always pointed.
+const VERSION: u32 = 2;
+const OLDEST: u32 = 1;
 
 /// Bounty for being seen prying at something that is not yours.
 pub const BOUNTY_PRYING: u64 = 5;
@@ -115,7 +120,10 @@ pub fn min_power(tier: Tier) -> f32 {
 pub const REBUILD_TICKS: u64 = 2_400;
 
 /// An office somebody holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Ordered so a badge can live in a set keyed by `(town, office)` — the
+/// ordering itself means nothing beyond giving the set a canonical walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Office {
     /// Owns the town's open ground, its paving and its civic buildings.
     Mayor,
@@ -222,9 +230,13 @@ fn resident_name(index: usize) -> &'static str {
 pub struct Permits {
     /// Claims you have been let into — or picked your way into.
     grants: Vec<ClaimKey>,
-    /// Offices the player holds. Empty this round; stage 13's ballot box is
-    /// what fills it, and the sheriff override is built and waiting for it.
-    offices: Vec<Office>,
+    /// Offices the player holds, **and the town each one is for**.
+    ///
+    /// A badge belongs to a place. Until stage 40 this was a bare list, so a
+    /// sheriff was the sheriff of everywhere — harmless while only a dev flag
+    /// could set it, and exploitable the moment one could be won at a ballot
+    /// box in the smallest town on the map.
+    offices: std::collections::BTreeSet<((i32, i32), Office)>,
     /// What you have been caught doing.
     pub bounty: u64,
     /// How far through each lock you have drilled, 0..1. Persists across
@@ -295,8 +307,14 @@ impl Permits {
         None
     }
 
-    pub fn holds(&self, office: Office) -> bool {
-        self.offices.contains(&office)
+    /// Does the player hold this office *here*?
+    pub fn holds_in(&self, town: (i32, i32), office: Office) -> bool {
+        self.offices.contains(&(town, office))
+    }
+
+    /// Every badge the player wears, for the panels and the roster.
+    pub fn badges(&self) -> impl Iterator<Item = ((i32, i32), Office)> + '_ {
+        self.offices.iter().copied()
     }
 
     /// Put a badge on the player.
@@ -304,10 +322,14 @@ impl Permits {
     /// Stage 13's ballot box is what will call this in earnest; until then the
     /// `--sheriff` development flag does, which is how the override gets
     /// exercised in a real session rather than only in tests.
-    pub fn take_office(&mut self, office: Office) {
-        if !self.holds(office) {
-            self.offices.push(office);
-        }
+    pub fn take_office(&mut self, town: (i32, i32), office: Office) {
+        self.offices.insert((town, office));
+    }
+
+    /// Replace the whole set with what the register says, which is the one
+    /// place a badge is ever awarded: an election.
+    pub fn seat_all(&mut self, held: impl Iterator<Item = ((i32, i32), Office)>) {
+        self.offices = held.collect();
     }
 
     pub fn grant(&mut self, key: ClaimKey) {
@@ -332,10 +354,14 @@ impl Permits {
         if claim.owner == Claimant::Player {
             return Standing::Owner;
         }
-        if self.holds(Office::Sheriff) {
+        // A badge opens the town that gave it, and nowhere else. The claim
+        // carries the town it belongs to, so this needed no new lookup — only
+        // for the question to stop being asked without one.
+        let town = claim.key.town;
+        if self.holds_in(town, Office::Sheriff) {
             return Standing::Sheriff;
         }
-        if claim.owner == Claimant::Office(Office::Mayor) && self.holds(Office::Mayor) {
+        if claim.owner == Claimant::Office(Office::Mayor) && self.holds_in(town, Office::Mayor) {
             return Standing::Owner;
         }
         if self.granted(claim.key) {
@@ -468,7 +494,9 @@ impl Permits {
             write_key(&mut file, *key)?;
         }
         file.write_all(&(self.offices.len() as u32).to_le_bytes())?;
-        for office in &self.offices {
+        for ((x, z), office) in &self.offices {
+            file.write_all(&x.to_le_bytes())?;
+            file.write_all(&z.to_le_bytes())?;
             file.write_all(&[match office {
                 Office::Mayor => 0,
                 Office::Sheriff => 1,
@@ -712,7 +740,10 @@ fn read_permits(path: &Path) -> std::io::Result<Option<Permits>> {
     if &magic != MAGIC {
         return Err(std::io::Error::other("bad magic"));
     }
-    if read_u32(&mut file)? != VERSION {
+    let version = read_u32(&mut file)?;
+    // Anything from `OLDEST` up reads with this loader; the only thing that
+    // changed is whether a badge carries the town it belongs to.
+    if !(OLDEST..=VERSION).contains(&version) {
         return Err(std::io::Error::other("unknown version"));
     }
 
@@ -728,13 +759,29 @@ fn read_permits(path: &Path) -> std::io::Result<Option<Permits>> {
         permits.grants.push(read_key(&mut file)?);
     }
     for _ in 0..bounded(read_u32(&mut file)?)? {
+        // Version one had no town on a badge. Reading it as the hometown's is
+        // the honest migration: that is the only town the override could
+        // meaningfully have been aimed at, and it is strictly less reach than
+        // the file was claiming.
+        let town = if version == OLDEST {
+            (0, 0)
+        } else {
+            let mut word = [0u8; 4];
+            file.read_exact(&mut word)?;
+            let x = i32::from_le_bytes(word);
+            file.read_exact(&mut word)?;
+            (x, i32::from_le_bytes(word))
+        };
         let mut byte = [0u8; 1];
         file.read_exact(&mut byte)?;
-        permits.offices.push(match byte[0] {
-            0 => Office::Mayor,
-            1 => Office::Sheriff,
-            other => return Err(std::io::Error::other(format!("unknown office {other}"))),
-        });
+        permits.offices.insert((
+            town,
+            match byte[0] {
+                0 => Office::Mayor,
+                1 => Office::Sheriff,
+                other => return Err(std::io::Error::other(format!("unknown office {other}"))),
+            },
+        ));
     }
     permits.bounty = read_u64(&mut file)?;
     for _ in 0..bounded(read_u32(&mut file)?)? {
@@ -1143,7 +1190,7 @@ mod tests {
         // The override that makes enforcement possible: a lock the law cannot
         // pass is a lock that makes crime safe.
         let mut permits = Permits::new();
-        permits.take_office(Office::Sheriff);
+        permits.take_office(home().centre, Office::Sheriff);
         for claim in claims_for(&home()) {
             assert!(
                 permits.may_edit(&claim),
@@ -1153,10 +1200,79 @@ mod tests {
         }
     }
 
+    /// The badge stops at the town line.
+    ///
+    /// Stage 40's correction: before it, `holds` had no town in it at all, so
+    /// one sheriff's badge opened every lock on the frontier. Winning a seat
+    /// in the smallest town on the map would have unlocked the world.
+    #[test]
+    fn a_badge_opens_its_own_town_and_no_other() {
+        let elsewhere = town::towns_near(2024, (0, 0), 6_000, &|_, _| 90)
+            .into_iter()
+            .find(|site| !site.is_home())
+            .expect("no second town on the fixture frontier");
+
+        let mut permits = Permits::new();
+        permits.take_office(home().centre, Office::Sheriff);
+        for claim in claims_for(&home()) {
+            assert!(
+                permits.may_edit(&claim),
+                "the sheriff was refused at home: {}",
+                claim.label
+            );
+        }
+        let mut refused = 0;
+        for claim in claims_for(&elsewhere) {
+            if claim.owner == Claimant::Player {
+                continue;
+            }
+            assert_ne!(
+                permits.standing(&claim),
+                Standing::Sheriff,
+                "{}'s badge reached {}",
+                home().name.head(),
+                elsewhere.name.head()
+            );
+            refused += 1;
+        }
+        assert!(refused > 0, "the next town over has nothing to refuse");
+    }
+
+    /// A permits file from before badges had towns still loads, and its
+    /// global badge comes back as the hometown's — strictly less reach than
+    /// the file was claiming, which is the safe direction to migrate in.
+    #[test]
+    fn a_permits_file_from_before_towns_loads_as_the_hometowns() {
+        use std::io::Write;
+        let directory =
+            std::env::temp_dir().join(format!("vx-permits-old-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        {
+            let mut file = std::fs::File::create(directory.join("permits.dat")).unwrap();
+            file.write_all(MAGIC).unwrap();
+            file.write_all(&OLDEST.to_le_bytes()).unwrap();
+            file.write_all(&0u32.to_le_bytes()).unwrap(); // no grants
+            file.write_all(&1u32.to_le_bytes()).unwrap(); // one office
+            file.write_all(&[1u8]).unwrap(); // the sheriff, with no town
+            file.write_all(&140u64.to_le_bytes()).unwrap(); // bounty
+            file.write_all(&0u32.to_le_bytes()).unwrap(); // no breaches
+            file.write_all(&0u32.to_le_bytes()).unwrap(); // no broken locks
+        }
+        let mut permits = Permits::new();
+        permits.load(&directory);
+        assert_eq!(permits.bounty, 140, "the rest of the file did not survive");
+        assert!(permits.holds_in(home().centre, Office::Sheriff));
+        assert!(
+            !permits.holds_in((512, -512), Office::Sheriff),
+            "the migration kept the old global reach"
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     #[test]
     fn the_mayor_does_not_outrank_a_front_door() {
         let mut permits = Permits::new();
-        permits.take_office(Office::Mayor);
+        permits.take_office(home().centre, Office::Mayor);
 
         let street = claim_named("THE TOWN");
         assert_eq!(permits.standing(&street), Standing::Owner, "the streets are theirs");
@@ -1327,7 +1443,7 @@ mod tests {
 
         let mut permits = Permits::new();
         permits.grant(claim_named("THE SUPPLY SHED").key);
-        permits.take_office(Office::Sheriff);
+        permits.take_office(home().centre, Office::Sheriff);
         permits.caught(BOUNTY_BREACH, 1);
         permits.set_breach(BlockPos::new(-16, 73, 10), 0.55);
         permits.broke(BlockPos::new(1, 73, -16), 4_242);
@@ -1389,7 +1505,7 @@ mod tests {
 
         let stranger = Permits::new();
         let mut sheriff = Permits::new();
-        sheriff.take_office(Office::Sheriff);
+        sheriff.take_office(home().centre, Office::Sheriff);
 
         assert_ne!(
             render_permit(&panel, &stranger),
@@ -1586,7 +1702,7 @@ mod tests {
     fn the_sheriff_walks_through_the_gate() {
         let mut world = town_world();
         let mut permits = Permits::new();
-        permits.take_office(Office::Sheriff);
+        permits.take_office(home().centre, Office::Sheriff);
         let (bus, _) = gated(permits);
 
         let wall = BlockPos::new(-17, town::HOME_GROUND_Y + 1, -1);

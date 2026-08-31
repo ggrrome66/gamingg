@@ -875,6 +875,40 @@ closed door. So there is a whole middle now between "nothing happened" and
 "there are four lads with guns coming over the hill", and you can talk, pay or
 run your way out of it.
 
+### You can stand for office
+
+A town's mayor and sheriff used to have the job for ever. Now every town
+**votes** — on its own market day, once a week, when everybody is down at the
+square anyway.
+
+And you can put your name in. Walk up to the beacon console, press `TAB` to
+turn it to its **ballot page**, and there is a row for each seat: stand for it,
+or take your name back off. The page also tells you how each resident is
+leaning and how long you have until they vote.
+
+**They vote on who has been good to them** — and specifically on business. The
+trust you built selling ore across somebody's counter is a vote. Being liked
+helps. A bounty in that town is steep enough to lose you a room you had already
+bought, because the frontier will elect somebody it likes rather than somebody
+it is frightened of. And if the sitting mayor has a warrant hanging over him he
+looks weak, and it costs him.
+
+A poll is a **referendum on you**, not a scrap between neighbours. In a town of
+three, nobody swaps the man in the chair for the man beside him — they have
+lived next door for years. What changes it is somebody turning up from outside
+that the town would rather have. So if you never stand, the incumbent is
+returned, for ever, and the town costs the save nothing at all.
+
+Win the sheriff's badge and it is real: every lock in that town opens for you.
+**Only that town.** A badge belongs to the place that issued it — which is a
+thing that used to be wrong, and is fixed as of this round.
+
+Win the mayor's seat and the town's own property is yours, and you decide the
+warrants — except your own. **You cannot sign your own paper.** So the sheriff
+takes it up the road to the next town's mayor, who is a different man with his
+own opinion of you. A town you run is a good place to be. It is not a place
+they cannot reach you.
+
 ### There is a game on the handheld
 
 Print a `POCKET ARCADE` cartridge at a fabricator — it is dear, and it sits
@@ -1267,7 +1301,7 @@ Controls:
 | `0` | The pump, once you have printed one |
 | `E` | A pump you have placed: switch it on, and it lifts whatever water it can reach out of the top |
 | `E` | A word with the nearest townsperson when nothing solid is in reach — or, if somebody nearby has their hands up, take them in for the board's pay |
-| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `patch` spends a medkit on you, `law` reads the deputies, `standing` your name with both peoples, `wells` every hole you have sunk, `weather` the sky, the wind and how dry the woods are, `town` who runs this place and what it has out on you |
+| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `patch` spends a medkit on you, `law` reads the deputies, `standing` your name with both peoples, `wells` every hole you have sunk, `weather` the sky, the wind and how dry the woods are, `town` who runs this place, when it votes and what it has out on you |
 | `E` | A printed wellhead, once it is standing: the mud log says whether anything shows under this column, and `Enter` spuds the hole in |
 | `E` | A cot in any town's clinic: rest for nothing, or buy a medkit for the road |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
@@ -1680,6 +1714,10 @@ cargo run --release -p vx-app -- --screenshot after.ppm --at 0,10 --fire after
 # the beacon console with its offices, and the same console with a warrant on it
 cargo run --release -p vx-app -- --screenshot town.ppm --at 0,10 --town
 cargo run --release -p vx-app -- --screenshot warrant.ppm --at 0,10 --warrant
+
+# the console's ballot page, and the ballot page of a town that elected you
+cargo run --release -p vx-app -- --screenshot ballot.ppm --at 0,10 --ballot
+cargo run --release -p vx-app -- --screenshot elected.ppm --at 0,10 --elected
 
 # a stand of each forest, found rather than hard-coded
 cargo run --release -p vx-app -- --screenshot cove.ppm --at 0,10 --forest cove

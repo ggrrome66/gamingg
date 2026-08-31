@@ -62,10 +62,35 @@ impl Row {
     }
 }
 
+/// Which of the console's pages is up.
+///
+/// The handheld established the idiom in stage 33: one panel, several pages,
+/// turned with a key. The board grew a civic block in 39 and would have grown
+/// a whole election into the same column here, which is a screen nobody can
+/// read — so the ballot gets a page of its own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Page {
+    /// Prices, who runs the place, and the work on offer.
+    #[default]
+    Work,
+    /// The ballot box.
+    Ballot,
+}
+
+impl Page {
+    pub fn turned(self) -> Self {
+        match self {
+            Page::Work => Page::Ballot,
+            Page::Ballot => Page::Work,
+        }
+    }
+}
+
 /// The console's interaction state.
 #[derive(Debug, Default)]
 pub struct Board {
     pub open: bool,
+    pub page: Page,
     cursor: usize,
     /// The last action's outcome, shown until the next one.
     pub feedback: Option<String>,
@@ -78,8 +103,21 @@ impl Board {
 
     pub fn open_at_beacon(&mut self) {
         self.open = true;
+        self.page = Page::Work;
         self.cursor = 0;
         self.feedback = None;
+    }
+
+    /// Turn to the other page. The cursor starts again, because the rows on
+    /// the two pages are about entirely different things.
+    pub fn turn_page(&mut self) {
+        self.page = self.page.turned();
+        self.cursor = 0;
+        self.feedback = None;
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
     }
 
     pub fn close(&mut self) {
@@ -340,6 +378,31 @@ pub struct Civic {
     pub closed: bool,
 }
 
+/// What the ballot page draws, as a snapshot.
+///
+/// Strings and flags rather than the register itself, for the reason stage
+/// 39's [`Civic`] is: a renderer that could reach into the election ledger is
+/// a renderer that could change it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ballot {
+    /// One row per seat: the title, who holds it, whether it is yours, and
+    /// whether your name is on the ballot for it.
+    pub seats: Vec<BallotSeat>,
+    /// How many days until this town next votes.
+    pub days_to_poll: u32,
+    /// Each resident's leaning, already worded.
+    pub leanings: Vec<String>,
+}
+
+/// One seat on the ballot page.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BallotSeat {
+    pub title: String,
+    pub holder: String,
+    pub yours: bool,
+    pub standing: bool,
+}
+
 /// Everything the town itself contributes to the panel.
 pub struct Counter<'a> {
     pub here: &'a TownSite,
@@ -347,6 +410,7 @@ pub struct Counter<'a> {
     pub runs: &'a [Run],
     pub market: &'a Market,
     pub civic: &'a Civic,
+    pub ballot: &'a Ballot,
 }
 
 pub fn render_board(
@@ -362,10 +426,14 @@ pub fn render_board(
         runs,
         market,
         civic,
+        ballot,
     } = *counter;
     let mut pixels = vec![0u8; (BOARD_WIDTH * BOARD_HEIGHT * 4) as usize];
     for texel in pixels.chunks_exact_mut(4) {
         texel.copy_from_slice(&BACKGROUND);
+    }
+    if board.page == Page::Ballot {
+        return render_ballot(board, here, ballot, pixels);
     }
 
     let margin = 6i32;
@@ -593,7 +661,106 @@ pub fn render_board(
         BOARD_HEIGHT as i32 - LINE_HEIGHT as i32 - 2,
         1,
         DIM,
-        "ARROWS PICK. ENTER ACTS. E LEAVES.",
+        "ARROWS. ENTER ACTS. TAB VOTES. E LEAVES.",
+    );
+    pixels
+}
+
+/// The rows the ballot page offers: one per seat, to stand or to withdraw.
+pub fn ballot_rows(ballot: &Ballot) -> Vec<String> {
+    ballot
+        .seats
+        .iter()
+        .map(|seat| {
+            let verb = if seat.yours {
+                "RESIGN THE"
+            } else if seat.standing {
+                "WITHDRAW FROM THE"
+            } else {
+                "STAND FOR"
+            };
+            format!("{verb} {} SEAT", seat.title)
+        })
+        .collect()
+}
+
+/// The ballot page.
+///
+/// Pure over its snapshot, exactly as the work page is — which is what lets
+/// an election be photographed and diffed without a town anywhere near it.
+fn render_ballot(board: &Board, here: &TownSite, ballot: &Ballot, mut pixels: Vec<u8>) -> Vec<u8> {
+    let margin = 6i32;
+    let mut y = margin;
+    font::draw_text(
+        &mut pixels,
+        BOARD_WIDTH,
+        margin,
+        y,
+        1,
+        ACCENT,
+        &format!("{} BALLOT", here.name),
+    );
+    y += LINE_HEIGHT as i32;
+
+    let when = match ballot.days_to_poll {
+        0 => "POLLING TODAY".to_string(),
+        1 => "POLLS TOMORROW".to_string(),
+        days => format!("POLLS IN {days} DAYS"),
+    };
+    font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, DIM, &when);
+    y += LINE_HEIGHT as i32 + 3;
+
+    for seat in &ballot.seats {
+        let mark = if seat.yours { "YOU" } else { "" };
+        let colour = if seat.yours { GOOD } else { TEXT };
+        font::draw_text(
+            &mut pixels,
+            BOARD_WIDTH,
+            margin,
+            y,
+            1,
+            colour,
+            &format!("{:<8} {:<22} {mark}", seat.title, seat.holder),
+        );
+        y += LINE_HEIGHT as i32;
+    }
+    y += 3;
+
+    font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, DIM, "HOW THEY LEAN");
+    y += LINE_HEIGHT as i32;
+    if ballot.leanings.is_empty() {
+        font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, DIM, "NOBODY IS SAYING");
+        y += LINE_HEIGHT as i32;
+    }
+    for line in &ballot.leanings {
+        font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, TEXT, line);
+        y += LINE_HEIGHT as i32;
+    }
+    y += 3;
+
+    for (index, row) in ballot_rows(ballot).iter().enumerate() {
+        let selected = index == board.cursor;
+        if selected {
+            font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, ACCENT, ">");
+        }
+        let colour = if selected { ACCENT } else { TEXT };
+        font::draw_text(&mut pixels, BOARD_WIDTH, margin + 10, y, 1, colour, row);
+        y += LINE_HEIGHT as i32;
+    }
+
+    if let Some(feedback) = &board.feedback {
+        y += 3;
+        font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, ACCENT, feedback);
+    }
+
+    font::draw_text(
+        &mut pixels,
+        BOARD_WIDTH,
+        margin,
+        BOARD_HEIGHT as i32 - LINE_HEIGHT as i32 - 2,
+        1,
+        DIM,
+        "ARROWS. ENTER STANDS. TAB BACK. E LEAVES.",
     );
     pixels
 }
@@ -789,8 +956,8 @@ mod tests {
         let mut ledger = Ledger::new();
         ledger.accept(&haul);
 
-        let a = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market, civic: &Civic::default() }, &ledger, &wallet, None);
-        let b = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market, civic: &Civic::default() }, &ledger, &wallet, None);
+        let a = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market, civic: &Civic::default(), ballot: &Ballot::default() }, &ledger, &wallet, None);
+        let b = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market, civic: &Civic::default(), ballot: &Ballot::default() }, &ledger, &wallet, None);
         assert_eq!(a.len(), (BOARD_WIDTH * BOARD_HEIGHT * 4) as usize);
         assert_eq!(a, b);
 
@@ -798,7 +965,7 @@ mod tests {
         // pair of coordinates.
         assert!(!ledger.knows(haul.settles_at()));
         ledger.visit(haul.settles_at());
-        let found = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market, civic: &Civic::default() }, &ledger, &wallet, None);
+        let found = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market, civic: &Civic::default(), ballot: &Ballot::default() }, &ledger, &wallet, None);
         assert_ne!(a, found, "discovering the target left the board unchanged");
     }
 
@@ -964,12 +1131,14 @@ mod tests {
         board.move_cursor(rows.len() as i32, rows.len());
 
         let civic = Civic::default();
+        let ballot = Ballot::default();
         let counter = Counter {
             here: &home,
             postings: &[],
             runs: &runs,
             market: &market,
             civic: &civic,
+            ballot: &ballot,
         };
         let with_map = render_board(&board, &counter, &ledger, &wallet, Some(&view));
         let without = render_board(&board, &counter, &ledger, &wallet, None);
@@ -1002,10 +1171,59 @@ mod tests {
             runs: &runs,
             market: &market,
             civic: &civic,
+            ballot: &ballot,
         };
         let governed = render_board(&board, &civic_counter, &ledger, &wallet, Some(&view));
         assert_ne!(governed, with_map, "the civic block drew nothing at all");
         assert_eq!(governed.len(), with_map.len(), "the panel changed size");
+
+        // And the ballot page is a different page, not a longer column.
+        let papers = Ballot {
+            seats: vec![
+                BallotSeat {
+                    title: "MAYOR".into(),
+                    holder: "GRANT THE MEEK".into(),
+                    yours: false,
+                    standing: true,
+                },
+                BallotSeat {
+                    title: "SHERIFF".into(),
+                    holder: "YOU".into(),
+                    yours: true,
+                    standing: false,
+                },
+            ],
+            days_to_poll: 2,
+            leanings: vec!["HOLLIS THE GRIM       WOULD VOTE FOR YOU".into()],
+        };
+        let voting = Counter {
+            here: &home,
+            postings: &[],
+            runs: &runs,
+            market: &market,
+            civic: &civic,
+            ballot: &papers,
+        };
+        let mut turned = Board::new();
+        turned.open_at_beacon();
+        turned.turn_page();
+        assert_eq!(turned.page, Page::Ballot);
+        let page = render_board(&turned, &voting, &ledger, &wallet, Some(&view));
+        assert_ne!(page, governed, "the ballot page drew the work page");
+        assert_eq!(page.len(), governed.len(), "the panel changed size");
+        // Deterministic, like every other panel here.
+        assert_eq!(
+            page,
+            render_board(&turned, &voting, &ledger, &wallet, Some(&view))
+        );
+        // One row per seat, worded for what pressing Enter would do.
+        let rows = ballot_rows(&papers);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].starts_with("WITHDRAW"), "{}", rows[0]);
+        assert!(rows[1].starts_with("RESIGN"), "{}", rows[1]);
+        // And turning back is turning back.
+        turned.turn_page();
+        assert_eq!(turned.page, Page::Work);
 
         // The destination is unexplored here, so it is a pin in the dark —
         // which is exactly the paper-map behaviour asked for.

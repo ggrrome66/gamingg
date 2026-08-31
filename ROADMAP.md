@@ -114,7 +114,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 36 | `98a0a7c` | Felling: cut low into a trunk and you are cutting a notch on its own cross-section, not chipping a block — past the notch and down to the hinge it goes over, toward the side you cut from, on a kinematic arc that flattens what it lands on, takes its neighbours with it and lies down as logs |
 | 37 | `2b61043` | Water that moves: a wet block carries its fill in the same sixty-four cells a wounded block carries its damage, so cutting into a lake floods the gallery, an inland pool drains by exactly what ran out of it, and a printed pump lifts water over its own head |
 | 38 | `14acc37` | Weather, fire and what comes back: the sky is a pure function of the seed and the tick, so a storm crosses the country the same way twice — it rains, the hollows fill, lightning takes the tall and the lonely, and about one strike in fifty lights a fire that runs uphill and downwind through anything wooden, your house included, until it meets an ancient grove or wet ground; then the burnt cell remembers, and comes back through meadow, thicket and mixed stand to the forest it was |
-| 39 | _this_ | Towns that work: every town has a mayor and a sheriff who are people off its own roster, its residents put goods on its books and credits in their pockets on the hours the schedule already gave them, trading with somebody buys enough trust to be handed a key to their door — and a bounty is no longer a posse, because the sheriff has to get a warrant from a mayor with an opinion of you, with a fine and a closed counter on the way there |
+| 39 | `ef06f2b` | Towns that work: every town has a mayor and a sheriff who are people off its own roster, its residents put goods on its books and credits in their pockets on the hours the schedule already gave them, trading with somebody buys enough trust to be handed a key to their door — and a bounty is no longer a posse, because the sheriff has to get a warrant from a mayor with an opinion of you, with a fine and a closed counter on the way there |
+| 40 | _this_ | The ballot box: a town's seats stop being permanent — it votes on its own market day, once a term, and the residents cast on the business you have put across their counters, so you can put your name in at the beacon console and be elected sheriff or mayor; a badge now belongs to the town that gave it rather than to the whole frontier, and a mayor cannot sign his own warrant, so paper on a town you run goes up the road to the next mayor along |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2289,6 +2290,88 @@ hold office yourself — the ballot box is the next round's.
 
 ---
 
+## Shipped — Stage 40: the ballot box
+
+**The civic note's last item, and the close of an arc that opened in stage
+11.** 39 gave every town a mayor and a sheriff who were real people; what it
+could not do was let anybody lose the job. `office::holder` is a pure function
+of the town's seed, so the mayor of a town was its mayor for ever — and a
+warrant chain whose decider can never be replaced has one fixed link in it.
+
+**A town votes on its own market day.** It already picks a weekday to hold a
+market and already sends everybody to the square on it, so polling costs no new
+clock, puts the whole town in one room for it, and stays pure in `(site, day)`
+— which is what lets the live game and a reload agree on when an election
+happened without anybody recording it. A term is a week; a town polls once a
+term.
+
+**A poll is a referendum on you, not a contest among neighbours.** In a town
+of three, the man in the chair is not swapped for the man beside him — they
+have lived next door to each other for years and nothing about that changed
+this week. What *can* change is that somebody turned up from outside who the
+town would rather have. So with nobody standing, the incumbent is returned; and
+with your name in, every resident weighs what you are worth to them against
+what they think of him.
+
+That is also what keeps the register honest in the way this project means it:
+a town you have never campaigned in re-elects its derived seat for ever and is
+**never written down at all**. Only a seat that is not what the seed said costs
+the save anything — and losing one *forgets* the entry rather than recording a
+defeat.
+
+**They vote on the ledger stage 39 built.** The note asked for goodwill "earned
+through trade interactions — the resident who profits from trading with you
+votes your way", and `disposition::trust` is exactly that: the credits you have
+put across that person's own counter, kept separate from friendship. Trust
+dominates the sum, friendship helps, and a bounty in that town is steep enough
+to lose you a room you had bought — the frontier elects somebody it likes, not
+somebody it is frightened of. Paper standing against the incumbent costs him
+votes, which is the join straight back to the warrant chain.
+
+**A badge belongs to a town now, and that is a bug fixed on the way past.**
+`Permits.offices` was a bare list with no town on it, so `standing()` handed
+the sheriff's override to every claim on the frontier. Harmless while only a
+dev flag could set it; the moment a badge could be *won* in the smallest town
+on the map it was a key to the world. It is now a set keyed by
+`(town, office)`, `standing()` reads the town off `claim.key.town`, and
+`permits.dat` bumps to version two — reading an old file's global badge as the
+hometown's, which is strictly less reach than the file was claiming and the
+only town the `--sheriff` override could meaningfully have meant.
+
+**And a mayor cannot sign his own warrant.** Hold the seat and the sheriff
+takes the petition up the road to the nearest other town's mayor, who has his
+own archetype and his own opinion of you — `warrant::decides` reused unchanged
+with a different man in the chair. A town you run is a haven. It is not a
+sanctuary, and the vault price still signs regardless.
+
+**Every effect is an existing system reading a new answer.** The sheriff's
+badge is a permits entry, the mayor's claims are the ones permits already gave
+the office, the standing with the Compact and the Holdouts is a reputation
+entry, and the seat itself is one lookup with a derived fallback. Nothing was
+invented to be a reward.
+
+**The oracle, again inverted.** `Command::Stand` records the decision — it is a
+thing the player did — and replay drops it, because polling day and the count
+are both pure functions of ledgers that never touch a block. Stage 39's test
+that the civic layer leaves the ground exactly as it found it now runs an
+election and a term through it and still hashes identical.
+
+**Surface.** The beacon console gains a **second page** rather than a longer
+column — `TAB` turns it, the way the handheld's pages already work. It shows
+the seats and who holds them, when the town next votes, how each resident is
+leaning in words rather than points, and a row per seat to stand, withdraw or
+resign. `TOWN` at the terminal grows the same in text. `--ballot` catches the
+page with a poll due and `--elected` a town that has already made you sheriff.
+Journal **VERSION 26**.
+
+**Deliberately not in 40:** founding a town of your own and holding its offices
+by default, and taking a town by force — the note's other two routes into
+office, both of which want a round each. Deputies who answer to *you*; a seat
+that pays a salary; residents who campaign against each other; and any way to
+lose a seat other than at a poll.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -2528,10 +2611,11 @@ orders of magnitude.
 
 ---
 
-## Planned — the civic layer: permits, offices, elections
+## Planned — the civic layer: permits, offices, elections — **finished**
 
-The town-law arc, in three rounds. The user's design, recorded whole so none of
-it gets lost between rounds.
+The town-law arc, in three rounds, and **all three have shipped**: B1 as stage
+11, B2 as 39 and B3 as 40. The user's design is kept whole below, because the
+shipped sections above are written against it.
 
 ### B1 — Build permissions and the bounty ledger — **shipped as stage 11**
 
@@ -2557,7 +2641,9 @@ only then may dispatch the offender. Enforcement-by-force lands with stage 17
 (hostiles and health); until then the chain carries consequences short of force
 — fines, revoked market access.
 
-### B3 — Elections and goodwill
+### B3 — Elections and goodwill — **shipped as stage 40**
+
+See the stage 40 section above. What follows is the design as it was written.
 
 The town's main computer — the beacon console — gains a **voting page**:
 residents elect the mayor and sheriff. Votes are cast on **goodwill points**,
@@ -2622,23 +2708,24 @@ if the traffic it produces reads as dull.
 
 ## The arc beyond
 
-The hunt note is finished: its engine landed in 28, its director half in 29,
-and its stalker in 31 alongside the deep resources it hunts you through. The
-toy is finished too — the pocket arcade shipped in 34 — and **the forest note
-is finished as of 38**: three forests in 35, felling in 36, the fluid in 37,
-and the weather, the fire and the succession clock in 38. The civic layer that
-had been waiting since 11 is two thirds done: B1 in 11 and **B2 in 39**. What
-is left of it is the ballot box.
+**Every design note this project has been given is now shipped.** The hunt
+note's engine landed in 28, its director half in 29 and its stalker in 31. The
+toy shipped in 34. The forest note finished in 38 — three forests in 35,
+felling in 36, the fluid in 37, and the weather, the fire and the succession
+clock in 38. And the civic layer, open since stage 11, closed in 40: B1 in 11,
+B2 in 39, B3 in 40.
+
+What follows is the board's own work rather than anybody's note.
 
 | Stage | What | Why here |
 |---|---|---|
-| 40 | Civic layer B3 | Elections on the beacon console, votes cast on trade goodwill, and offices the player can hold — the goodwill it counts is the trust ledger stage 39 just built |
 | 41 | Seasons on the weather clock | The sky is already pure in the tick and the succession clock already runs on days; a slow annual term over both is what turns a burn scar into a thing you watch across a year |
 | 42 | The floating-origin rebase | The oldest thing on the outstanding list, and the one that stops mattering only until somebody walks far enough |
+| 43 | Founding a town, and taking one | The two routes into office stage 40 left on the board. Both want the ballot box to exist first, and now it does |
 
 ## The feature map
 
-The whole game at a glance, as of stage 39.
+The whole game at a glance, as of stage 40.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -2770,12 +2857,16 @@ bought with business rather than kindness and spent on somebody's front door,
 and a warrant chain where the sheriff has to ask a mayor with an opinion of
 you — a fine when the paperwork is filed, a closed counter while it stands,
 and deputies only on a signature);
+a ballot box in every town (polling on its own market day once a term, a poll
+that is a referendum on the outsider rather than a contest among neighbours,
+residents casting on the business you have put across their counters, seats
+that are stored only when they are not what the seed said, badges that belong
+to the town that issued them, and a mayor who cannot sign his own warrant);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** the civic layer B3 (elections on the beacon
-console, votes cast on the trade goodwill B2 just built, and offices the player
-can hold); then seasons over the weather and succession clocks that already
-run; then the floating-origin rebase.
+**Planned, in arc order:** seasons over the weather and succession clocks that
+already run; then the floating-origin rebase; then the two routes into office
+stage 40 left on the board — founding a town, and taking one.
 
 **Outstanding engineering:** floating-origin rebase; journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the

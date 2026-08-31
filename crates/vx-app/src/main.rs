@@ -12,6 +12,7 @@ mod arcade;
 mod arsenal;
 mod audio;
 mod awareness;
+mod ballot;
 mod bank;
 mod beacon;
 mod belief;
@@ -264,6 +265,10 @@ struct Options {
     fire: Option<String>,
     /// Put real paperwork on the beacon panel's civic block.
     warrant: bool,
+    /// Turn the console to its ballot page.
+    ballot: bool,
+    /// The ballot page of a town that has already elected you.
+    elected: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -321,6 +326,8 @@ fn parse_args() -> Result<Options, String> {
         storm: false,
         fire: None,
         warrant: false,
+        ballot: false,
+        elected: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -417,6 +424,14 @@ fn parse_args() -> Result<Options, String> {
             // The civic panel is the beacon panel: `--town` is the plain
             // one and `--warrant` is the same console with paper on it.
             "--town" => options.board = true,
+            "--ballot" => {
+                options.board = true;
+                options.ballot = true;
+            }
+            "--elected" => {
+                options.board = true;
+                options.elected = true;
+            }
             "--warrant" => {
                 options.board = true;
                 options.warrant = true;
@@ -496,6 +511,8 @@ fn parse_args() -> Result<Options, String> {
                      --storm             rain over the country with the sky down\n  \
                      --town              the beacon console, with who runs the place\n  \
                      --warrant           the same console with a warrant standing\n  \
+                     --ballot            the console's voting page, with a poll due\n  \
+                     --elected           the voting page of a town that elected you\n  \
                      --fire <when>       a stand alight (burning) or the ash after (after)\n  \
                      --view-distance <n> chunks visible in every direction (4-16, default 8)\n  \
                      --gold              enable the operator console (F10; dev builds only)\n  \
@@ -3864,6 +3881,46 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                     );
                 }
                 let civic = civic_snapshot(&here, &docket);
+                // The fixture's own register, so `--ballot` can photograph a
+                // seat held without a session behind it.
+                let mut register = ballot::Register::default();
+                if options.elected {
+                    register.stand(here.centre, permits::Office::Sheriff, true);
+                    let mut friends = disposition::Disposition::default();
+                    for voter in 0..people::PEOPLE {
+                        for day in 0..60 {
+                            friends.trade((here.centre, voter as u8), 1_000, day);
+                        }
+                    }
+                    let field = ballot::Field {
+                        site: &here,
+                        friends: &friends,
+                        bounty: 0,
+                        incumbent_troubled: false,
+                        standing: true,
+                        seat: permits::Office::Sheriff,
+                    };
+                    let day = ballot::next_poll(&here, 0);
+                    register.hold(&field, permits::Office::Sheriff, day);
+                }
+                let mut voters = disposition::Disposition::default();
+                for voter in 0..people::PEOPLE {
+                    for day in 0..(6 + voter * 14) {
+                        voters.trade((here.centre, voter as u8), 900, day as u32);
+                    }
+                }
+                let ballot = ballot_snapshot(&here, &register, &voters, 0, 2);
+                if options.ballot || options.elected {
+                    panel.turn_page();
+                    panel.move_cursor(0, board::ballot_rows(&ballot).len());
+                    println!(
+                        "ballot capture: {} — polls in {} days, {} seats, {} held by you",
+                        here.name,
+                        ballot.days_to_poll,
+                        ballot.seats.len(),
+                        ballot.seats.iter().filter(|seat| seat.yours).count()
+                    );
+                }
                 board::render_board(
                     &panel,
                     &board::Counter {
@@ -3872,6 +3929,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                         runs: &runs,
                         market: &market,
                         civic: &civic,
+                        ballot: &ballot,
                     },
                     &ledger,
                     &walletbook,
@@ -3956,6 +4014,59 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 /// Derived from the same yaw/pitch convention `Camera::forward` uses, so a
 /// framing that looks right here looks the same in the window.
 /// The rig for a stem on its way down, in its own species' wood.
+/// What the ballot page should print for this town.
+///
+/// A snapshot, like the civic block: names, days and wordings, so the panel
+/// stays a pure function of what it is handed.
+fn ballot_snapshot(
+    site: &vx_world::town::TownSite,
+    register: &ballot::Register,
+    friends: &disposition::Disposition,
+    bounty: u64,
+    day: u32,
+) -> board::Ballot {
+    let seats = office::OFFICES
+        .into_iter()
+        .map(|office| {
+            let holder = match register.seated(site, office) {
+                ballot::Candidate::Player => "YOU".to_string(),
+                ballot::Candidate::Resident(index) => people::person(site, index).name,
+            };
+            board::BallotSeat {
+                title: office::title(office).to_string(),
+                holder,
+                yours: register.player_holds(site.centre, office),
+                standing: register.is_standing(site.centre, office),
+            }
+        })
+        .collect();
+
+    // How each resident is leaning, said in words rather than in points: the
+    // panel's job is to make the arithmetic legible, not to print it.
+    let leanings = (0..people::PEOPLE)
+        .map(|index| {
+            let person = people::person(site, index);
+            let worth = ballot::standing_with(friends, site.centre, index, bounty);
+            let mood = if worth >= 50 {
+                "WOULD VOTE FOR YOU"
+            } else if worth >= 20 {
+                "IS WARMING TO YOU"
+            } else if worth >= 0 {
+                "IS NOT CONVINCED"
+            } else {
+                "THINKS YOU ARE TROUBLE"
+            };
+            format!("{:<22} {mood}", person.name)
+        })
+        .collect();
+
+    board::Ballot {
+        seats,
+        days_to_poll: ballot::next_poll(site, day).saturating_sub(day),
+        leanings,
+    }
+}
+
 /// What the beacon panel should print about who runs this place.
 ///
 /// A snapshot, not a borrow of the ledgers: the panel is a pure function over
@@ -4226,6 +4337,9 @@ struct Active {
     /// What the towns have open on you: who has asked the mayor for paper,
     /// who got it, and who was told to wait.
     warrants: warrant::Docket,
+    /// Every seat anywhere that is not what the seed said, and the ones you
+    /// are standing for.
+    elections: ballot::Register,
     /// The speaker, when the machine has one.
     audio: audio::Audio,
     /// The launcher's viewmodel shape, built once.
@@ -5400,8 +5514,7 @@ impl App {
             active.warrants.lapse(tick);
             let bounty = active.permits.borrow().bounty;
             if bounty >= permits::WARRANT_THRESHOLD {
-                let mayor = office::seat(&town, permits::Office::Mayor);
-                let key = (town.centre, office::holder(&town, permits::Office::Mayor) as u8);
+                let (mayor, key) = Self::signing_mayor(active, &town);
                 let tier = active.friends.tier(key);
                 let trust = active.friends.trust(key);
                 if let Some(filed) =
@@ -5413,6 +5526,10 @@ impl App {
                 // Settle the bill and the paperwork goes in the drawer.
                 active.warrants.clear(town.centre);
             }
+            // And the ballot box, on the same beat. An election is a fact
+            // about the day and the town rather than an order, so neither
+            // side of the oracle needs telling it happened.
+            Self::hold_the_polls(active, &town, tick);
             let wanted = active.warrants.granted_in(town.centre);
             if wanted && !active.posse.called_out() {
                 let seed = active.journal.tick() ^ 0x51ed_5eed;
@@ -6377,16 +6494,57 @@ impl App {
                     ),
                 ];
                 for office in office::OFFICES {
-                    let index = office::holder(&site, office);
-                    let person = people::person(&site, index);
-                    let key = (site.centre, index as u8);
-                    lines.push(format!(
-                        "{:<8} {:<22} {:<11} TRUST {}",
-                        office::title(office),
-                        person.name,
-                        active.friends.tier(key).name(),
-                        active.friends.trust(key)
-                    ));
+                    match active.elections.seated(&site, office) {
+                        ballot::Candidate::Player => lines.push(format!(
+                            "{:<8} {:<22} SINCE TERM {}",
+                            office::title(office),
+                            "YOU",
+                            active.elections.since(site.centre, office).unwrap_or(0)
+                        )),
+                        ballot::Candidate::Resident(index) => {
+                            let person = people::person(&site, index);
+                            let key = (site.centre, index as u8);
+                            lines.push(format!(
+                                "{:<8} {:<22} {:<11} TRUST {}",
+                                office::title(office),
+                                person.name,
+                                active.friends.tier(key).name(),
+                                active.friends.trust(key)
+                            ));
+                        }
+                    }
+                }
+                let poll_in = ballot::next_poll(&site, day).saturating_sub(day);
+                lines.push(match poll_in {
+                    0 => "BALLOT   POLLING TODAY".to_string(),
+                    1 => "BALLOT   POLLS TOMORROW".to_string(),
+                    days => format!("BALLOT   POLLS IN {days} DAYS"),
+                });
+                let standing: Vec<&str> = office::OFFICES
+                    .into_iter()
+                    .filter(|office| active.elections.is_standing(site.centre, *office))
+                    .map(office::title)
+                    .collect();
+                if !standing.is_empty() {
+                    lines.push(format!("STANDING {}", standing.join(" AND ")));
+                }
+                // What doors that actually opens, read off the permits set
+                // rather than the register: the badge is the thing the locks
+                // answer to, and it belongs to the town that issued it.
+                let badges: Vec<String> = active
+                    .permits
+                    .borrow()
+                    .badges()
+                    .map(|(town, office)| {
+                        if town == site.centre {
+                            office::title(office).to_string()
+                        } else {
+                            format!("{} AT {} {}", office::title(office), town.0, town.1)
+                        }
+                    })
+                    .collect();
+                if !badges.is_empty() {
+                    lines.push(format!("BADGES   {}", badges.join(", ")));
                 }
                 lines.push(format!(
                     "MARKET DAY IS {}",
@@ -6599,6 +6757,162 @@ impl App {
         permits.grant(claim.key);
         let why = if friendly { "TRUSTS YOU WITH" } else { "DOES ENOUGH BUSINESS TO HAND YOU" };
         Some(format!("{} {} A KEY TO {}", person.name, why, claim.label))
+    }
+
+    /// Put your name on this town's ballot, or take it off.
+    ///
+    /// The order goes in the journal because it is a decision the player
+    /// made; the election that follows is not recorded, because polling day
+    /// and the count are both pure functions of things both sides already
+    /// hold.
+    fn put_your_name_in(active: &mut Active, town: &vx_world::town::TownSite) {
+        let Some(office) = office::OFFICES.get(active.board.cursor()).copied() else {
+            return;
+        };
+        // Holding a seat and standing for it are the same switch: resigning
+        // is taking your name off, and the next poll gives the chair back to
+        // whoever the seed always said should have it.
+        let holds = active.elections.player_holds(town.centre, office);
+        let on = !(active.elections.is_standing(town.centre, office) || holds);
+        active.elections.stand(town.centre, office, on);
+        active.journal.record(Command::Stand {
+            town: town.centre,
+            office: match office {
+                permits::Office::Mayor => 0,
+                permits::Office::Sheriff => 1,
+            },
+            on,
+        });
+        let title = office::title(office);
+        let line = if on {
+            format!("YOUR NAME IS ON THE BALLOT FOR {title}")
+        } else if holds {
+            format!("YOU WILL STAND DOWN AS {title} AT THE NEXT POLL")
+        } else {
+            format!("YOUR NAME IS OFF THE BALLOT FOR {title}")
+        };
+        active.board.feedback = Some(line.clone());
+        active.terminal.say(terminal::Kind::Note, line);
+    }
+
+    /// Run this town's poll if one is due, and hand out what it decided.
+    ///
+    /// Every effect is an existing system reading a new answer: the badge is
+    /// a permits entry, the standing is a reputation entry, and the seat
+    /// itself is the register. Nothing here edits a block, which is why the
+    /// stage 39 oracle test still holds with elections running through it.
+    fn hold_the_polls(active: &mut Active, town: &vx_world::town::TownSite, tick: u64) {
+        let day = (tick / schedule::TICKS_PER_DAY) as u32;
+        if !ballot::is_polling_day(town, day)
+            || active.elections.polled_this_term(town.centre, day)
+        {
+            return;
+        }
+        let bounty = active.permits.borrow().bounty;
+        let troubled = active.warrants.pending_in(town.centre);
+        let mut results = Vec::new();
+        for office in office::OFFICES {
+            let field = ballot::Field {
+                site: town,
+                friends: &active.friends,
+                bounty,
+                incumbent_troubled: troubled,
+                standing: active.elections.is_standing(town.centre, office),
+                seat: office,
+            };
+            if let Some(held) = active.elections.hold(&field, office, day) {
+                results.push(held);
+            }
+        }
+        if results.is_empty() {
+            return;
+        }
+
+        // The badges are re-issued from the register wholesale rather than
+        // patched, so a seat lost is a badge handed back without anybody
+        // having to remember to take it off you.
+        let seats: Vec<((i32, i32), permits::Office)> =
+            active.elections.player_seats().collect();
+        active.permits.borrow_mut().seat_all(seats.into_iter());
+
+        for held in results {
+            let line = match (held.changed, held.after.is_player()) {
+                (true, true) => format!(
+                    "{} ELECTED YOU {}",
+                    town.name.head(),
+                    office::title(held.office)
+                ),
+                (true, false) => format!(
+                    "{} LOST THE {} SEAT",
+                    if held.before.is_player() { "YOU" } else { "SOMEBODY" },
+                    office::title(held.office)
+                ),
+                (false, true) => format!(
+                    "{} RETURNED YOU AS {}",
+                    town.name.head(),
+                    office::title(held.office)
+                ),
+                (false, false) => continue,
+            };
+            active.terminal.say(terminal::Kind::Note, line.clone());
+            active.greeting = Some((line, Instant::now()));
+            if held.changed && held.after.is_player() {
+                // A town that has just elected you has said what it thinks of
+                // you out loud, which is the note's tie between offices and
+                // the factions.
+                let band = active.reputation.with_compact(reputation::ELECTED_COMPACT);
+                Self::note_band(active, "THE TOWNS", band);
+                let band = active
+                    .reputation
+                    .with_holdouts(reputation::ELECTED_HOLDOUTS);
+                Self::note_band(active, "THE HOLDOUTS", band);
+            }
+        }
+    }
+
+    /// Whose signature a warrant here needs, and whose ledger to read it off.
+    ///
+    /// Normally the town's own mayor. But **you cannot sign your own
+    /// warrant**, so when the seat is yours the sheriff takes it up the road
+    /// to the nearest other town's mayor — a different man with his own
+    /// archetype and his own opinion of you. A town you run is a haven; it is
+    /// not a sanctuary, and `warrant::decides` is reused unchanged with a
+    /// different person in the chair.
+    fn signing_mayor(
+        active: &Active,
+        town: &vx_world::town::TownSite,
+    ) -> (people::Person, disposition::PersonKey) {
+        let mine = active
+            .elections
+            .seated(town, permits::Office::Mayor)
+            .is_player();
+        if !mine {
+            let index = office::holder(town, permits::Office::Mayor);
+            return (people::person(town, index), (town.centre, index as u8));
+        }
+        // The nearest neighbour whose mayor is not also you. Failing that —
+        // a frontier you have run the table on — the town's own sheriff signs
+        // it, because somebody has to and he is the one holding the paper.
+        let neighbours = active
+            .world
+            .generator()
+            .towns_near(town.centre, beacon::DISCOVERY_RANGE * 40);
+        for other in neighbours {
+            if other.centre == town.centre {
+                continue;
+            }
+            if active
+                .elections
+                .seated(&other, permits::Office::Mayor)
+                .is_player()
+            {
+                continue;
+            }
+            let index = office::holder(&other, permits::Office::Mayor);
+            return (people::person(&other, index), (other.centre, index as u8));
+        }
+        let index = office::holder(town, permits::Office::Sheriff);
+        (people::person(town, index), (town.centre, index as u8))
     }
 
     /// The town's bill for the paperwork.
@@ -8426,7 +8740,30 @@ impl App {
                 return;
             };
             let rows = board::Board::rows_with_runs(here.centre, &postings, &active.ledger, &runs);
+            // The ballot page owns the keyboard on its own terms: its rows
+            // are seats rather than postings, and its Enter stands for
+            // office rather than signing for freight.
+            if active.board.page == board::Page::Ballot {
+                match code {
+                    KeyCode::Tab => active.board.turn_page(),
+                    KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                        let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
+                        active.board.move_cursor(delta, office::OFFICES.len());
+                    }
+                    KeyCode::Enter | KeyCode::NumpadEnter => {
+                        Self::put_your_name_in(active, &here);
+                    }
+                    KeyCode::KeyE | KeyCode::Escape => {
+                        active.board.close();
+                        active.renderer.clear_overlay(BOARD_SLOT);
+                    }
+                    _ => {}
+                }
+                active.console = Some((here, postings, runs));
+                return;
+            }
             match code {
+                KeyCode::Tab => active.board.turn_page(),
                 KeyCode::ArrowUp | KeyCode::ArrowDown => {
                     let delta = if code == KeyCode::ArrowUp { -1 } else { 1 };
                     active.board.move_cursor(delta, rows.len());
@@ -10047,6 +10384,9 @@ impl App {
             traffic: &traffic,
         };
         let civic = civic_snapshot(&here, &active.warrants);
+        let day = (active.journal.tick() / schedule::TICKS_PER_DAY) as u32;
+        let bounty = active.permits.borrow().bounty;
+        let ballot = ballot_snapshot(&here, &active.elections, &active.friends, bounty, day);
         let pixels = board::render_board(
             &active.board,
             &board::Counter {
@@ -10055,6 +10395,7 @@ impl App {
                 runs: &runs,
                 market: &market,
                 civic: &civic,
+                ballot: &ballot,
             },
             &active.ledger,
             &active.wallet,
@@ -10749,6 +11090,9 @@ impl App {
         if let Err(error) = active.warrants.save(save.root()) {
             log::error!("could not save the towns' warrants: {error}");
         }
+        if let Err(error) = active.elections.save(save.root()) {
+            log::error!("could not save the towns' elections: {error}");
+        }
         if let Err(error) = active.reputation.save(save.root()) {
             log::error!("could not save the player's reputation: {error}");
         }
@@ -10948,6 +11292,7 @@ impl ApplicationHandler for App {
         let mut cabinet = arcade::Arcade::default();
         let mut stands = succession::Ledger::default();
         let mut warrants = warrant::Docket::default();
+        let mut elections = ballot::Register::default();
         let mut condition = health::Health::default();
         let mut name = reputation::Reputation::default();
         let mut vaults = bank::Bank::default();
@@ -10987,14 +11332,21 @@ impl ApplicationHandler for App {
             // And whose paperwork is out on you, for the same reason: a
             // warrant a reload forgot would be a warrant that never happened.
             warrants.load(save.root());
+            // And which seats you hold, because a badge a reload forgot would
+            // be an election that never happened.
+            elections.load(save.root());
             condition.load(save.root());
             name.load(save.root());
             vaults.load(save.root());
             friends.load(save.root());
         }
         if self.sheriff {
-            town_permits.take_office(permits::Office::Sheriff);
-            log::info!("wearing the sheriff's badge");
+            // The hometown's badge, which is what this override always meant:
+            // before stage 40 an office had no town on it and this quietly
+            // opened every lock on the frontier.
+            let home = vx_world::town::home_site();
+            town_permits.take_office(home.centre, permits::Office::Sheriff);
+            log::info!("wearing {}'s sheriff's badge", home.name.head());
         }
         let shared_permits: permits::Shared =
             std::rc::Rc::new(std::cell::RefCell::new(town_permits));
@@ -11105,6 +11457,7 @@ impl ApplicationHandler for App {
             fires: Vec::new(),
             stands,
             warrants,
+            elections,
             audio: audio::Audio::open(),
             launcher_rig: Rig::launcher(),
             shake: 0.0,

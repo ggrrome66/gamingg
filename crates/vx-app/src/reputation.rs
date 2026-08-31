@@ -59,6 +59,16 @@ pub const TRADE_COMPACT: i64 = 1;
 /// A gift to a townsperson: kindness travels.
 pub const GIFT_COMPACT: i64 = 2;
 
+/// Winning a seat at a town's ballot box.
+///
+/// The civic note asks for offices held to tie into the factions, and this is
+/// the tie: the Compact is the towns' own opinion of you, and a town that has
+/// just elected you has stated one out loud. Sized like a capture rather than
+/// a trade — an election is a rare, large event.
+pub const ELECTED_COMPACT: i64 = 30;
+/// And the Holdouts' view of somebody who has taken the towns' shilling.
+pub const ELECTED_HOLDOUTS: i64 = -20;
+
 /// Where you stand with a people.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Standing {
