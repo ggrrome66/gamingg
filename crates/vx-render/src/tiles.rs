@@ -146,8 +146,72 @@ fn shade(base: [f32; 3], amount: f32) -> [u8; 4] {
     ]
 }
 
-/// Generate the RGBA pixels for one tile.
-fn generate_tile(tile: u32) -> Vec<u8> {
+/// The foliage slots the year repaints, and nothing else.
+///
+/// Everything in the atlas that is *alive*: two hardwood canopies, the two
+/// conifer crowns, the ground cover and the moss. Stone does not have a
+/// season, so stone is painted once at startup and never touched again —
+/// which is why a repaint costs seven kilobytes rather than sixty-three.
+pub const FOLIAGE: [u32; 7] = [
+    slot::LEAVES,
+    slot::NEEDLES,
+    slot::BOG_NEEDLES,
+    slot::SPHAGNUM,
+    slot::TUFT,
+    slot::GRASS_TOP,
+    slot::GRASS_SIDE,
+];
+
+fn mix(from: [f32; 3], to: [f32; 3], amount: f32) -> [f32; 3] {
+    let amount = amount.clamp(0.0, 1.0);
+    [
+        from[0] + (to[0] - from[0]) * amount,
+        from[1] + (to[1] - from[1]) * amount,
+        from[2] + (to[2] - from[2]) * amount,
+    ]
+}
+
+/// A living colour walked through the year: green while it is growing, then
+/// the turn, then whatever it looks like once the year is done with it.
+///
+/// Two legs rather than one, because a leaf does not fade from green to brown
+/// — it goes *gold* on the way, and losing that is losing the autumn. The
+/// hinge is at 0.55 of the turn, which is where a real canopy is at its most
+/// colourful rather than halfway between two states.
+fn through_the_year(green: [f32; 3], gold: [f32; 3], bare: [f32; 3], turn: f32) -> [f32; 3] {
+    if turn < 0.55 {
+        mix(green, gold, turn / 0.55)
+    } else {
+        mix(gold, bare, (turn - 0.55) / 0.45)
+    }
+}
+
+/// How far a conifer follows the year. A tenth, near enough — a spruce in
+/// February is a spruce, and a number much bigger than this makes the whole
+/// country turn at once and costs the hardwoods their moment.
+const EVERGREEN: f32 = 0.10;
+
+/// Ground cover through the year: green, then straw, then the dun of grass
+/// that has been standing dead since November.
+///
+/// One curve for the sward and the tufts together, because they are the same
+/// grass and a lawn whose blades disagreed with it would read as a bug.
+fn sward(turn: f32) -> [f32; 3] {
+    through_the_year(
+        [0.32, 0.55, 0.24],
+        [0.58, 0.53, 0.24],
+        [0.42, 0.38, 0.27],
+        turn,
+    )
+}
+
+/// Generate the RGBA pixels for one tile at one point in the year.
+///
+/// `turn` is [`vx_world::season::leaf_turn`]: `0` full green through `1`
+/// bare. Every slot but the seven in [`FOLIAGE`] ignores it entirely, and
+/// asking for the same slot at the same turn always gives the same bytes —
+/// the atlas is as deterministic as everything else here.
+pub fn generate_tile(tile: u32, turn: f32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((TILE_SIZE * TILE_SIZE * 4) as usize);
 
     for y in 0..TILE_SIZE {
@@ -156,14 +220,16 @@ fn generate_tile(tile: u32) -> Vec<u8> {
             let texel = match tile {
                 slot::STONE => shade([0.50, 0.50, 0.52], noise * 0.10),
                 slot::DIRT => shade([0.45, 0.32, 0.21], noise * 0.12),
-                slot::GRASS_TOP => shade([0.32, 0.55, 0.24], noise * 0.13),
+                slot::GRASS_TOP => shade(sward(turn), noise * 0.13),
                 slot::GRASS_SIDE => {
                     // Dirt, with a band of grass draped over the top few rows.
                     // The band edge wobbles so it does not read as a ruler line.
+                    // Only the band takes the season — the dirt under it is
+                    // dirt in any month.
                     let wobble = (jitter(tile, x, 0) * 2.0).round() as i32;
                     let band = (3 + wobble).clamp(1, 6) as u32;
                     if y < band {
-                        shade([0.32, 0.55, 0.24], noise * 0.13)
+                        shade(sward(turn), noise * 0.13)
                     } else {
                         shade([0.45, 0.32, 0.21], noise * 0.12)
                     }
@@ -293,10 +359,27 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                     // Mottled two-tone canopy. Opaque on purpose — the
                     // "fast graphics" look — so foliage never joins water in
                     // the unsorted alpha-blend pass.
+                    //
+                    // This is the tile that does the year's work. A hardwood
+                    // cove is the thing you *see* turn, and the two tones
+                    // turn at slightly different rates, so a canopy in
+                    // October is patchy rather than uniformly orange.
                     if jitter(tile ^ 0x63, x / 2, y / 2) > 0.05 {
-                        shade([0.16, 0.34, 0.12], noise * 0.10)
+                        let colour = through_the_year(
+                            [0.16, 0.34, 0.12],
+                            [0.62, 0.36, 0.09],
+                            [0.29, 0.24, 0.20],
+                            turn,
+                        );
+                        shade(colour, noise * 0.10)
                     } else {
-                        shade([0.24, 0.46, 0.16], noise * 0.12)
+                        let colour = through_the_year(
+                            [0.24, 0.46, 0.16],
+                            [0.72, 0.51, 0.14],
+                            [0.36, 0.30, 0.25],
+                            turn * 0.85,
+                        );
+                        shade(colour, noise * 0.12)
                     }
                 }
                 slot::SPRUCE_SIDE => {
@@ -322,10 +405,18 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                 slot::NEEDLES => {
                     // Dense and blue-dark, the colour that makes the high
                     // country read as conifer from a ridge away.
+                    //
+                    // A spruce barely notices the year — that is what makes
+                    // it a spruce, and it is what makes the hardwood cove
+                    // legible when it turns beside one. All it does is go a
+                    // shade colder and duller through the winter.
+                    let evergreen = |green: [f32; 3], winter: [f32; 3]| {
+                        mix(green, winter, turn * EVERGREEN)
+                    };
                     if jitter(tile ^ 0x53, x / 2, y / 2) > 0.0 {
-                        shade([0.10, 0.24, 0.16], noise * 0.09)
+                        shade(evergreen([0.10, 0.24, 0.16], [0.09, 0.19, 0.18]), noise * 0.09)
                     } else {
-                        shade([0.14, 0.32, 0.22], noise * 0.10)
+                        shade(evergreen([0.14, 0.32, 0.22], [0.12, 0.25, 0.24]), noise * 0.10)
                     }
                 }
                 slot::BOG_BARK => {
@@ -341,21 +432,43 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                     // foliage never joins water in the unsorted alpha pass.
                     // A bog crown reads thin because there is so little of
                     // it, not because the texture has holes in it.
+                    //
+                    // A black spruce is a conifer too, so it moves as little
+                    // as its high-country cousin — just towards rust rather
+                    // than towards blue, because that is what a bog does.
+                    let evergreen = |green: [f32; 3], winter: [f32; 3]| {
+                        mix(green, winter, turn * EVERGREEN)
+                    };
                     if jitter(tile ^ 0x55, x, y) > 0.35 {
-                        shade([0.13, 0.19, 0.11], noise * 0.09)
+                        shade(evergreen([0.13, 0.19, 0.11], [0.17, 0.17, 0.11]), noise * 0.09)
                     } else if jitter(tile ^ 0x56, x / 2, y / 2) > 0.0 {
-                        shade([0.18, 0.28, 0.14], noise * 0.10)
+                        shade(evergreen([0.18, 0.28, 0.14], [0.24, 0.25, 0.14]), noise * 0.10)
                     } else {
-                        shade([0.26, 0.34, 0.18], noise * 0.11)
+                        shade(evergreen([0.26, 0.34, 0.18], [0.34, 0.30, 0.18]), noise * 0.11)
                     }
                 }
                 slot::SPHAGNUM => {
-                    // The moss carpet: pale green, wet, faintly hummocked.
+                    // The moss carpet: pale green, wet, faintly hummocked —
+                    // and reddening hard as the year closes, which is a real
+                    // thing sphagnum does and is the best colour in the game
+                    // for about a week in October.
                     let hummock = ((x / 4) + (y / 4)) % 2 == 0;
                     if hummock {
-                        shade([0.44, 0.55, 0.32], noise * 0.10)
+                        let colour = through_the_year(
+                            [0.44, 0.55, 0.32],
+                            [0.52, 0.36, 0.27],
+                            [0.44, 0.33, 0.28],
+                            turn,
+                        );
+                        shade(colour, noise * 0.10)
                     } else {
-                        shade([0.34, 0.47, 0.30], noise * 0.11)
+                        let colour = through_the_year(
+                            [0.34, 0.47, 0.30],
+                            [0.43, 0.31, 0.24],
+                            [0.36, 0.29, 0.25],
+                            turn,
+                        );
+                        shade(colour, noise * 0.11)
                     }
                 }
                 slot::ANCIENT_BARK => {
@@ -430,7 +543,7 @@ fn generate_tile(tile: u32) -> Vec<u8> {
                     let sway = (jitter(tile ^ 0x11, x, 0) * 3.0) as i32;
                     let blade = x % 5 == 2 && (y as i32) > 4 + sway && jitter(tile ^ 0x19, x, 0) > -0.3;
                     if blade {
-                        shade([0.30, 0.52, 0.20], noise * 0.12)
+                        shade(sward(turn), noise * 0.12)
                     } else {
                         [0, 0, 0, 0]
                     }
@@ -858,13 +971,40 @@ fn generate_tile(tile: u32) -> Vec<u8> {
 }
 
 /// The block texture array and its sampler, ready to bind.
+///
+/// # The year is a repaint, not a shader
+///
+/// The atlas has always been procedural — sixty-three sixteen-pixel tiles
+/// generated on the CPU at startup and uploaded once. That makes a season
+/// almost free: the seven living slots are re-run at a new point in the year
+/// and written back over their own layers. Nothing else in the pipeline
+/// learns that seasons exist. No new uniform, no branch in the fragment
+/// shader, no second atlas taking a second bind group, and no per-vertex
+/// anything.
+///
+/// The cost is seven kilobytes uploaded on the day the year moves on, which
+/// is twenty-eight times in a year and never in the same frame as anything
+/// else.
 pub struct TileTextures {
     pub view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
     pub layer_count: u32,
+    /// Kept so the year can write back over it.
+    texture: wgpu::Texture,
+    /// The point in the year the foliage layers are currently painted for,
+    /// quantised the same way [`Self::repaint`] quantises. `None` until the
+    /// first repaint, so the first one always lands.
+    painted: Option<i32>,
 }
+
+/// How finely the year is quantised for the repaint: a hundredth of the turn.
+///
+/// Fine enough that the canopy never visibly steps — a hundred stops across a
+/// year is one every few minutes of play, and each is a fraction of a shade —
+/// and coarse enough that an unchanged day does no work at all.
+const TURN_STEPS: f32 = 100.0;
 
 impl TileTextures {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
@@ -888,7 +1028,10 @@ impl TileTextures {
         });
 
         for layer in 0..layer_count {
-            let pixels = generate_tile(layer);
+            // Painted green: a fresh save opens in spring, and the first
+            // frame's `repaint` corrects it before anything is drawn if it
+            // does not.
+            let pixels = generate_tile(layer, 0.0);
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &texture,
@@ -977,7 +1120,55 @@ impl TileTextures {
             bind_group_layout,
             bind_group,
             layer_count,
+            texture,
+            painted: None,
         }
+    }
+
+    /// Move the atlas on to where the year has got to.
+    ///
+    /// `turn` is [`vx_world::season::leaf_turn`] at the current tick. Cheap
+    /// to call every frame and meant to be: it quantises, compares against
+    /// what is already on the card, and returns having done nothing at all
+    /// unless the year has actually moved. When it has moved it rewrites the
+    /// seven layers in [`FOLIAGE`] and leaves the other fifty-six alone.
+    ///
+    /// Returns whether it painted, which the capture fixtures want so they
+    /// can be sure the frame they grab is the season they asked for.
+    pub fn repaint(&mut self, queue: &wgpu::Queue, turn: f32) -> bool {
+        let step = (turn.clamp(0.0, 1.0) * TURN_STEPS).round() as i32;
+        if self.painted == Some(step) {
+            return false;
+        }
+        self.painted = Some(step);
+        let turn = step as f32 / TURN_STEPS;
+        for layer in FOLIAGE {
+            let pixels = generate_tile(layer, turn);
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(TILE_SIZE * 4),
+                    rows_per_image: Some(TILE_SIZE),
+                },
+                wgpu::Extent3d {
+                    width: TILE_SIZE,
+                    height: TILE_SIZE,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        true
     }
 }
 
@@ -988,7 +1179,7 @@ mod tests {
     #[test]
     fn every_tile_generates_a_full_rgba_image() {
         for tile in 0..slot::COUNT {
-            let pixels = generate_tile(tile);
+            let pixels = generate_tile(tile, 0.0);
             assert_eq!(pixels.len(), (TILE_SIZE * TILE_SIZE * 4) as usize);
         }
     }
@@ -996,19 +1187,22 @@ mod tests {
     #[test]
     fn tile_generation_is_deterministic() {
         // Terrain and textures must look the same on every machine and run.
-        assert_eq!(generate_tile(slot::STONE), generate_tile(slot::STONE));
+        assert_eq!(generate_tile(slot::STONE, 0.0), generate_tile(slot::STONE, 0.0));
     }
 
     #[test]
     fn different_tiles_look_different() {
-        assert_ne!(generate_tile(slot::STONE), generate_tile(slot::DIRT));
-        assert_ne!(generate_tile(slot::GRASS_TOP), generate_tile(slot::GRASS_SIDE));
+        assert_ne!(generate_tile(slot::STONE, 0.0), generate_tile(slot::DIRT, 0.0));
+        assert_ne!(
+            generate_tile(slot::GRASS_TOP, 0.0),
+            generate_tile(slot::GRASS_SIDE, 0.0)
+        );
     }
 
     #[test]
     fn tiles_are_textured_rather_than_flat_colour() {
         // A constant tile would mean the jitter is broken.
-        let pixels = generate_tile(slot::STONE);
+        let pixels = generate_tile(slot::STONE, 0.0);
         let first = &pixels[0..3];
         assert!(
             pixels.chunks_exact(4).any(|texel| texel[0..3] != *first),
@@ -1019,7 +1213,7 @@ mod tests {
     #[test]
     fn only_water_and_tufts_are_transparent() {
         for tile in 0..slot::COUNT {
-            let pixels = generate_tile(tile);
+            let pixels = generate_tile(tile, 0.0);
             let alphas: Vec<u8> = pixels.chunks_exact(4).map(|texel| texel[3]).collect();
             match tile {
                 slot::WATER => {
@@ -1041,7 +1235,7 @@ mod tests {
     fn grass_side_has_grass_above_dirt() {
         // The top row should be greener than the bottom row, or the block
         // reads upside down in game.
-        let pixels = generate_tile(slot::GRASS_SIDE);
+        let pixels = generate_tile(slot::GRASS_SIDE, 0.0);
         let row = |y: u32| -> (u32, u32) {
             let mut green = 0;
             let mut red = 0;
@@ -1057,5 +1251,157 @@ mod tests {
         let (bottom_red, bottom_green) = row(TILE_SIZE - 1);
         assert!(top_green > top_red, "top of grass_side is not green");
         assert!(bottom_red > bottom_green, "bottom of grass_side is not dirt");
+    }
+
+    /// The year repaints the living slots and nothing else. Stone is stone in
+    /// February, and if that ever stopped being true the repaint would be
+    /// rewriting sixty-three layers a day for no reason.
+    #[test]
+    fn only_the_foliage_takes_a_season() {
+        for tile in 0..slot::COUNT {
+            let green = generate_tile(tile, 0.0);
+            let bare = generate_tile(tile, 1.0);
+            if FOLIAGE.contains(&tile) {
+                assert_ne!(green, bare, "living tile {tile} did not turn");
+            } else {
+                assert_eq!(green, bare, "tile {tile} has a season it should not");
+            }
+        }
+    }
+
+    /// The atlas is as deterministic as everything else: the same slot at the
+    /// same point in the year is the same bytes, on any machine and any run.
+    #[test]
+    fn the_same_point_in_the_year_paints_the_same_atlas() {
+        for turn in [0.0, 0.33, 0.55, 0.9, 1.0] {
+            for tile in FOLIAGE {
+                assert_eq!(generate_tile(tile, turn), generate_tile(tile, turn));
+            }
+        }
+    }
+
+    /// The canopy really does go green, then gold, then bare — measured off
+    /// the pixels rather than off the constants that made them, because the
+    /// look is the deliverable and a lerp that never reached the texture
+    /// would pass every other test in this file.
+    #[test]
+    fn the_hardwood_canopy_goes_green_then_gold_then_bare() {
+        let mean = |turn: f32| {
+            let pixels = generate_tile(slot::LEAVES, turn);
+            let mut totals = [0u32; 3];
+            for texel in pixels.chunks_exact(4) {
+                for channel in 0..3 {
+                    totals[channel] += texel[channel] as u32;
+                }
+            }
+            let count = (TILE_SIZE * TILE_SIZE) as f32;
+            [
+                totals[0] as f32 / count,
+                totals[1] as f32 / count,
+                totals[2] as f32 / count,
+            ]
+        };
+        let summer = mean(0.0);
+        let autumn = mean(0.55);
+        let winter = mean(1.0);
+
+        assert!(summer[1] > summer[0] * 1.4, "the summer canopy is not green");
+        assert!(autumn[0] > autumn[1] * 1.2, "the autumn canopy is not gold");
+        assert!(
+            autumn[0] > summer[0] * 1.8,
+            "autumn is no warmer than summer"
+        );
+        // Winter drains: the colour that was in it goes out, and what is
+        // left is darker than the blaze that preceded it. Not grey — one
+        // tone lags the other on purpose, so a canopy in December still has
+        // the last of the gold caught in it, which is what a real one does.
+        let spread = |colour: [f32; 3]| {
+            colour[0].max(colour[1]).max(colour[2]) - colour[0].min(colour[1]).min(colour[2])
+        };
+        assert!(
+            spread(winter) < spread(autumn) * 0.7,
+            "the bare canopy is as colourful as the autumn one: {winter:?}"
+        );
+        assert!(winter[0] < autumn[0], "winter is brighter than autumn");
+    }
+
+    /// A spruce barely notices. That is the point of a spruce, and it is what
+    /// makes the cove beside it legible when it turns.
+    #[test]
+    fn the_conifers_barely_move_and_the_hardwoods_do_the_work() {
+        let travelled = |tile: u32| {
+            let green = generate_tile(tile, 0.0);
+            let bare = generate_tile(tile, 1.0);
+            let sum: u32 = green
+                .iter()
+                .zip(bare.iter())
+                .map(|(a, b)| a.abs_diff(*b) as u32)
+                .sum();
+            sum as f32 / green.len() as f32
+        };
+        let hardwood = travelled(slot::LEAVES);
+        for conifer in [slot::NEEDLES, slot::BOG_NEEDLES] {
+            assert!(
+                travelled(conifer) < hardwood / 4.0,
+                "conifer {conifer} moved {:.1} against the hardwood's {hardwood:.1}",
+                travelled(conifer)
+            );
+            assert!(travelled(conifer) > 0.0, "conifer {conifer} ignores the year entirely");
+        }
+    }
+
+    /// The blades and the sward are the same grass, so they turn together.
+    /// A lawn whose tufts disagreed with the ground under them would read as
+    /// a bug from the first step outside.
+    #[test]
+    fn the_tufts_match_the_ground_they_stand_in() {
+        for turn in [0.0, 0.5, 1.0] {
+            let ground = generate_tile(slot::GRASS_TOP, turn);
+            let blades = generate_tile(slot::TUFT, turn);
+            let mean = |pixels: &[u8], only_solid: bool| {
+                let mut totals = [0u32; 3];
+                let mut count = 0u32;
+                for texel in pixels.chunks_exact(4) {
+                    if only_solid && texel[3] == 0 {
+                        continue;
+                    }
+                    for channel in 0..3 {
+                        totals[channel] += texel[channel] as u32;
+                    }
+                    count += 1;
+                }
+                [
+                    totals[0] as f32 / count as f32,
+                    totals[1] as f32 / count as f32,
+                    totals[2] as f32 / count as f32,
+                ]
+            };
+            let ground = mean(&ground, false);
+            let blades = mean(&blades, true);
+            for channel in 0..3 {
+                assert!(
+                    (ground[channel] - blades[channel]).abs() < 30.0,
+                    "at turn {turn} the tufts are a different grass: {ground:?} against {blades:?}"
+                );
+            }
+        }
+    }
+
+    /// Nothing the atlas gained can make a foliage tile blend: they were
+    /// opaque before the year existed and they stay opaque, or the canopy
+    /// joins water in the unsorted alpha pass and the woods start flickering.
+    #[test]
+    fn a_season_never_makes_a_leaf_see_through() {
+        for turn in [0.0, 0.4, 0.7, 1.0] {
+            for tile in FOLIAGE {
+                let pixels = generate_tile(tile, turn);
+                for texel in pixels.chunks_exact(4) {
+                    match tile {
+                        slot::TUFT => assert!(texel[3] == 0 || texel[3] == 255),
+                        _ => assert_eq!(texel[3], 255, "tile {tile} went see-through in the year"),
+                    }
+                }
+            }
+        }
     }
 }

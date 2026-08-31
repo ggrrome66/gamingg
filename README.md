@@ -875,6 +875,42 @@ closed door. So there is a whole middle now between "nothing happened" and
 "there are four lads with guns coming over the hill", and you can talk, pay or
 run your way out of it.
 
+### The year turns
+
+The game counts a **twenty-eight day year** — it always has, quietly, so that
+villagers have birthdays. Now it runs the weather and the woods: a week each of
+spring, summer, autumn and winter, one season to an election term. A full year
+is about an hour of play.
+
+**And you can see it.** The leaves turn — green, then gold, then bare, then
+back. The hardwoods do most of the work, because that is what hardwoods do; the
+spruce barely notice, because that is what spruce are like; the grass goes to
+straw and then to dun; the moss in a bog goes rusty. The sky goes with them,
+deep and hard in the summer and pale and flat in the winter, and the light
+comes down with it.
+
+**Summer is a fire season.** The ground dries right out and *stays* dry — a
+shower in August is gone in a day where the same shower in April would have
+kept things safe for a week. So when the lightning starts it actually bites,
+and a hillside will run on you. Come winter the country is sodden, the strikes
+do nothing, and you can be careless again. Nothing in the fire model changed to
+make that happen; it reads how dry the fuel is, and how dry the fuel is now
+knows what month it is.
+
+**And the woods stop growing over the winter.** Burn a stand in October and
+that is it: it sits there black until the spring, and only then starts coming
+back through meadow and thicket to forest. The burn you set before the snow is
+still staring at you in February — which is the whole point of having a year.
+
+It does not make anything slower. A year of growing still fits in a year: the
+woods simply do none of it in the dead of winter and twice as much in June. And
+the season is derived from the tick like everything else here — nothing is
+stored, no save file grew, and a stand cleared in autumn and a stand cleared in
+spring come back as exactly the same forest, just months apart.
+
+`WEATHER` at the terminal opens with the season, the day of the year and
+whether the woods are in their fire season.
+
 ### You can stand for office
 
 A town's mayor and sheriff used to have the job for ever. Now every town
@@ -1724,6 +1760,12 @@ cargo run --release -p vx-app -- --screenshot cove.ppm --at 0,10 --forest cove
 cargo run --release -p vx-app -- --screenshot high.ppm --at 0,10 --forest high
 cargo run --release -p vx-app -- --screenshot bog.ppm --at 0,10 --forest bog
 cargo run --release -p vx-app -- --screenshot mats.ppm --at 0,10 --forest treeline
+
+# the same cove at three points in the year — same seed, same camera, only the
+# tick differs, so the leaves and the sky are the whole of the difference
+cargo run --release -p vx-app -- --screenshot summer.ppm --at 0,10 --forest cove --season summer --time 0.5
+cargo run --release -p vx-app -- --screenshot autumn.ppm --at 0,10 --forest cove --season autumn --time 0.5
+cargo run --release -p vx-app -- --screenshot winter.ppm --at 0,10 --forest cove --season winter --time 0.5
 
 # the pocket arcade, mid-fight, on the raised handheld
 cargo run --release -p vx-app -- --screenshot arcade.ppm --at 0,10 --arcade

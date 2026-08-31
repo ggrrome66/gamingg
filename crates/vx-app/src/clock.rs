@@ -148,6 +148,47 @@ pub fn sun_uniform(state: SkyState) -> SunUniform {
     }
 }
 
+/// Lean the sky and the light towards the season.
+///
+/// Applied *after* the hour and *under* the weather's own tint, in that
+/// order, because that is the order they happen in: the sun decides where the
+/// light is coming from, the month decides what it is like, and the cloud in
+/// front of it decides how much of it arrives. Reversing the last two would
+/// make an overcast January and an overcast July the same afternoon.
+///
+/// Deliberately small. A winter sky that read as a different game would be a
+/// filter rather than a season, and the country is one country.
+pub fn tint_for_season(sun: &mut SunUniform, tick: u64) {
+    let warmth = vx_world::season::warmth(tick);
+    // Winter is pale and flat: the blue drains out of the top of the sky and
+    // the whole thing comes down towards the horizon's grey.
+    let winter = (-warmth).clamp(0.0, 1.0);
+    // Summer is the other way — harder, deeper, more of it.
+    let summer = warmth.clamp(0.0, 1.0);
+
+    let pale = [0.70, 0.72, 0.76];
+    let deep = [0.30, 0.54, 0.92];
+    for channel in 0..3 {
+        let towards = pale[channel] * winter + deep[channel] * summer;
+        let amount = (winter + summer) * SEASON_SKY;
+        sun.sky[channel] = sun.sky[channel] * (1.0 - amount) + towards * amount;
+    }
+    // A low winter sun is a weaker one, and it fills in less. Summer barely
+    // moves: the hour already gives it a long day, and doubling up would
+    // blow the highlights out.
+    sun.light[0] *= 1.0 - 0.20 * winter + 0.05 * summer;
+    sun.light[1] = (sun.light[1] + 0.06 * winter).min(0.6);
+}
+
+/// How far the year is allowed to move the sky, at its extremes.
+///
+/// A third, which is enough to read at a glance and not enough to make a
+/// January and a July look like two different games. It moves the fog with
+/// it, because the sky and the horizon are one value here by construction —
+/// so a summer distance goes blue and a winter one goes flat, which is the
+/// half of a season you notice without being told.
+const SEASON_SKY: f32 = 0.34;
+
 /// Write the hour beside the world save.
 pub fn save(time: TimeOfDay, directory: &Path) -> std::io::Result<()> {
     let mut file = std::io::BufWriter::new(std::fs::File::create(directory.join("clock.dat"))?);

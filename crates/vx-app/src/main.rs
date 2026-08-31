@@ -263,6 +263,8 @@ struct Options {
     flood: Option<String>,
     storm: bool,
     fire: Option<String>,
+    /// Which season to paint the country in: spring, summer, autumn, winter.
+    season: Option<String>,
     /// Put real paperwork on the beacon panel's civic block.
     warrant: bool,
     /// Turn the console to its ballot page.
@@ -325,6 +327,7 @@ fn parse_args() -> Result<Options, String> {
         flood: None,
         storm: false,
         fire: None,
+        season: None,
         warrant: false,
         ballot: false,
         elected: false,
@@ -421,6 +424,7 @@ fn parse_args() -> Result<Options, String> {
             "--fell" => options.fell = Some(value()?),
             "--flood" => options.flood = Some(value()?),
             "--storm" => options.storm = true,
+            "--season" => options.season = Some(value()?),
             // The civic panel is the beacon panel: `--town` is the plain
             // one and `--warrant` is the same console with paper on it.
             "--town" => options.board = true,
@@ -509,6 +513,7 @@ fn parse_args() -> Result<Options, String> {
                      --fell <when>       a stem mid-arc (swing) or lying down (down)\n  \
                      --flood <when>      a gallery cut into a lake (cut) or settled (level)\n  \
                      --storm             rain over the country with the sky down\n  \
+                     --season <name>     spring, summer, autumn or winter\n  \
                      --town              the beacon console, with who runs the place\n  \
                      --warrant           the same console with a warrant standing\n  \
                      --ballot            the console's voting page, with a poll due\n  \
@@ -798,6 +803,34 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // this instead, and the sun uniform at the bottom of this function reads
     // it — the same tint the running game applies, out of the same struct.
     let mut weather_over: Option<vx_world::weather::Conditions> = None;
+
+    // `--season` picks a tick in the middle of the named season and hands it
+    // to the sun and the atlas at the bottom of this function. The middle
+    // rather than the first day, because a season's first morning still
+    // looks like the one before it — that is the whole point of the year
+    // being continuous, and it makes for a poor photograph.
+    let season_at: Option<u64> = match options.season.as_deref() {
+        Some(word) => match vx_world::season::Season::parse(word) {
+            Some(season) => {
+                let tick = season.index() as u64 * vx_world::season::SEASON_TICKS
+                    + vx_world::season::SEASON_TICKS / 2;
+                println!(
+                    "season capture: {} — day {} of the year, leaves {:.0}% turned, {}",
+                    season.label(),
+                    vx_world::season::day_of_year(tick),
+                    vx_world::season::leaf_turn(tick) * 100.0,
+                    if vx_world::season::fire_season(tick) {
+                        "fire season"
+                    } else {
+                        "no fire risk"
+                    }
+                );
+                Some(tick)
+            }
+            None => return Err(format!("--season {word} is not a season")),
+        },
+        None => None,
+    };
 
     if options.bunker {
         // Find the nearest bunker to the requested spot and frame it: the
@@ -3975,6 +4008,13 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         Some(other) => eprintln!("--optic {other} is not lamp, nvg or thermal"),
         None => {}
     }
+    // The season fixtures paint the atlas and tint the sky the same way
+    // `Game::frame` does, in the same order, so a captured autumn is the
+    // autumn a player would walk into.
+    if let Some(tick) = season_at {
+        clock::tint_for_season(&mut sun, tick);
+        renderer.repaint_foliage(&context.queue, vx_world::season::leaf_turn(tick));
+    }
     // The weather fixtures tint the sky the same way `Game::frame` does, so
     // an overcast capture reads as overcast rather than as a strange dusk.
     if let Some(sky) = weather_over {
@@ -5051,6 +5091,10 @@ impl App {
             active.player.position.x as i32,
             active.player.position.z as i32,
         );
+        // The month, under the cloud: a January overcast and a July one are
+        // not the same afternoon, and doing these the other way round would
+        // make them one.
+        clock::tint_for_season(&mut sun, active.journal.tick());
         let overcast = match sky.state {
             vx_world::weather::State::Clear => 0.0,
             vx_world::weather::State::Cloud => 0.45,
@@ -5065,6 +5109,12 @@ impl App {
             sun.light[0] *= 1.0 - 0.55 * overcast;
             sun.light[1] = (sun.light[1] + 0.10 * overcast).min(0.6);
         }
+        // And the leaves. Free unless the year has actually moved on, which
+        // is why this can sit in the frame path at all.
+        active.renderer.repaint_foliage(
+            &active.context.queue,
+            vx_world::season::leaf_turn(active.journal.tick()),
+        );
         // The optics ride the sun uniform: the lamp is a light from the
         // active eye, the visors are how the eye reads what arrives.
         if active.optics.mode == optics::Mode::Lamp {
@@ -6399,7 +6449,21 @@ impl App {
                     .to_string()
                 };
                 let dryness = vx_world::weather::fuel_moisture(seed, tick, column.x, column.z);
+                let season = vx_world::season::Season::of(tick);
                 let mut lines = vec![
+                    // The month first, because everything under it is a
+                    // reading of the month.
+                    format!(
+                        "SEASON    {} - DAY {} OF {}{}",
+                        season.label(),
+                        vx_world::season::day_of_year(tick) + 1,
+                        vx_world::season::YEAR_DAYS,
+                        if vx_world::season::fire_season(tick) {
+                            "  - FIRE SEASON"
+                        } else {
+                            ""
+                        }
+                    ),
                     format!("SKY       {}", sky.state.label()),
                     format!(
                         "WIND      {} AT {:.0} M/S",

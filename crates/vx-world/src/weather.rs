@@ -26,6 +26,7 @@
 //! term it needs without a single byte of storage.
 
 use crate::noise::signed_2d;
+use crate::season;
 
 /// How coarse the weather is, in blocks. A region is bigger than anything you
 /// can see at once, so the sky over a valley is one sky rather than a patchy
@@ -45,6 +46,26 @@ const DRIFT: f32 = 0.22;
 /// How hard the wind blows at its strongest, in blocks per second — the
 /// number the fire's spread multiplier reads, not a force on anything.
 pub const WIND_MAX: f32 = 14.0;
+
+/// How far the year moves the bar a front has to cross to rain.
+///
+/// Small on purpose. A season should be the difference between a wet week and
+/// a dry one, not the difference between a monsoon and a desert — the country
+/// has one climate and twelve months of it.
+const SEASON_BAR: f32 = 0.13;
+
+/// How far the year leans on the temperature and the humidity fields. The
+/// place still decides most of it; the month decides the rest.
+const SEASON_WARMTH: f32 = 0.22;
+const SEASON_DAMP: f32 = 0.12;
+
+/// How much drier high summer is than the rain alone accounts for.
+///
+/// Rain damps fuel and fuel dries out again, and that much was already true.
+/// This is the extra: in a fire season the ground stays tinder a few days
+/// after a shower that would have kept it safe in April, which is the term
+/// that makes a fire season legible rather than merely statistical.
+const SEASON_TINDER: f32 = 0.16;
 
 const SALT_FRONT: u64 = 0x5701_1e1e_0b17_7c0d;
 const SALT_DAMP: u64 = 0x00c1_0bd5_0000_7a1e;
@@ -120,9 +141,19 @@ pub fn at(seed: u64, tick: u64, x: i32, z: i32) -> Conditions {
     // saying so.
     let front = signed_2d(seed ^ SALT_FRONT, u, v);
     let depth = signed_2d(seed ^ SALT_FRONT, u * 0.31 + 11.0, v * 0.31 - 7.0);
-    let humidity = (signed_2d(seed ^ SALT_DAMP, u * 1.7, v * 1.7) * 0.5 + 0.5).clamp(0.0, 1.0);
-    let temperature =
-        (signed_2d(seed ^ SALT_WARM, u * 0.6 - 3.0, v * 0.6 + 5.0) * 0.5 + 0.5).clamp(0.0, 1.0);
+    // The year's own two terms, sampled once. `warmth` runs -1..1 and `damp`
+    // is the wet side of it, lagging a quarter-season.
+    let warmth = season::warmth(tick);
+    let damp = season::damp(tick);
+
+    let humidity = (signed_2d(seed ^ SALT_DAMP, u * 1.7, v * 1.7) * 0.5 + 0.5 + damp * SEASON_DAMP)
+        .clamp(0.0, 1.0);
+    // The place still decides most of it — a cove is warmer than a summit in
+    // any month — and the year leans on the answer.
+    let temperature = (signed_2d(seed ^ SALT_WARM, u * 0.6 - 3.0, v * 0.6 + 5.0) * 0.5
+        + 0.5
+        + warmth * SEASON_WARMTH)
+        .clamp(0.0, 1.0);
 
     // The wind turns slowly and always blows somewhere: a dead calm that
     // lasts is a fire model with nothing to say.
@@ -135,12 +166,19 @@ pub fn at(seed: u64, tick: u64, x: i32, z: i32) -> Conditions {
 
     // Thresholds on the front, deepened by the slow field. The bands are
     // wide enough that most of the time it is simply weather.
+    //
+    // The season moves the *bar*, not the field: in the dry half of the year
+    // a front has to be deeper to rain at all, and in the wet half a shower
+    // that would have been a grey afternoon comes down. Shifting the
+    // thresholds rather than scaling the rain is what keeps a summer storm a
+    // proper summer storm when one does arrive.
+    let bar = -damp * SEASON_BAR;
     let wet = front + depth * 0.35;
-    let (state, rain) = if wet > 0.62 {
-        (State::Storm, ((wet - 0.62) / 0.30 + 0.6).clamp(0.6, 1.0))
-    } else if wet > 0.34 {
-        (State::Rain, ((wet - 0.34) / 0.28 * 0.55 + 0.15).clamp(0.15, 0.7))
-    } else if wet > 0.10 {
+    let (state, rain) = if wet > 0.62 + bar {
+        (State::Storm, ((wet - 0.62 - bar) / 0.30 + 0.6).clamp(0.6, 1.0))
+    } else if wet > 0.34 + bar {
+        (State::Rain, ((wet - 0.34 - bar) / 0.28 * 0.55 + 0.15).clamp(0.15, 0.7))
+    } else if wet > 0.10 + bar {
         (State::Cloud, 0.0)
     } else {
         (State::Clear, 0.0)
@@ -179,8 +217,15 @@ pub fn wetness(seed: u64, tick: u64, x: i32, z: i32) -> f32 {
 /// saturated moisture, which is what makes the difference between a strike
 /// that does nothing and a strike that takes a hillside. Here that is one
 /// subtraction: the dry side of how wet it has been.
+///
+/// The season arrives here twice over, and both are wanted. It is already in
+/// [`wetness`], because the thresholds it moved decided whether it rained at
+/// all; and it is added directly on top, because a hot dry August evaporates
+/// what did fall faster than an April one. So high summer is tinder within
+/// days of a shower and midwinter never quite gets there.
 pub fn fuel_moisture(seed: u64, tick: u64, x: i32, z: i32) -> f32 {
-    1.0 - wetness(seed, tick, x, z)
+    let dried = season::warmth(tick).max(0.0) * SEASON_TINDER;
+    (1.0 - wetness(seed, tick, x, z) + dried).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -317,6 +362,128 @@ mod tests {
             assert!(
                 rough.0 / rough.1 as f32 > calm.0 / calm.1 as f32,
                 "storms are no windier than clear days"
+            );
+        }
+    }
+
+    /// A season is a *redistribution*. Summer is drier than winter over the
+    /// same country, and the year as a whole rains as much as it always did
+    /// — a calendar that quietly turned the taps down would be a nerf
+    /// wearing a season's clothes.
+    #[test]
+    fn summer_is_drier_than_winter_and_the_year_is_not() {
+        use crate::season::{Season, DAY_TICKS, SEASON_DAYS, SEASON_TICKS, YEAR_DAYS};
+        let places = [(0, 0), (900, -400), (-2_100, 1_700), (5_000, 5_000)];
+        let over = |season: Season| {
+            let start = season.index() as u64 * SEASON_TICKS;
+            let mut sum = 0.0;
+            let mut count = 0;
+            for day in 0..SEASON_DAYS {
+                for hour in 0..8u64 {
+                    for (x, z) in places {
+                        sum += at(7, start + day * DAY_TICKS + hour * DAY_TICKS / 8, x, z).rain;
+                        count += 1;
+                    }
+                }
+            }
+            sum / count as f32
+        };
+        let (summer, winter) = (over(Season::Summer), over(Season::Winter));
+        assert!(
+            summer < winter * 0.85,
+            "summer ({summer:.3}) is not meaningfully drier than winter ({winter:.3})"
+        );
+        assert!(summer > 0.0, "it never rains all summer anywhere");
+
+        // And the season *redistributes* the year rather than turning the
+        // taps down: the year's own mean sits between the two extremes it
+        // created, so what summer went without, some other season had.
+        //
+        // Not "a year later is identical" — a year later is not identical and
+        // should not be, because the front field keeps drifting under the
+        // calendar. The country repeats its seasons, not its weather.
+        let mut year = 0.0;
+        let mut count = 0;
+        for day in 0..YEAR_DAYS {
+            for hour in 0..8u64 {
+                for (x, z) in places {
+                    year += at(7, day * DAY_TICKS + hour * DAY_TICKS / 8, x, z).rain;
+                    count += 1;
+                }
+            }
+        }
+        let year = year / count as f32;
+        assert!(
+            summer < year && year < winter,
+            "the year ({year:.3}) is not between its summer ({summer:.3}) and its winter ({winter:.3})"
+        );
+        // The bar the season moves averages to nothing over the year, so the
+        // whole-year total lands near the middle of what it swings between
+        // rather than at one end of it.
+        let middle = (summer + winter) / 2.0;
+        assert!(
+            (year - middle).abs() < (winter - summer) * 0.5,
+            "the calendar has a thumb on the scale: {year:.3} against a middle of {middle:.3}"
+        );
+    }
+
+    /// The fire season is real: the fuel is at its driest in high summer and
+    /// its wettest in the depths of winter, over a country's worth of
+    /// samples. This is the term `fire::strike` reads, so this test is the
+    /// whole reason lightning bites in August and does nothing in February.
+    #[test]
+    fn the_fuel_is_tinder_in_summer_and_sodden_in_winter() {
+        use crate::season::{Season, DAY_TICKS, SEASON_DAYS, SEASON_TICKS};
+        let mean = |season: Season| {
+            let start = season.index() as u64 * SEASON_TICKS;
+            let mut sum = 0.0;
+            let mut count = 0;
+            for day in 0..SEASON_DAYS {
+                for (x, z) in [(0, 0), (900, -400), (-2_100, 1_700), (5_000, 5_000)] {
+                    sum += fuel_moisture(7, start + day * DAY_TICKS, x, z);
+                    count += 1;
+                }
+            }
+            sum / count as f32
+        };
+        let seasons = [
+            (Season::Spring, mean(Season::Spring)),
+            (Season::Summer, mean(Season::Summer)),
+            (Season::Autumn, mean(Season::Autumn)),
+            (Season::Winter, mean(Season::Winter)),
+        ];
+        let driest = seasons.iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        let wettest = seasons.iter().min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        assert_eq!(driest.0, Season::Summer, "the driest season is {:?}", driest.0);
+        assert_eq!(wettest.0, Season::Winter, "the wettest season is {:?}", wettest.0);
+        assert!(
+            driest.1 - wettest.1 > 0.08,
+            "the year barely moves the fuel: {:.3} to {:.3}",
+            wettest.1,
+            driest.1
+        );
+    }
+
+    /// A season leans; it does not take over. Two places on the same day are
+    /// still two skies, and the sky over one place still changes through a
+    /// season — a calendar that flattened the weather into "it is summer"
+    /// would have taken something away.
+    #[test]
+    fn the_season_leans_on_the_weather_rather_than_replacing_it() {
+        use crate::season::{DAY_TICKS, SEASON_DAYS, SEASON_TICKS};
+        for season_start in [0, SEASON_TICKS, 2 * SEASON_TICKS, 3 * SEASON_TICKS] {
+            let mut states = std::collections::BTreeSet::new();
+            for day in 0..SEASON_DAYS {
+                for hour in 0..8u64 {
+                    let tick = season_start + day * DAY_TICKS + hour * DAY_TICKS / 8;
+                    for (x, z) in [(0, 0), (3_000, -1_500), (-4_400, 2_900)] {
+                        states.insert(at(7, tick, x, z).state);
+                    }
+                }
+            }
+            assert!(
+                states.len() > 2,
+                "a whole season of one kind of sky: {states:?}"
             );
         }
     }

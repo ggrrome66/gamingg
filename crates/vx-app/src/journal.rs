@@ -3177,3 +3177,177 @@ mod civic_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod season_tests {
+    use super::*;
+    use vx_core::{BlockPos, ChunkPos};
+    use vx_world::season::{self, Season};
+    use vx_world::{flora, region_hash};
+
+    /// **A year of seasons leaves the ground exactly as it found it.**
+    ///
+    /// The sibling of [`civic_tests::the_civic_layer_never_touches_the_ground`],
+    /// and the claim stage 41 rests on. A season is a term inside functions
+    /// that were already pure in the tick, plus a texture upload: the sky, the
+    /// warmth, the leaves and the growing clock are all *readings*, never
+    /// edits. So the same journal replayed with a whole year of seasons read
+    /// over the top of it must hash the same country as one where nobody
+    /// asked what month it was.
+    ///
+    /// If anything seasonal ever reaches for a block — snow that settles, a
+    /// leaf that actually falls off the branch — this is the test that goes
+    /// red, and it should: that would be a change to the world, and the world
+    /// belongs to the journal.
+    ///
+    /// [`civic_tests::the_civic_layer_never_touches_the_ground`]: super::civic_tests
+    #[test]
+    fn a_year_of_seasons_never_touches_the_ground() {
+        let patch = || {
+            let mut world = World::new(2024);
+            world.load_around(ChunkPos::new(0, 0), 4);
+            world
+        };
+        let span = (
+            BlockPos::new(-60, 40, -60),
+            BlockPos::new(60, 200, 60),
+        );
+
+        let mut journal = CommandLog::default();
+        journal.record(Command::Advance {
+            ticks: crate::schedule::TICKS_PER_DAY as u32 * 14,
+        });
+
+        let mut quiet = patch();
+        replay(&journal, &mut quiet, &EventBus::new());
+        let untouched = region_hash(&quiet, span.0, span.1);
+
+        let mut through_the_year = patch();
+        replay(&journal, &mut through_the_year, &EventBus::new());
+
+        // Read the whole year, everywhere, in every way anything reads it.
+        let seed = through_the_year.seed();
+        let mut sampled = 0;
+        for day in 0..season::YEAR_DAYS {
+            let tick = day * season::DAY_TICKS;
+            let _ = Season::of(tick);
+            let _ = season::phase(tick);
+            let _ = season::warmth(tick);
+            let _ = season::damp(tick);
+            let _ = season::growth(tick);
+            let _ = season::leaf_turn(tick);
+            let _ = season::fire_season(tick);
+            let _ = season::grown_between(0, tick);
+            let _ = season::when_grown(tick, season::DAY_TICKS);
+            for (x, z) in [(0, 0), (44, -31), (-58, 57)] {
+                let _ = vx_world::weather::at(seed, tick, x, z);
+                let _ = vx_world::weather::fuel_moisture(seed, tick, x, z);
+                sampled += 1;
+            }
+        }
+        assert!(sampled > 80, "the year was barely read at all");
+
+        assert_eq!(
+            region_hash(&through_the_year, span.0, span.1),
+            untouched,
+            "the year moved a block"
+        );
+    }
+
+    /// The season decides **when** a stand comes back, never **what** it
+    /// comes back as.
+    ///
+    /// Two identical clearings, one in the spring and one on the last day
+    /// before winter, walked forward until each has banked the same growing
+    /// time. They take wildly different numbers of calendar days to get
+    /// there — that is the whole feature — and they must arrive at
+    /// byte-identical ground. A season that quietly grew a different forest
+    /// in October would be a worldgen change wearing a calendar's clothes.
+    #[test]
+    fn a_stand_comes_back_the_same_whatever_month_it_was_cleared_in() {
+        // Real woods, not the hometown plaza — a cell with nothing growing in
+        // it would make this test a pair of no-ops agreeing.
+        const WOODS: (i32, i32) = (96, 96);
+        let span = (
+            BlockPos::new(WOODS.0 - 40, 40, WOODS.1 - 40),
+            BlockPos::new(WOODS.0 + 40, 200, WOODS.1 + 40),
+        );
+        let patch = || {
+            let mut world = World::new(2024);
+            world.load_around(ChunkPos::new(WOODS.0 / 16, WOODS.1 / 16), 3);
+            world
+        };
+        let near = |world: &World| {
+            world
+                .generator()
+                .towns_overlapping((WOODS.0 - 80, WOODS.1 - 80), (WOODS.0 + 80, WOODS.1 + 80))
+        };
+
+        // A hardwood the seed actually put there. Disturbing a lattice cell
+        // with no tree in it would empty the ledger on the first step and
+        // leave two identical untouched worlds agreeing about nothing.
+        let cleared = {
+            let world = patch();
+            let sites = near(&world);
+            let generator = world.generator().clone();
+            let height_at = |x: i32, z: i32| generator.height_with_sites(x, z, &sites);
+            let natural_at = |x: i32, z: i32| generator.natural_height_at(x, z);
+            flora::trees_overlapping(
+                world.seed(),
+                (WOODS.0 - 24, WOODS.1 - 24),
+                (WOODS.0 + 24, WOODS.1 + 24),
+                &height_at,
+                &natural_at,
+                &sites,
+            )
+            .into_iter()
+            .find(|tree| tree.species == flora::Species::Hardwood && tree.height >= 5)
+            .expect("no hardwood in the loaded square")
+            .base
+        };
+
+        // Walk a clearing forward through `stages` of its succession and hash
+        // what it left. The ledger stamps each stage into the world, so stage
+        // zero is a meadow standing where old growth was and stage four is
+        // the forest the seed describes back again.
+        let grow_from = |start: u64, stages: u64| {
+            let mut world = patch();
+            let sites = near(&world);
+            let mut ledger = crate::succession::Ledger::default();
+            ledger.disturb(cleared, start);
+            let step = crate::succession::STEP_TICKS
+                * crate::succession::pace(flora::Species::Hardwood);
+            let mut last = start;
+            for stage in 0..stages {
+                last = season::when_grown(start, step * stage);
+                ledger.advance(&mut world, last, &sites);
+            }
+            (region_hash(&world, span.0, span.1), last - start)
+        };
+
+        let all = crate::succession::STAGES as u64;
+        // Cleared three days into the spring, and cleared on the last day
+        // before the winter shuts the ground down.
+        let (spring_ground, spring_days) = grow_from(season::DAY_TICKS * 3, all);
+        let (autumn_ground, autumn_days) =
+            grow_from(3 * season::SEASON_TICKS - season::DAY_TICKS, all);
+
+        assert!(
+            autumn_days > spring_days,
+            "the autumn clearing did not wait for anything: {autumn_days} against {spring_days}"
+        );
+        assert_eq!(
+            spring_ground, autumn_ground,
+            "the same stand came back as two different forests"
+        );
+
+        // And neither of them passed by doing nothing: a stand stopped at its
+        // first stage is a meadow, and a stand walked all the way through is
+        // a wood. The equality above is two systems agreeing, not two no-ops.
+        let (meadow, _) = grow_from(season::DAY_TICKS * 3, 1);
+        assert_ne!(
+            spring_ground, meadow,
+            "nothing grew back, so the test proved nothing"
+        );
+    }
+}

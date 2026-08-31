@@ -115,7 +115,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 37 | `2b61043` | Water that moves: a wet block carries its fill in the same sixty-four cells a wounded block carries its damage, so cutting into a lake floods the gallery, an inland pool drains by exactly what ran out of it, and a printed pump lifts water over its own head |
 | 38 | `14acc37` | Weather, fire and what comes back: the sky is a pure function of the seed and the tick, so a storm crosses the country the same way twice — it rains, the hollows fill, lightning takes the tall and the lonely, and about one strike in fifty lights a fire that runs uphill and downwind through anything wooden, your house included, until it meets an ancient grove or wet ground; then the burnt cell remembers, and comes back through meadow, thicket and mixed stand to the forest it was |
 | 39 | `ef06f2b` | Towns that work: every town has a mayor and a sheriff who are people off its own roster, its residents put goods on its books and credits in their pockets on the hours the schedule already gave them, trading with somebody buys enough trust to be handed a key to their door — and a bounty is no longer a posse, because the sheriff has to get a warrant from a mayor with an opinion of you, with a fine and a closed counter on the way there |
-| 40 | _this_ | The ballot box: a town's seats stop being permanent — it votes on its own market day, once a term, and the residents cast on the business you have put across their counters, so you can put your name in at the beacon console and be elected sheriff or mayor; a badge now belongs to the town that gave it rather than to the whole frontier, and a mayor cannot sign his own warrant, so paper on a town you run goes up the road to the next mayor along |
+| 40 | `4cdda7c` | The ballot box: a town's seats stop being permanent — it votes on its own market day, once a term, and the residents cast on the business you have put across their counters, so you can put your name in at the beacon console and be elected sheriff or mayor; a badge now belongs to the town that gave it rather than to the whole frontier, and a mayor cannot sign his own warrant, so paper on a town you run goes up the road to the next mayor along |
+| 41 | _this_ | Seasons: the twenty-eight day year the roster already counted for birthdays now runs the sky and the woods — a week each of spring, summer, autumn and winter, one season to an election term. The leaves turn gold and go bare and come back, the sward goes to straw, the spruce barely notice and the sky goes with them; **summer is a fire season** where the ground stays tinder days after a shower and lightning actually bites, winter is sodden and nothing will light; and the woods **stop growing over the winter**, so a stand you burn in October is still black in February and only starts coming back in the spring |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2372,6 +2373,98 @@ lose a seat other than at a poll.
 
 ---
 
+## Shipped — Stage 41: seasons
+
+**The first stage that is the board's own work rather than anybody's note.**
+Every design note this project was handed shipped by 40. This one exists
+because two clocks were already running and neither of them knew what month it
+was: `weather::at` was pure in the tick and read beautifully, but August and
+February were the same sky — so "it has been dry lately" was a coincidence
+rather than a season, and lightning was as likely to bite in the wet half of
+the year as the dry one. Meanwhile a burn scar healed at a rate the calendar
+had no opinion about, and the country never changed colour.
+
+**The year was already there.** `people::YEAR_DAYS` has counted twenty-eight
+days since stage 23, purely so that villagers have birthdays. Four seasons of
+seven days each fall straight out of it — and seven days is also
+`ballot::TERM_DAYS`, so one season is one term of office and an election and a
+season turn together. Nothing new was invented to hold a calendar; a test in
+`succession.rs` holds `vx-world`'s day and year against the app's clock,
+roster and ballot so the two sides cannot drift.
+
+**A season edits no blocks, and that is the claim the stage rests on.** It is a
+term inside functions that were already pure in the tick, plus a texture
+upload. No save file changed, no wire tag was added, and the journal is still
+**VERSION 26**. So this round has the *inverted* oracle test stages 39 and 40
+introduced rather than the ordinary one: a year of seasons read over the same
+journal — every seasonal term, at every day of the year, at three places —
+must hash the same ground as a replay where nobody asked what month it was.
+
+**Nothing snaps.** `season::phase` is continuous through the year and every
+term downstream reads it, because a season that switched on a boundary would
+put a hard edge in the sky and a hard edge in the tile atlas on one particular
+midnight, and a player would read the edge as a bug. The continuity test walks
+every boundary *including the wrap* from winter back into spring, which is the
+one everybody forgets: the leaves have to hand over to the spring flush at
+exactly the value they were at, so `leaf_turn` breaks its buds in the last tenth
+of winter rather than resetting.
+
+**The sky takes the month on the bar, not the field.** `weather::at` shifts the
+*thresholds* a front has to cross to rain, rather than scaling the rain it
+rolls. So a summer is not "fewer storms happened" — it is the same weather with
+a higher bar, which is what a dry season is, and a summer storm that does
+arrive is still a proper storm. The whole fire model inherits a fire season
+without one line of `fire.rs` changing: `fuel_moisture` gets the season through
+`wetness` for free, plus one direct term so a hot August evaporates what did
+fall faster than an April one. It is checked as a redistribution rather than a
+nerf: summer is measurably drier than winter over a country's worth of samples,
+and the year's own mean sits between the two extremes it created.
+
+**The growing season is a cost on the age, not a branch that skips a step.**
+The obvious way to stop the woods over winter is to not call `advance` while it
+is cold, and it is quietly wrong: `Ledger::due` has to stay a pure function of
+`(disturbed_at, tick, species)` or a reload lands on a different stage than the
+session that saved it, and "how often did we happen to call advance while it
+was warm" is not a function of anything. So `season::grown_between` is the
+integral of `growth`, quantised to whole days so the arithmetic stays in `u64`
+and two machines cannot disagree in the last bit of a float — with
+`when_grown` as its inverse for the panels and the tests. **Normalised**, on
+the same principle as the weather: a calendar year banks exactly a calendar
+year of growing, so a stand takes the same number of days to come back as it
+did before there were seasons. It just does none of it in January and twice as
+much in June. The oracle for that is its own test: the same clearing set in
+spring and set on the last day before winter takes wildly different numbers of
+calendar days to come back and arrives at **byte-identical ground**.
+
+**The country changes colour with a repaint, not a shader.** The atlas has
+always been sixty-three procedural tiles generated on the CPU and uploaded
+once, which makes a season nearly free: `generate_tile` gains a point in the
+year, and `TileTextures::repaint` rewrites only the seven living slots. No new
+uniform, no branch in the fragment shader, no second atlas taking a second bind
+group, no per-vertex anything — seven kilobytes on the days the year moves on.
+The hardwoods do the work and the conifers barely move, which is what makes a
+spruce a spruce and what makes the cove beside it legible when it turns; and
+the tufts and the sward share one curve, because they are the same grass. The
+sky and the light take a smaller lean of their own, applied *under* stage 38's
+weather tint — a January overcast and a July one are not the same afternoon,
+and doing those the other way round would make them one.
+
+**Surface.** `WEATHER` at the terminal opens with the season, the day of the
+year and whether the woods are in their fire season. `--season <name>` paints a
+capture directly, which is how the three coves in this round's pictures are the
+same seed and the same camera with nothing but the tick between them.
+
+**Deliberately not in 41: snow.** Snow that settles is the one half of a winter
+that *edits blocks*, which puts it on the other side of the line this whole
+stage is built on — it would need the ordinary replay oracle, a mask to store
+what is under it and a rule for what melting does to the ground. It is stage 44
+on the arc, and it is a stage rather than a paragraph. Also absent: crops and
+anything to farm; migrating or hibernating wildlife; ice on the water; a
+seasonal shift in what a town's market wants; and any way for the player to
+change or skip the season, which would make every test above a lie.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -2715,17 +2808,18 @@ felling in 36, the fluid in 37, and the weather, the fire and the succession
 clock in 38. And the civic layer, open since stage 11, closed in 40: B1 in 11,
 B2 in 39, B3 in 40.
 
-What follows is the board's own work rather than anybody's note.
+What follows is the board's own work rather than anybody's note. The first of
+it, seasons, shipped in 41.
 
 | Stage | What | Why here |
 |---|---|---|
-| 41 | Seasons on the weather clock | The sky is already pure in the tick and the succession clock already runs on days; a slow annual term over both is what turns a burn scar into a thing you watch across a year |
 | 42 | The floating-origin rebase | The oldest thing on the outstanding list, and the one that stops mattering only until somebody walks far enough |
 | 43 | Founding a town, and taking one | The two routes into office stage 40 left on the board. Both want the ballot box to exist first, and now it does |
+| 44 | Snow that settles, and ice | The only half of a winter stage 41 deliberately did not do, because it is the half that *edits blocks* — and that makes it a stage of its own, with the replay oracle to satisfy rather than the inverted one |
 
 ## The feature map
 
-The whole game at a glance, as of stage 40.
+The whole game at a glance, as of stage 41.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -2861,8 +2955,14 @@ a ballot box in every town (polling on its own market day once a term, a poll
 that is a referendum on the outsider rather than a contest among neighbours,
 residents casting on the business you have put across their counters, seats
 that are stored only when they are not what the seed said, badges that belong
-to the town that issued them, and a mayor who cannot sign his own warrant);
-a Steam Deck dist build every round.
+to the town that issued them, and a mayor who cannot sign his own warrant); a year
+that turns (four seven-day seasons on the twenty-eight day calendar the roster
+already kept, one season to a term, the whole of it derived from the tick and
+stored nowhere — hardwoods that go gold then bare then green while the spruce
+barely move, a sward that goes to straw, a sky and a light that go with them,
+wet thresholds that make high summer a fire season and midwinter safe, and a
+growing clock that stops dead over the winter and still banks a full year in a
+year); a Steam Deck dist build every round.
 
 **Planned, in arc order:** seasons over the weather and succession clocks that
 already run; then the floating-origin rebase; then the two routes into office

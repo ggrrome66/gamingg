@@ -21,6 +21,19 @@
 //! a hardwood cove takes its time through pioneers to climax, and subalpine
 //! conifer is the slowest thing on the map, because at that altitude it is.
 //!
+//! **And since stage 41 it runs on the growing season.** The clock below is
+//! not the calendar: it is [`season::grown_between`], the integral of how
+//! fast anything green is growing right now. Away in spring, flat out through
+//! summer, tapering through autumn and **stopped** over winter. A stand burnt
+//! in October sits black until the spring, and a year still takes a year —
+//! the season redistributes the growing, it does not slow it down.
+//!
+//! Note what that is *not*: it is not a branch that skips [`Ledger::advance`]
+//! when it is cold. [`Ledger::due`] has to stay a pure function of
+//! `(disturbed_at, tick, species)` or a reload would land on a different
+//! stage than the session that saved it, and "how often did we happen to call
+//! advance while it was warm" is not a function of anything.
+//!
 //! **Regrowth is an edit, not a generator change.** Worldgen stays pure; the
 //! ledger stamps each stage into the world as blocks, exactly as the wells
 //! and the fluid do. That keeps chunk generation free of mutable state and
@@ -32,6 +45,7 @@ use std::path::Path;
 
 use vx_core::{BlockId, BlockPos};
 use vx_world::flora::{self, Species, Tree, TreePart};
+use vx_world::season;
 use vx_world::town::TownSite;
 use vx_world::World;
 
@@ -39,7 +53,7 @@ const MAGIC: &[u8; 4] = b"VXSC";
 const VERSION: u32 = 1;
 
 /// The base step between one stage and the next, in ticks: one day of the
-/// game's own clock.
+/// game's own clock — of *growing* days, which in a winter is no days at all.
 pub const STEP_TICKS: u64 = 64 * crate::clock::DAY_SECONDS as u64;
 
 /// How many stages there are before a stand is simply forest again.
@@ -123,7 +137,9 @@ impl Ledger {
             return STAGES - 1;
         };
         let step = STEP_TICKS * pace(species);
-        let age = tick.saturating_sub(stand.disturbed_at);
+        // Growing ticks, not calendar ticks. The two are the same over a
+        // whole year and nothing like each other inside one.
+        let age = season::grown_between(stand.disturbed_at, tick);
         ((age / step.max(1)) as u8).min(STAGES - 1)
     }
 
@@ -412,10 +428,13 @@ mod tests {
         assert_eq!(ledger.len(), 1);
         assert_eq!(ledger.due(Ledger::cell_of(tree.base), 0, tree.species), 0);
 
+        // Walk the *growing* clock, not the calendar: since stage 41 a stage
+        // costs a stand so many days of growing weather, and how many days of
+        // January that is depends on when it was cleared.
         let step = STEP_TICKS * pace(tree.species);
         let mut sizes = Vec::new();
         for stage in 0..STAGES {
-            let tick = step * stage as u64;
+            let tick = season::when_grown(0, step * stage as u64);
             ledger.advance(&mut world, tick, &sites);
             sizes.push(standing(&world, &tree));
         }
@@ -447,7 +466,7 @@ mod tests {
         let at = BlockPos::new(0, 80, 0);
         ledger.disturb(at, 0);
         let cell = Ledger::cell_of(at);
-        let tick = STEP_TICKS * 2;
+        let tick = season::when_grown(0, STEP_TICKS * 2);
         assert!(
             ledger.due(cell, tick, Species::BogSpruce) > ledger.due(cell, tick, Species::Spruce),
             "the high country came back as fast as the bog"
@@ -461,11 +480,17 @@ mod tests {
         let cell = Ledger::cell_of(at);
         ledger.disturb(at, 0);
         let step = STEP_TICKS * pace(Species::Hardwood);
-        assert_eq!(ledger.due(cell, step * 2, Species::Hardwood), 2);
+        // Two stages' worth of *growing*, which is some number of calendar
+        // days depending on what the weather was doing.
+        let two = season::when_grown(0, step * 2);
+        assert_eq!(ledger.due(cell, two, Species::Hardwood), 2);
         // Burned through again: it does not get the years it had banked.
-        ledger.disturb(at, step * 2);
-        assert_eq!(ledger.due(cell, step * 2, Species::Hardwood), 0);
-        assert_eq!(ledger.due(cell, step * 3, Species::Hardwood), 1);
+        ledger.disturb(at, two);
+        assert_eq!(ledger.due(cell, two, Species::Hardwood), 0);
+        assert_eq!(
+            ledger.due(cell, season::when_grown(two, step), Species::Hardwood),
+            1
+        );
         // And a cell nobody ever touched is simply forest.
         assert_eq!(
             ledger.due((999, 999), 0, Species::Hardwood),
@@ -506,5 +531,100 @@ mod tests {
         ledger.disturb(BlockPos::new(WOODS.0 + 4_000, 60, WOODS.1 + 4_000), 0);
         ledger.advance(&mut world, STEP_TICKS * 8, &sites);
         assert!(ledger.is_empty(), "a stand that cannot grow was kept");
+    }
+
+    /// There is one calendar, not two. `vx-world` writes the day length and
+    /// the year length where the weather can see them; the app's own clock
+    /// and roster write the same numbers for the schedule and for birthdays.
+    /// If either side ever drifts, a stand's growing season would stop
+    /// lining up with the month the player is looking at.
+    #[test]
+    fn the_world_and_the_app_keep_one_calendar() {
+        assert_eq!(
+            season::DAY_TICKS, STEP_TICKS,
+            "a day of growing is not a day"
+        );
+        assert_eq!(
+            season::DAY_TICKS,
+            64 * crate::clock::DAY_SECONDS as u64,
+            "the world's day is not the clock's day"
+        );
+        assert_eq!(
+            season::YEAR_DAYS,
+            crate::people::YEAR_DAYS as u64,
+            "the seasons and the birthdays are counting different years"
+        );
+        // And one season is one term of office, which is why an election and
+        // a season turn together.
+        assert_eq!(
+            season::SEASON_DAYS,
+            crate::ballot::TERM_DAYS as u64,
+            "a term is no longer a season"
+        );
+    }
+
+    /// A stand burnt in the autumn sits black until the spring — the thing a
+    /// year is *for*. The same burn set in the spring is a thicket inside the
+    /// week.
+    #[test]
+    fn a_stand_burnt_in_the_autumn_waits_out_the_winter() {
+        let cell = (12, -7);
+        let step = STEP_TICKS * pace(Species::Hardwood);
+
+        // Cleared on the last day before winter.
+        let autumn = 3 * season::SEASON_TICKS - season::DAY_TICKS;
+        let mut ledger = Ledger::default();
+        ledger.disturb(BlockPos::new(cell.0 * flora::TREE_CELL, 80, cell.1 * flora::TREE_CELL), autumn);
+        let cell = Ledger::cell_of(BlockPos::new(
+            cell.0 * flora::TREE_CELL,
+            80,
+            cell.1 * flora::TREE_CELL,
+        ));
+        // A week later — the whole of winter — it is still exactly as the
+        // fire left it. Not slower: stopped.
+        for day in 1..=7 {
+            let then = autumn + season::DAY_TICKS * day;
+            assert_eq!(
+                season::Season::of(then),
+                season::Season::Winter,
+                "day {day} was not winter"
+            );
+            assert_eq!(
+                ledger.due(cell, then, Species::Hardwood),
+                0,
+                "the burn healed on winter day {day}"
+            );
+        }
+        // And then it comes back. By the end of the following spring it has
+        // moved on, because the ground has thawed and the clock has restarted.
+        let spring_end = autumn + season::DAY_TICKS * 14;
+        assert_eq!(season::Season::of(spring_end), season::Season::Spring);
+        assert!(
+            ledger.due(cell, spring_end, Species::Hardwood) > 0,
+            "the burn never came back at all"
+        );
+
+        // The same clearing set in the spring is a stage on inside the week,
+        // and by high summer it has moved twice.
+        let spring = season::SEASON_TICKS - season::DAY_TICKS * 3;
+        let mut ledger = Ledger::default();
+        ledger.disturb(BlockPos::new(0, 80, 0), spring);
+        let home = Ledger::cell_of(BlockPos::new(0, 80, 0));
+        assert!(
+            ledger.due(home, spring + step, Species::Hardwood) >= 1,
+            "a spring clearing did not move in a growing week"
+        );
+
+        // Over a whole year the two land in the same place: the season
+        // decides *when* it grows, never *whether* it does.
+        let mut late = Ledger::default();
+        late.disturb(BlockPos::new(0, 80, 0), autumn);
+        let mut early = Ledger::default();
+        early.disturb(BlockPos::new(0, 80, 0), spring);
+        assert_eq!(
+            late.due(home, autumn + season::YEAR_TICKS, Species::Hardwood),
+            early.due(home, spring + season::YEAR_TICKS, Species::Hardwood),
+            "a year of growing depends on the month it started in"
+        );
     }
 }

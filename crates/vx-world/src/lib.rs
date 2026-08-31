@@ -21,6 +21,7 @@ pub mod physics;
 pub mod raycast;
 pub mod reservoir;
 pub mod save;
+pub mod season;
 pub mod seed;
 pub mod sight;
 pub mod storage;

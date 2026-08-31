@@ -378,6 +378,18 @@ impl Renderer {
         };
     }
 
+    /// Move the tile atlas on to where the year has got to.
+    ///
+    /// `turn` is [`vx_world::season::leaf_turn`] at the current tick. Cheap
+    /// enough to sit in the frame path: it does nothing at all unless the
+    /// year has moved far enough to be worth seven kilobytes.
+    ///
+    /// Returns whether it actually painted, which the capture fixtures use to
+    /// be sure the frame they grab is the season they asked for.
+    pub fn repaint_foliage(&mut self, queue: &wgpu::Queue, turn: f32) -> bool {
+        self.tiles.repaint(queue, turn)
+    }
+
     /// The colour this renderer currently clears to.
     pub fn sky(&self) -> wgpu::Color {
         self.sky
