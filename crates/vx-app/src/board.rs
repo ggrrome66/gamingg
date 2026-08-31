@@ -35,6 +35,8 @@ const TEXT: [u8; 4] = [235, 235, 235, 255];
 const DIM: [u8; 4] = [150, 150, 155, 255];
 const ACCENT: [u8; 4] = [255, 170, 60, 255];
 const GOOD: [u8; 4] = [120, 220, 120, 255];
+/// What the town has out on you, and anything else it will not do for you.
+const WARN: [u8; 4] = [225, 95, 85, 255];
 const BACKGROUND: [u8; 4] = [10, 12, 16, 235];
 
 /// One selectable line of the board.
@@ -322,12 +324,29 @@ pub struct TradeView<'a> {
     pub traffic: &'a [(i32, i32)],
 }
 
+/// Who runs the town, and what the town has out on you.
+///
+/// Carried as strings rather than as the offices and the docket themselves,
+/// for the reason every panel in this project is: the panel is a pure
+/// function over a snapshot, and a renderer that could reach into the
+/// warrant ledger would be a renderer that could change it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Civic {
+    /// `("MAYOR", "GRANT THE MEEK")`, in office order.
+    pub seats: Vec<(String, String)>,
+    /// The warrant line, when there is one.
+    pub warrant: Option<String>,
+    /// Whether the town will trade with you at all.
+    pub closed: bool,
+}
+
 /// Everything the town itself contributes to the panel.
 pub struct Counter<'a> {
     pub here: &'a TownSite,
     pub postings: &'a [Posting],
     pub runs: &'a [Run],
     pub market: &'a Market,
+    pub civic: &'a Civic,
 }
 
 pub fn render_board(
@@ -342,6 +361,7 @@ pub fn render_board(
         postings,
         runs,
         market,
+        civic,
     } = *counter;
     let mut pixels = vec![0u8; (BOARD_WIDTH * BOARD_HEIGHT * 4) as usize];
     for texel in pixels.chunks_exact_mut(4) {
@@ -384,6 +404,39 @@ pub fn render_board(
         );
         let colour = if market.wants(good) { ACCENT } else { DIM };
         font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, colour, &line);
+        y += LINE_HEIGHT as i32;
+    }
+    y += 3;
+
+    // Who runs the place, under what it pays. A town has been a price list
+    // with a name on it for thirty rounds; this is the line that says there
+    // are people behind the counter.
+    for (title, name) in &civic.seats {
+        font::draw_text(
+            &mut pixels,
+            BOARD_WIDTH,
+            margin,
+            y,
+            1,
+            DIM,
+            &format!("{title:<8} {name}"),
+        );
+        y += LINE_HEIGHT as i32;
+    }
+    if let Some(warrant) = &civic.warrant {
+        font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, WARN, warrant);
+        y += LINE_HEIGHT as i32;
+    }
+    if civic.closed {
+        font::draw_text(
+            &mut pixels,
+            BOARD_WIDTH,
+            margin,
+            y,
+            1,
+            WARN,
+            "THIS TOWN WILL NOT TRADE WITH YOU",
+        );
         y += LINE_HEIGHT as i32;
     }
     y += 3;
@@ -736,8 +789,8 @@ mod tests {
         let mut ledger = Ledger::new();
         ledger.accept(&haul);
 
-        let a = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market }, &ledger, &wallet, None);
-        let b = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market }, &ledger, &wallet, None);
+        let a = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market, civic: &Civic::default() }, &ledger, &wallet, None);
+        let b = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market, civic: &Civic::default() }, &ledger, &wallet, None);
         assert_eq!(a.len(), (BOARD_WIDTH * BOARD_HEIGHT * 4) as usize);
         assert_eq!(a, b);
 
@@ -745,7 +798,7 @@ mod tests {
         // pair of coordinates.
         assert!(!ledger.knows(haul.settles_at()));
         ledger.visit(haul.settles_at());
-        let found = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market }, &ledger, &wallet, None);
+        let found = render_board(&board, &Counter { here: &home, postings: &postings, runs: &[], market: &market, civic: &Civic::default() }, &ledger, &wallet, None);
         assert_ne!(a, found, "discovering the target left the board unchanged");
     }
 
@@ -910,11 +963,13 @@ mod tests {
         assert!(matches!(rows.last(), Some(Row::Ship { .. })));
         board.move_cursor(rows.len() as i32, rows.len());
 
+        let civic = Civic::default();
         let counter = Counter {
             here: &home,
             postings: &[],
             runs: &runs,
             market: &market,
+            civic: &civic,
         };
         let with_map = render_board(&board, &counter, &ledger, &wallet, Some(&view));
         let without = render_board(&board, &counter, &ledger, &wallet, None);
@@ -930,6 +985,27 @@ mod tests {
             with_map,
             render_board(&board, &counter, &ledger, &wallet, Some(&view))
         );
+
+        // And the civic block really draws: a town with a mayor, a sheriff
+        // and paper out on you does not look like one with none of that.
+        let civic = Civic {
+            seats: vec![
+                ("MAYOR".into(), "GRANT THE MEEK".into()),
+                ("SHERIFF".into(), "HOLLIS THE GRIM".into()),
+            ],
+            warrant: Some("WARRANT PETITIONED - FILED ON 140 CR".into()),
+            closed: true,
+        };
+        let civic_counter = Counter {
+            here: &home,
+            postings: &[],
+            runs: &runs,
+            market: &market,
+            civic: &civic,
+        };
+        let governed = render_board(&board, &civic_counter, &ledger, &wallet, Some(&view));
+        assert_ne!(governed, with_map, "the civic block drew nothing at all");
+        assert_eq!(governed.len(), with_map.len(), "the panel changed size");
 
         // The destination is unexplored here, so it is a pin in the dark —
         // which is exactly the paper-map behaviour asked for.

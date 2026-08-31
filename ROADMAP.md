@@ -113,7 +113,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 35 | `b3ae393` | Three forests: every column belongs to a peat bog, a mixed hardwood cove or subalpine conifer, decided by how high and how wet the ground is — with emergent giants over the cove, krummholz mats at the treeline, bare rock above them and sphagnum underfoot in the lows |
 | 36 | `98a0a7c` | Felling: cut low into a trunk and you are cutting a notch on its own cross-section, not chipping a block — past the notch and down to the hinge it goes over, toward the side you cut from, on a kinematic arc that flattens what it lands on, takes its neighbours with it and lies down as logs |
 | 37 | `2b61043` | Water that moves: a wet block carries its fill in the same sixty-four cells a wounded block carries its damage, so cutting into a lake floods the gallery, an inland pool drains by exactly what ran out of it, and a printed pump lifts water over its own head |
-| 38 | _this_ | Weather, fire and what comes back: the sky is a pure function of the seed and the tick, so a storm crosses the country the same way twice — it rains, the hollows fill, lightning takes the tall and the lonely, and about one strike in fifty lights a fire that runs uphill and downwind through anything wooden, your house included, until it meets an ancient grove or wet ground; then the burnt cell remembers, and comes back through meadow, thicket and mixed stand to the forest it was |
+| 38 | `14acc37` | Weather, fire and what comes back: the sky is a pure function of the seed and the tick, so a storm crosses the country the same way twice — it rains, the hollows fill, lightning takes the tall and the lonely, and about one strike in fifty lights a fire that runs uphill and downwind through anything wooden, your house included, until it meets an ancient grove or wet ground; then the burnt cell remembers, and comes back through meadow, thicket and mixed stand to the forest it was |
+| 39 | _this_ | Towns that work: every town has a mayor and a sheriff who are people off its own roster, its residents put goods on its books and credits in their pockets on the hours the schedule already gave them, trading with somebody buys enough trust to be handed a key to their door — and a bounty is no longer a posse, because the sheriff has to get a warrant from a mayor with an opinion of you, with a fine and a closed counter on the way there |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2208,6 +2209,86 @@ the sequence is faithful, the calendar is not.
 
 ---
 
+## Shipped — Stage 39: towns that work, and the warrant chain
+
+**The civic layer's B2, outstanding since stage 11.** Everything it needed was
+already here and none of it was joined up: offices existed but only the player
+could hold one, residents had trades and schedules that meant nothing to the
+economy, and the law was a single comparison — `bounty >= WARRANT_THRESHOLD`
+and four armed men appeared over the hill.
+
+**Every town has a mayor and a sheriff, and they are people.** The seat is a
+roster index hashed off the town's own seed, so two machines agree on who runs
+a town four kilometres away without either having been there, and nothing is
+stored. The two are drawn without replacement — a man cannot be the sheriff who
+asks himself for the warrant — and the seat is its own draw rather than the job
+title, so a town where the powderman is mayor and the foreman wears the badge
+is a town with a story in it. The hometown keeps its authored pair, because the
+names `THE MAYOR` and `THE SHERIFF` were already on them.
+
+**The residents work, on the hours the schedule already gave them.** The market
+integrates in whole 240-tick steps and lands on a boundary, which is what makes
+"integrate to 5 000 then to 10 000" identical to "integrate to 10 000"; the
+people ride that clock rather than inventing one. Each step samples
+`schedule::where_is`, and a resident at work puts their trade's own good on the
+books while everyone burns their board awake or asleep. Per trade rather than
+per town, so a town's three residents are three contributions instead of one
+rate tripled — and a tallyman counts the pile without adding to it, because a
+town whose people all produce is a town with no services in it. Their purses
+are derived the same way the forest and the weather are: shifts worked times
+what their hands are worth, pure in `(seed, index, tick)`, nothing written
+down. Turn up on a market day and the shelves genuinely differ from four in the
+morning.
+
+**Trust is what you buy with business, and it is not friendship.** A fourth
+entry on the ledger that already exists — a second file would have been this
+one again, the same sparse map, the same key, the same save — counting toward
+the friendship total but read separately. So a stranger you have made rich can
+be handed a key to their door without ever having been liked, and somebody's
+oldest friend is not automatically their supplier. Version two of `friends.dat`
+loads version one rather than discarding it: throwing away friendships somebody
+earned would have been the lazy reading of "tolerant".
+
+**And the warrant chain, which is the point.** The sheriff files when the
+bounty crosses the threshold; the mayor decides on the spot from their own
+archetype, your tier with them, your trust and how far past the line you are.
+A proud mayor signs because the law is the law; a craven one stalls; a mayor
+you have been feeding gifts to for a season leaves it in a drawer. It buys
+**time, not impunity**: past the price the permits round put on a vault, nobody
+signs any differently. A refusal carries an expiry, so the sheriff may ask
+again — a reprieve rather than a pardon. Deputies now muster on the
+*signature*, never on the bounty.
+
+**Short of force**, exactly what the note asked for: a fine debited once when
+the paperwork is filed — and what the wallet cannot cover goes back onto the
+bounty, so being broke and in trouble is worse than being solvent and in
+trouble — and the town's counter closed to you while anything stands. The
+embargo is a refusal rather than a worse price, because a player who simply
+pays a bit more has not been punished.
+
+**The oracle, inverted.** Every round since 36 has proved that a new system
+edits the ground *identically* on both sides. This one proves the opposite and
+it is the claim the whole stage rests on: offices, wages, trust and warrants
+are bookkeeping, and a session that files a warrant, pays a fine, trades a town
+into an embargo and watches its people work a fortnight hashes the same ground
+as one where none of it happened. The day any of it reaches for a block — a
+resident who really digs — that test goes red.
+
+**Surface.** No new key. `TOWN` at the terminal names the offices, what each
+resident is worth and where the paperwork stands, including which other towns
+hold paper on you; `WHO` gains an office column and a trust column; the beacon
+console gains a civic block under the price list. `--town` catches the console
+with its seats named and `--warrant` the same console with a signature on it
+and the market shut. Journal **VERSION 25** is unchanged — nothing here is an
+order, because nothing here touches the ground.
+
+**Deliberately not in 39:** elections, which are B3; residents who walk to a
+job you can watch them do; a resident's purse that anybody can steal; deputies
+who arrest on a warrant from a town you are not standing in; and any way to
+hold office yourself — the ballot box is the next round's.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -2456,7 +2537,9 @@ it gets lost between rounds.
 
 See the stage 11 section above.
 
-### B2 — Towns that work: offices and the warrant chain
+### B2 — Towns that work: offices and the warrant chain — **shipped as stage 39**
+
+See the stage 39 section above. What follows is the design as it was written.
 
 Named town offices: **Mayor, Sheriff (plus deputies), Shop clerk, Residents**.
 Every individual in town runs the same loop the player does — mine or gather,
@@ -2543,18 +2626,19 @@ The hunt note is finished: its engine landed in 28, its director half in 29,
 and its stalker in 31 alongside the deep resources it hunts you through. The
 toy is finished too — the pocket arcade shipped in 34 — and **the forest note
 is finished as of 38**: three forests in 35, felling in 36, the fluid in 37,
-and the weather, the fire and the succession clock in 38. What is left on the
-board is the civic layer, which has been waiting since 11.
+and the weather, the fire and the succession clock in 38. The civic layer that
+had been waiting since 11 is two thirds done: B1 in 11 and **B2 in 39**. What
+is left of it is the ballot box.
 
 | Stage | What | Why here |
 |---|---|---|
-| 39 | Civic layer B2 | Town offices, residents who run the player's own economic loop, and the warrant chain |
-| 40 | Civic layer B3 | Elections on the beacon console, votes cast on trade goodwill, and offices the player can hold |
+| 40 | Civic layer B3 | Elections on the beacon console, votes cast on trade goodwill, and offices the player can hold — the goodwill it counts is the trust ledger stage 39 just built |
 | 41 | Seasons on the weather clock | The sky is already pure in the tick and the succession clock already runs on days; a slow annual term over both is what turns a burn scar into a thing you watch across a year |
+| 42 | The floating-origin rebase | The oldest thing on the outstanding list, and the one that stops mattering only until somebody walks far enough |
 
 ## The feature map
 
-The whole game at a glance, as of stage 38.
+The whole game at a glance, as of stage 39.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -2679,11 +2763,19 @@ uphill and downwind, every wooden thing burnable wherever it stands and
 ancient wood burnable nowhere) and the succession clock behind it (only
 disturbed cells stored, cut or burnt alike, coming back through meadow,
 thicket and mixed stand as the tree the seed always described);
+towns that are run by somebody (a mayor and a sheriff drawn without
+replacement off the town's own seed, residents who put goods on the books and
+credits in their pockets on the hours the schedule already gave them, trust
+bought with business rather than kindness and spent on somebody's front door,
+and a warrant chain where the sheriff has to ask a mayor with an opinion of
+you — a fine when the paperwork is filed, a closed counter while it stands,
+and deputies only on a signature);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** the civic layer B2 (offices, the NPC economic loop,
-the warrant chain) and B3 (elections on trade goodwill); then seasons over the
-weather and succession clocks that already run.
+**Planned, in arc order:** the civic layer B3 (elections on the beacon
+console, votes cast on the trade goodwill B2 just built, and offices the player
+can hold); then seasons over the weather and succession clocks that already
+run; then the floating-origin rebase.
 
 **Outstanding engineering:** floating-origin rebase; journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the

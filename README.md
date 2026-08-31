@@ -829,6 +829,52 @@ worked out from the world seed and the tick. Two machines on the same tick get
 the same storm over the same hill, and a saved game replayed from its own
 journal burns exactly the ground it burned the first time.
 
+### Somebody runs the town
+
+Every town on the frontier has a **mayor** and a **sheriff** now, and they are
+people off its own roster rather than a word on a lockbox — with names, jobs
+and temperaments, worked out from the town's seed so the same place is run by
+the same pair however you arrive at it. Type `TOWN` at the terminal and it will
+tell you who they are, what everybody who lives there is worth, what they are
+doing right now, and where you stand with each of them.
+
+**And the townsfolk work.** They have always had a trade and a place to be at
+any hour; those two facts now mean something. When the schedule has somebody at
+their bench they are putting goods on the town's books and credits in their own
+pocket, on the same clock the market has always run on. Walk into a place on a
+market day and its shelves genuinely differ from the same place at four in the
+morning, because its people are at the square instead of at work. Nothing about
+it is stored: a resident's purse is the shifts they have worked, worked out
+from the seed and the tick, so every person in every town in the world has
+money in their pocket and the save is not one byte bigger for it.
+
+**Trade with somebody enough and they will trust you**, which is a different
+thing from liking you. Friendship you buy with gifts and conversation. Trust
+you buy with business — and once you have done enough of it, they will hand you
+a key to their own door rather than leaving you to pick the lock. A trader who
+never gave anybody a present in their life can still end up with the run of a
+town.
+
+### The sheriff has to ask somebody
+
+Rack up enough bounty and the deputies used to simply appear. Now the sheriff
+cannot act alone: he has to take it to the **mayor** and get a warrant signed,
+and the mayor is a person with an opinion of you.
+
+A proud one signs because the law is the law. A nervy one stalls. One you have
+been good to for a season will find reasons to leave the paperwork in a drawer
+— and a refusal is a **reprieve, not a pardon**, because he can be asked again
+in a few minutes. What friendship buys you is time. Rob a bank vault and it is
+signed before the ink is dry, whoever your friends are.
+
+It costs you either way. The moment the paperwork is filed there is a **fine**,
+and what your wallet cannot cover goes straight back onto the bounty — being
+broke and in trouble is worse than being solvent and in trouble. And that
+town's **counter shuts to you** while anything stands: not a worse price, a
+closed door. So there is a whole middle now between "nothing happened" and
+"there are four lads with guns coming over the hill", and you can talk, pay or
+run your way out of it.
+
 ### There is a game on the handheld
 
 Print a `POCKET ARCADE` cartridge at a fabricator — it is dear, and it sits
@@ -1221,7 +1267,7 @@ Controls:
 | `0` | The pump, once you have printed one |
 | `E` | A pump you have placed: switch it on, and it lifts whatever water it can reach out of the top |
 | `E` | A word with the nearest townsperson when nothing solid is in reach — or, if somebody nearby has their hands up, take them in for the board's pay |
-| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `patch` spends a medkit on you, `law` reads the deputies, `standing` your name with both peoples, `wells` every hole you have sunk, `weather` the sky, the wind and how dry the woods are |
+| `T` | The terminal — type `help`; `who`, `talk` and `gift <good>` are the townsfolk's verbs, `kit` lists your upgrades, `repair` mends a machine, `patch` spends a medkit on you, `law` reads the deputies, `standing` your name with both peoples, `wells` every hole you have sunk, `weather` the sky, the wind and how dry the woods are, `town` who runs this place and what it has out on you |
 | `E` | A printed wellhead, once it is standing: the mud log says whether anything shows under this column, and `Enter` spuds the hole in |
 | `E` | A cot in any town's clinic: rest for nothing, or buy a medkit for the road |
 | `L` | Turn the optics dial: lamp, then any printed visor, then off |
@@ -1630,6 +1676,10 @@ cargo run --release -p vx-app -- --screenshot storm.ppm --at 0,10 --storm
 # a stand alight running upslope, and the same ground once it has come back
 cargo run --release -p vx-app -- --screenshot fire.ppm --at 0,10 --fire burning
 cargo run --release -p vx-app -- --screenshot after.ppm --at 0,10 --fire after
+
+# the beacon console with its offices, and the same console with a warrant on it
+cargo run --release -p vx-app -- --screenshot town.ppm --at 0,10 --town
+cargo run --release -p vx-app -- --screenshot warrant.ppm --at 0,10 --warrant
 
 # a stand of each forest, found rather than hard-coded
 cargo run --release -p vx-app -- --screenshot cove.ppm --at 0,10 --forest cove

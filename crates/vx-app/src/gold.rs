@@ -516,6 +516,7 @@ mod tests {
                 &crate::intrusion::Intrusions::default(),
                 1,
                 &[],
+                true,
             )
         };
         assert_ne!(

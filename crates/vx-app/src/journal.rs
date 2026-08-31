@@ -2977,3 +2977,86 @@ mod fire_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod civic_tests {
+    use super::*;
+    use vx_core::ChunkPos;
+    use vx_world::region_hash;
+
+    /// The whole civic layer leaves the ground exactly as it found it.
+    ///
+    /// The inverse of every other oracle test in this file, and the claim
+    /// stage 39 rests on. Offices, wages, trust and warrants are bookkeeping:
+    /// a session that files a warrant, pays a fine, trades a town into an
+    /// embargo and watches its residents work for a fortnight must hash the
+    /// same ground as one where none of it happened. If any of it ever
+    /// reaches for a block — a resident who actually digs, a fine that burns
+    /// something down — this is the test that goes red.
+    #[test]
+    fn the_civic_layer_never_touches_the_ground() {
+        let patch = || {
+            let mut world = World::new(2024);
+            world.load_around(ChunkPos::new(0, 0), 4);
+            world
+        };
+        let span = (
+            vx_core::BlockPos::new(-60, 40, -60),
+            vx_core::BlockPos::new(60, 200, 60),
+        );
+
+        // A plain fortnight, and the same fortnight with the whole civic
+        // layer run over the top of it.
+        let mut journal = CommandLog::default();
+        journal.record(Command::Advance {
+            ticks: crate::schedule::TICKS_PER_DAY as u32 * 14,
+        });
+
+        let mut quiet = patch();
+        replay(&journal, &mut quiet, &EventBus::new());
+        let untouched = region_hash(&quiet, span.0, span.1);
+
+        let mut governed = patch();
+        let played = replay(&journal, &mut governed, &EventBus::new());
+
+        let site = vx_world::town::home_site();
+        let mayor = crate::office::seat(&site, crate::permits::Office::Mayor);
+
+        // Every resident works the fortnight, and the town's books move.
+        let mut economy = crate::economy::Economy::new();
+        let _ = economy.market(&site, played.tick).clone();
+        for index in 0..crate::people::PEOPLE {
+            assert!(crate::economy::purse(&site, index, played.tick) > 0);
+        }
+
+        // Business enough to be handed a key, which is a permits grant.
+        let mut friends = crate::disposition::Disposition::default();
+        let key = (site.centre, 1u8);
+        for day in 0..40 {
+            friends.trade(key, 900, day);
+        }
+        assert!(friends.trusted_with_a_key(key));
+
+        // And paper filed, signed and paid for.
+        let mut docket = crate::warrant::Docket::default();
+        let filed = docket
+            .file(
+                &site,
+                &mayor,
+                friends.tier(key),
+                friends.trust(key),
+                crate::warrant::SIGNS_REGARDLESS,
+                played.tick,
+            )
+            .expect("the sheriff never filed");
+        assert!(filed.fine > 0);
+        assert!(docket.granted_in(site.centre));
+        assert!(docket.pending_in(site.centre), "the counter stayed open");
+
+        assert_eq!(
+            region_hash(&governed, span.0, span.1),
+            untouched,
+            "the civic layer moved a block"
+        );
+    }
+}

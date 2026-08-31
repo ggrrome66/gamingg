@@ -241,8 +241,151 @@ pub fn opening_books(site: &TownSite) -> Market {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The people who live there
+// ---------------------------------------------------------------------------
+
+/// What one resident puts on the books in a tick of their shift.
+///
+/// Deliberately a fraction of what the town's own works do: the extraction
+/// table is the mine, the mill and the yard, and a resident is one pair of
+/// hands beside it. Three of them add roughly a fifth to a town's output —
+/// enough that a town with its people at work reads differently from one with
+/// its people in bed, and not enough to make the works decorative.
+pub const HANDS: f32 = 0.0040;
+
+/// What one resident burns in a tick, awake or asleep. Timber: their fire,
+/// their roof and their tools.
+pub const BOARD: f32 = 0.0022;
+
+/// And what they spend on market day, when they are at the square buying
+/// rather than at the bench making.
+pub const SPENDING: f32 = 0.0009;
+
+/// What a trade actually makes.
+///
+/// Per trade rather than per town, so a town's three residents are three
+/// different contributions to its books instead of one rate multiplied by
+/// three. `None` is honest rather than lazy: an ostler keeps the animals and
+/// a tallyman counts what is already there, and a town whose people all
+/// produce is a town with no services in it.
+fn made_by(trade: &str) -> Option<usize> {
+    Some(match trade {
+        "FOREMAN" | "ASSAYER" => ORE,
+        "POWDERMAN" => STONE,
+        "SMELTERMAN" | "GAUGER" => BAR,
+        "STOKER" => HHO,
+        "CLERK" | "OSTLER" => LOG,
+        // The tallyman counts the pile; he does not add to it.
+        _ => return None,
+    })
+}
+
+/// How hard this particular person works, `0.6` to `1.4`.
+///
+/// Its own salt off the town's seed rather than a re-use of
+/// [`Temperament::warmth`](crate::people::Temperament): a warm person is not
+/// necessarily a diligent one, and folding the two would make every friendly
+/// shopkeeper in the world rich.
+pub fn diligence(site: &TownSite, index: usize) -> f32 {
+    let hash = vx_world::seed::finalise(
+        site.seed
+            ^ 0x0d11_6e6e_0000_0001
+            ^ (index as u64 + 1).wrapping_mul(0xc2b2_ae3d_27d4_eb4f),
+    );
+    0.6 + vx_world::seed::unit(hash) * 0.8
+}
+
+/// The clock a market step sits on, as the schedule reads it.
+///
+/// A step is 240 journal ticks and a day is 9 600, so there are forty of them
+/// in a day — half an hour of town time each, which is fine enough that the
+/// books notice the difference between a working morning and a market
+/// afternoon.
+fn when(step: u64) -> (u32, crate::clock::TimeOfDay) {
+    let tick = step * STEP;
+    let day = (tick / crate::schedule::TICKS_PER_DAY) as u32;
+    let through = (tick % crate::schedule::TICKS_PER_DAY) as f32
+        / crate::schedule::TICKS_PER_DAY as f32;
+    (day, crate::clock::TimeOfDay::new(through))
+}
+
+/// What the town's own people did with this step.
+///
+/// Pure in `(site, step)` — it reads the schedule, which is pure in the same
+/// things — so it inherits the market's quantised catch-up for free: running
+/// forty steps at once is the same forty steps.
+fn residents(market: &mut Market, site: &TownSite, step: u64) {
+    let dt = STEP as f32;
+    let (day, time) = when(step);
+    for index in 0..crate::people::PEOPLE {
+        let place = crate::schedule::where_is(site, index, day, time, false);
+        // Everyone burns their board, awake or asleep — a house does not stop
+        // costing anything because nobody is standing in it.
+        let board = match place {
+            crate::schedule::Place::Home => BOARD * 0.5,
+            _ => BOARD,
+        };
+        market.stock[LOG] = (market.stock[LOG] - board * dt).max(0.0);
+
+        match place {
+            crate::schedule::Place::Workplace => {
+                let person = crate::people::person(site, index);
+                if let Some(good) = made_by(person.trade) {
+                    let rate = HANDS * diligence(site, index);
+                    market.stock[good] = (market.stock[good] + rate * dt).min(CAPACITY);
+                }
+            }
+            // Market day at the square: they are buying finished goods off
+            // the town's own shelves, which is what a market day *is*.
+            crate::schedule::Place::Plaza if crate::schedule::is_market_day(site, day) => {
+                market.stock[BAR] = (market.stock[BAR] - SPENDING * dt).max(0.0);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What one resident has in their pocket at `tick`.
+///
+/// Derived rather than stored, the same trick the forest and the weather use:
+/// a purse is the shifts they have worked times what their hands are worth,
+/// so nothing has to be written down for every person in every town in the
+/// world. It is what the note means by "credits are the end goal of every
+/// individual, NPC and player alike" — with the arithmetic made honest by
+/// the fact that a resident who does not work does not earn.
+///
+/// Costed off the town's own price for what they make, at the reference
+/// rather than the live book: a wage that swung with the market every time
+/// you looked at it would be a wage nobody could count.
+pub fn purse(site: &TownSite, index: usize, tick: u64) -> u64 {
+    let person = crate::people::person(site, index);
+    let Some(good) = made_by(person.trade) else {
+        // Services are paid a flat town wage rather than by the unit.
+        return worked_steps(site, index, tick) * 3;
+    };
+    let made = HANDS * diligence(site, index) * STEP as f32;
+    let unit = BASE_PRICE[good];
+    (worked_steps(site, index, tick) as f32 * made * unit) as u64
+}
+
+/// How many market steps this person has actually been at work for.
+fn worked_steps(site: &TownSite, index: usize, tick: u64) -> u64 {
+    let mut worked = 0;
+    for step in 0..tick / STEP {
+        let (day, time) = when(step);
+        if crate::schedule::where_is(site, index, day, time, false)
+            == crate::schedule::Place::Workplace
+        {
+            worked += 1;
+        }
+    }
+    worked
+}
+
 /// Advance one market by exactly one [`STEP`].
-fn step_market(market: &mut Market, speciality: Speciality) {
+fn step_market(market: &mut Market, site: &TownSite, step: u64) {
+    let speciality = site.speciality;
     let dt = STEP as f32;
 
     // Out of the ground first: unconditional, and stops at capacity.
@@ -267,6 +410,11 @@ fn step_market(market: &mut Market, speciality: Speciality) {
         }
         market.stock[output] = (market.stock[output] + rate * run).min(CAPACITY);
     }
+
+    // Then the people who live there, who make and eat on the hours the
+    // schedule gives them. Between the works and the town's own burn, because
+    // a resident is a smaller thing than a mill and a larger one than a lamp.
+    residents(market, site, step);
 
     // Then what the town simply burns through, down to nothing at worst.
     for (good, rate) in consumption(speciality).into_iter().enumerate() {
@@ -398,8 +546,8 @@ impl Economy {
         // 10 000" even where a clamp binds.
         let due = now / STEP;
         let done = market.last_tick / STEP;
-        for _ in done..due {
-            step_market(market, site.speciality);
+        for step in done..due {
+            step_market(market, site, step);
         }
         market.last_tick = due * STEP;
         market
@@ -744,6 +892,102 @@ mod tests {
             .into_iter()
             .find(|site| site.speciality == speciality)
             .unwrap_or_else(|| panic!("no {} on the fixture frontier", speciality.name()))
+    }
+
+    /// A resident's purse is arithmetic on the seed and the clock, not a
+    /// number somebody wrote down — which is what lets every town in the
+    /// world have people with money in their pockets and cost the save
+    /// nothing.
+    #[test]
+    fn a_purse_is_derived_and_never_stored() {
+        for site in frontier() {
+            for index in 0..crate::people::PEOPLE {
+                let asked = purse(&site, index, STEP * 200);
+                assert_eq!(asked, purse(&site, index, STEP * 200));
+            }
+        }
+    }
+
+    /// And it goes up, because they went to work. A day is forty steps and a
+    /// shift is most of it, so an honest day has to show.
+    #[test]
+    fn a_days_work_puts_something_in_a_pocket() {
+        let site = of(Speciality::Mine);
+        let day = crate::schedule::TICKS_PER_DAY;
+        for index in 0..crate::people::PEOPLE {
+            let after_one = purse(&site, index, day);
+            let after_three = purse(&site, index, day * 3);
+            assert!(after_one > 0, "resident {index} worked a day for nothing");
+            assert!(
+                after_three > after_one,
+                "resident {index} stopped earning: {after_one} then {after_three}"
+            );
+        }
+    }
+
+    /// Diligence varies, so a town's three residents are three different
+    /// people rather than one person copied — the check that the rate is a
+    /// draw and not a constant.
+    #[test]
+    fn no_two_towns_work_at_quite_the_same_rate() {
+        let mut rates = Vec::new();
+        for site in frontier() {
+            for index in 0..crate::people::PEOPLE {
+                rates.push(diligence(&site, index));
+            }
+        }
+        let first = rates[0];
+        assert!(
+            rates.iter().any(|rate| (rate - first).abs() > 0.05),
+            "every hand on the frontier works at exactly {first}"
+        );
+        assert!(rates.iter().all(|rate| (0.6..=1.4).contains(rate)));
+    }
+
+    /// The town's books notice what its people are doing. Run a market
+    /// through the working hours and through the small hours and the ledgers
+    /// diverge — which is the whole point of hanging the term on the
+    /// schedule rather than on a constant.
+    #[test]
+    fn the_books_read_differently_when_the_town_is_asleep() {
+        let site = of(Speciality::Mine);
+        // Six steps is three town hours: one block inside the working day,
+        // one block in the middle of the night.
+        let working = {
+            let mut economy = Economy::new();
+            let start = STEP * 20;
+            let before = economy.market(&site, start).clone();
+            let after = economy.market(&site, start + STEP * 6).clone();
+            after.stock(ORE) - before.stock(ORE)
+        };
+        let sleeping = {
+            let mut economy = Economy::new();
+            let start = STEP * 2;
+            let before = economy.market(&site, start).clone();
+            let after = economy.market(&site, start + STEP * 6).clone();
+            after.stock(ORE) - before.stock(ORE)
+        };
+        assert!(
+            working > sleeping,
+            "a mine made as much at four in the morning as at noon: {working} vs {sleeping}"
+        );
+    }
+
+    /// The town's own people can be told apart in its books: a tallyman
+    /// counts and does not produce, so not every resident is a source.
+    #[test]
+    fn a_town_has_services_as_well_as_producers() {
+        let mut making = 0;
+        let mut counting = 0;
+        for site in frontier() {
+            for index in 0..crate::people::PEOPLE {
+                match made_by(crate::people::person(&site, index).trade) {
+                    Some(_) => making += 1,
+                    None => counting += 1,
+                }
+            }
+        }
+        assert!(making > 0 && counting > 0, "{making} making, {counting} not");
     }
 
     #[test]

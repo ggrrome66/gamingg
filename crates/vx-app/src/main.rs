@@ -44,6 +44,7 @@ mod permits;
 mod electrolysis;
 mod fuel;
 mod movement;
+mod office;
 mod optics;
 mod printer;
 mod rain;
@@ -66,6 +67,7 @@ mod villagers;
 mod wear;
 mod well;
 mod wallet;
+mod warrant;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -260,6 +262,8 @@ struct Options {
     flood: Option<String>,
     storm: bool,
     fire: Option<String>,
+    /// Put real paperwork on the beacon panel's civic block.
+    warrant: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -316,6 +320,7 @@ fn parse_args() -> Result<Options, String> {
         flood: None,
         storm: false,
         fire: None,
+        warrant: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -409,6 +414,13 @@ fn parse_args() -> Result<Options, String> {
             "--fell" => options.fell = Some(value()?),
             "--flood" => options.flood = Some(value()?),
             "--storm" => options.storm = true,
+            // The civic panel is the beacon panel: `--town` is the plain
+            // one and `--warrant` is the same console with paper on it.
+            "--town" => options.board = true,
+            "--warrant" => {
+                options.board = true;
+                options.warrant = true;
+            }
             "--fire" => options.fire = Some(value()?),
             "--arcade" => {
                 options.device = true;
@@ -482,6 +494,8 @@ fn parse_args() -> Result<Options, String> {
                      --fell <when>       a stem mid-arc (swing) or lying down (down)\n  \
                      --flood <when>      a gallery cut into a lake (cut) or settled (level)\n  \
                      --storm             rain over the country with the sky down\n  \
+                     --town              the beacon console, with who runs the place\n  \
+                     --warrant           the same console with a warrant standing\n  \
                      --fire <when>       a stand alight (burning) or the ash after (after)\n  \
                      --view-distance <n> chunks visible in every direction (4-16, default 8)\n  \
                      --gold              enable the operator console (F10; dev builds only)\n  \
@@ -3764,6 +3778,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             &intrusion::Intrusions::default(),
             1,
             &[],
+            true,
         );
         let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
         let panel_height = shop::SHOP_HEIGHT as f32 * shop::SHOP_SCALE;
@@ -3825,6 +3840,30 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                 let rows = board::Board::rows_with_runs(here.centre, &postings, &ledger, &runs);
                 panel.move_cursor(rows.len() as i32, rows.len());
 
+                // Real paperwork rather than a drawn-on line: the sheriff
+                // files against the real threshold and the mayor of the
+                // hometown — authored `Proud` — makes the real decision.
+                let mut docket = warrant::Docket::default();
+                if options.warrant {
+                    let mayor = office::seat(&here, permits::Office::Mayor);
+                    let bounty = permits::WARRANT_THRESHOLD * 2;
+                    let filed = docket.file(
+                        &here,
+                        &mayor,
+                        disposition::Tier::Stranger,
+                        0,
+                        bounty,
+                        0,
+                    );
+                    println!(
+                        "warrant capture: {} on {} CR — {:?}, fine {} CR",
+                        mayor.name,
+                        bounty,
+                        docket.get(here.centre).map(|paper| paper.stage.name()),
+                        filed.map_or(0, |filed| filed.fine)
+                    );
+                }
+                let civic = civic_snapshot(&here, &docket);
                 board::render_board(
                     &panel,
                     &board::Counter {
@@ -3832,6 +3871,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                         postings: &postings,
                         runs: &runs,
                         market: &market,
+                        civic: &civic,
                     },
                     &ledger,
                     &walletbook,
@@ -3916,6 +3956,34 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 /// Derived from the same yaw/pitch convention `Camera::forward` uses, so a
 /// framing that looks right here looks the same in the window.
 /// The rig for a stem on its way down, in its own species' wood.
+/// What the beacon panel should print about who runs this place.
+///
+/// A snapshot, not a borrow of the ledgers: the panel is a pure function over
+/// what it is given, which is why it can be tested without a town.
+fn civic_snapshot(site: &vx_world::town::TownSite, docket: &warrant::Docket) -> board::Civic {
+    let seats = office::OFFICES
+        .into_iter()
+        .map(|office| {
+            (
+                office::title(office).to_string(),
+                office::seat(site, office).name,
+            )
+        })
+        .collect();
+    let warrant = docket.get(site.centre).map(|paper| {
+        format!(
+            "WARRANT {} - FILED ON {} CR",
+            paper.stage.name(),
+            paper.at_bounty
+        )
+    });
+    board::Civic {
+        seats,
+        warrant,
+        closed: docket.pending_in(site.centre),
+    }
+}
+
 fn trunk_rig(fall: &felling::Falling) -> rig::Rig {
     use vx_render::tiles::slot;
     let (bark, crown) = match fall.species {
@@ -4155,6 +4223,9 @@ struct Active {
     /// And what is growing back, which is the one part of this round that
     /// outlives a session.
     stands: succession::Ledger,
+    /// What the towns have open on you: who has asked the mayor for paper,
+    /// who got it, and who was told to wait.
+    warrants: warrant::Docket,
     /// The speaker, when the machine has one.
     audio: audio::Audio,
     /// The launcher's viewmodel shape, built once.
@@ -5321,7 +5392,28 @@ impl App {
             active
                 .garrisons
                 .muster_near(&active.world, active.player.position);
-            let wanted = active.permits.borrow().wanted();
+            // The chain, which is what stands between a bounty and a posse
+            // now. The sheriff asks; the mayor decides; the town starts
+            // leaning on you the moment the asking happens.
+            let town = *active.villagers.site();
+            let tick = active.journal.tick();
+            active.warrants.lapse(tick);
+            let bounty = active.permits.borrow().bounty;
+            if bounty >= permits::WARRANT_THRESHOLD {
+                let mayor = office::seat(&town, permits::Office::Mayor);
+                let key = (town.centre, office::holder(&town, permits::Office::Mayor) as u8);
+                let tier = active.friends.tier(key);
+                let trust = active.friends.trust(key);
+                if let Some(filed) =
+                    active.warrants.file(&town, &mayor, tier, trust, bounty, tick)
+                {
+                    Self::pay_the_fine(active, &town, &mayor, filed.fine);
+                }
+            } else {
+                // Settle the bill and the paperwork goes in the drawer.
+                active.warrants.clear(town.centre);
+            }
+            let wanted = active.warrants.granted_in(town.centre);
             if wanted && !active.posse.called_out() {
                 let seed = active.journal.tick() ^ 0x51ed_5eed;
                 let at = active.player.position;
@@ -5332,10 +5424,12 @@ impl App {
                         .map_or(at.y, |top| (top + 1) as f32)
                 };
                 active.posse.call_out(at, ground, seed);
-                active.greeting = Some((
-                    "A WARRANT IS OUT. DEPUTIES ARE COMING".into(),
-                    Instant::now(),
-                ));
+                let line = format!(
+                    "{} SIGNED THE WARRANT. DEPUTIES ARE COMING",
+                    office::seat(&town, permits::Office::Mayor).name
+                );
+                active.terminal.say(terminal::Kind::Warn, line.clone());
+                active.greeting = Some((line, Instant::now()));
             }
             if !wanted && active.posse.called_out() {
                 // Settle the bill and they lose interest.
@@ -5416,6 +5510,10 @@ impl App {
         let settled = active.wallet.spend(paid);
         debug_assert!(settled, "the arrest charged more than the wallet held");
         active.permits.borrow_mut().bounty = 0;
+        // The sheet is clear, so every town's paperwork goes with it — a
+        // warrant that survived the arrest it was served for would be a
+        // sentence nobody ever finishes.
+        active.warrants.clear_all();
         active.posse.stand_down();
         // Whatever was in the dark loses interest too: you are a long way
         // up and a long way off, and the deep does not follow anybody home.
@@ -6244,14 +6342,107 @@ impl App {
                 for (index, person) in people::roster(&site).iter().enumerate() {
                     let key = (site.centre, index as u8);
                     let place = schedule::where_is(&site, index, day, active.clock, false);
+                    // The office and the trust are the civic round's columns:
+                    // who is somebody here, and how far they will go with you
+                    // on business rather than on kindness.
+                    let seat = office::office_of(&site, index)
+                        .map_or("", |office| office::title(office));
                     lines.push(format!(
-                        "{:<22} {:<8} {:<12} {}",
+                        "{:<22} {:<8} {:<8} {:<11} TRUST {:<5} {}",
                         person.name,
+                        seat,
                         person.temperament.archetype.name(),
                         active.friends.tier(key).name(),
+                        active.friends.trust(key),
                         place.name()
                     ));
                 }
+                lines
+            }
+            "town" => {
+                // The whole civic layer in one screen: who runs it, what the
+                // people who live here are worth, and where the paperwork on
+                // you has got to.
+                let site = *active.villagers.site();
+                let tick = active.journal.tick();
+                let day = (tick / schedule::TICKS_PER_DAY) as u32;
+                let mut lines = vec![
+                    format!(
+                        "{}{} - {} AT {} {}",
+                        site.name.head(),
+                        site.name.tail(),
+                        site.speciality.name(),
+                        site.centre.0,
+                        site.centre.1
+                    ),
+                ];
+                for office in office::OFFICES {
+                    let index = office::holder(&site, office);
+                    let person = people::person(&site, index);
+                    let key = (site.centre, index as u8);
+                    lines.push(format!(
+                        "{:<8} {:<22} {:<11} TRUST {}",
+                        office::title(office),
+                        person.name,
+                        active.friends.tier(key).name(),
+                        active.friends.trust(key)
+                    ));
+                }
+                lines.push(format!(
+                    "MARKET DAY IS {}",
+                    ["ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN"]
+                        [schedule::market_weekday(&site) as usize % 7]
+                ));
+                for (index, person) in people::roster(&site).iter().enumerate() {
+                    let place = schedule::where_is(&site, index, day, active.clock, false);
+                    lines.push(format!(
+                        "{:<22} {:<10} {:<11} {} CR",
+                        person.name,
+                        person.trade,
+                        place.name(),
+                        economy::purse(&site, index, tick)
+                    ));
+                }
+                // And what the rest of the frontier has out on you, because
+                // walking to the next town is the obvious move and finding
+                // out there that its counter is shut too should not be a
+                // surprise.
+                let elsewhere: Vec<String> = active
+                    .warrants
+                    .iter()
+                    .filter(|(town, _)| *town != site.centre)
+                    .map(|(town, paper)| {
+                        format!("ALSO {} AT {} {}", paper.stage.name(), town.0, town.1)
+                    })
+                    .collect();
+                let bounty = active.permits.borrow().bounty;
+                match active.warrants.get(site.centre) {
+                    Some(paper) => {
+                        lines.push(format!(
+                            "WARRANT  {} - FILED ON {} CR",
+                            paper.stage.name(),
+                            paper.at_bounty
+                        ));
+                        if active.warrants.pending_in(site.centre) {
+                            lines.push("THE COUNTER IS CLOSED TO YOU".into());
+                        }
+                    }
+                    None if bounty > 0 => {
+                        lines.push(format!(
+                            "WARRANT  NONE - BOUNTY {bounty} OF {} NEEDED",
+                            permits::WARRANT_THRESHOLD
+                        ));
+                    }
+                    None => lines.push("WARRANT  NOTHING ON YOU HERE".into()),
+                }
+                if !active.warrants.is_empty() {
+                    lines.push(format!(
+                        "{} TOWN{} HOLD PAPER ON YOU",
+                        active.warrants.len(),
+                        if active.warrants.len() == 1 { "" } else { "S" }
+                    ));
+                }
+                lines.extend(elsewhere);
                 lines
             }
             "talk" => {
@@ -6381,13 +6572,21 @@ impl App {
     /// At Close, a key: an authenticate-rung grant to this person's own
     /// door, through the permit system, not around it. Fires once — a
     /// granted key stays granted.
-    fn close_tier_key(
+    fn door_opens(
         active: &mut Active,
         site: &vx_world::town::TownSite,
         index: usize,
         person: &people::Person,
     ) -> Option<String> {
-        if active.friends.tier((site.centre, index as u8)) < disposition::Tier::Close {
+        // Two ways in, and they are different relationships. Close is a
+        // friend handing you a key. Trust is a supplier deciding you are
+        // somebody they do business with — the note's "trust through trade",
+        // and the reason a trader who never gave anybody a gift can still
+        // end up with the run of a town.
+        let key = (site.centre, index as u8);
+        let friendly = active.friends.tier(key) >= disposition::Tier::Close;
+        let trusted = active.friends.trusted_with_a_key(key);
+        if !friendly && !trusted {
             return None;
         }
         let claim = permits::claims_for(site)
@@ -6398,10 +6597,67 @@ impl App {
             return None;
         }
         permits.grant(claim.key);
-        Some(format!(
-            "{} TRUSTS YOU WITH A KEY TO {}",
-            person.name, claim.label
-        ))
+        let why = if friendly { "TRUSTS YOU WITH" } else { "DOES ENOUGH BUSINESS TO HAND YOU" };
+        Some(format!("{} {} A KEY TO {}", person.name, why, claim.label))
+    }
+
+    /// The town's bill for the paperwork.
+    ///
+    /// Credits first. What the wallet cannot cover is not forgiven — it goes
+    /// back onto the bounty, so a fine you cannot pay makes you more wanted,
+    /// which is the honest consequence of being broke and in trouble.
+    fn pay_the_fine(
+        active: &mut Active,
+        town: &vx_world::town::TownSite,
+        mayor: &people::Person,
+        fine: u64,
+    ) {
+        if fine == 0 {
+            return;
+        }
+        let paid = active.wallet.credits().min(fine);
+        let _ = active.wallet.spend(paid);
+        let owed = fine - paid;
+        if owed > 0 {
+            active.permits.borrow_mut().billed(owed);
+        }
+        let granted = active.warrants.granted_in(town.centre);
+        let line = if granted {
+            format!("{} SIGNED. FINED {fine} CR", mayor.name)
+        } else {
+            format!("{} IS THINKING ABOUT IT. FINED {fine} CR", mayor.name)
+        };
+        active.terminal.say(terminal::Kind::Warn, line.clone());
+        active.greeting = Some((line, Instant::now()));
+        if owed > 0 {
+            let short = format!("YOU COULD NOT PAY. {owed} CR ADDED TO THE BOUNTY");
+            active.terminal.say(terminal::Kind::Warn, short.clone());
+        }
+        // And the market closes while the paperwork stands. Said once, here,
+        // rather than checked at the counter and explained nowhere.
+        active
+            .terminal
+            .say(terminal::Kind::Warn, format!("{} HAS CLOSED ITS COUNTER TO YOU", town.name.head()));
+    }
+
+    /// Put a sale on somebody's slate.
+    ///
+    /// Whoever is standing close enough is who you dealt with; failing that,
+    /// whoever the schedule has minding the counter. Nothing is recorded in
+    /// the journal, because nothing here touches the ground — the pile and
+    /// the market moved through paths that are already replayed, and what a
+    /// resident thinks of you was never in the hash.
+    fn book_the_trade(active: &mut Active, site: &vx_world::town::TownSite, earned: u64) {
+        let day = (active.journal.tick() / schedule::TICKS_PER_DAY) as u32;
+        let index = Self::nearest_person(active)
+            .unwrap_or_else(|| office::at_the_counter(site, day, active.clock));
+        let key = (site.centre, index as u8);
+        active.friends.trade(key, earned, day);
+        let person = people::person(site, index);
+        if let Some(line) = Self::door_opens(active, site, index, &person) {
+            active.terminal.say(terminal::Kind::Note, line.clone());
+            active.greeting = Some((line, Instant::now()));
+        }
     }
 
     /// A word with the nearest townsperson. The ledger takes the
@@ -6432,7 +6688,7 @@ impl App {
             person.name,
             people::line_for(&person, tier, &facts)
         )];
-        if let Some(granted) = Self::close_tier_key(active, &site, index, &person) {
+        if let Some(granted) = Self::door_opens(active, &site, index, &person) {
             lines.push(granted);
         }
         lines
@@ -6508,7 +6764,7 @@ impl App {
                 person.name
             ),
         }];
-        if let Some(granted) = Self::close_tier_key(active, &site, index, &person) {
+        if let Some(granted) = Self::door_opens(active, &site, index, &person) {
             lines.push(granted);
         }
         lines
@@ -8357,6 +8613,8 @@ impl App {
                         now,
                     };
                     let compact_before = active.wallet.credits();
+                    // A town with paper out on you will not deal with you.
+                    let closed = active.warrants.pending_in(site.centre);
                     active.shop.confirm(
                         pile,
                         &mut active.wallet,
@@ -8368,13 +8626,20 @@ impl App {
                         &offers,
                         Some(&mut post),
                         active.reputation.compact(),
+                        !closed,
                     );
                     *active.economy.market_mut(&site, now) = market;
                     // Honest trade is how a county comes to know you: a
                     // trickle per sale, seasons to matter.
                     if active.wallet.credits() > compact_before {
+                        let earned = active.wallet.credits() - compact_before;
                         let band = active.reputation.with_compact(reputation::TRADE_COMPACT);
                         Self::note_band(active, "THE TOWNS", band);
+                        // And how one person comes to know you. The faction
+                        // ledger is the county's opinion; this is the opinion
+                        // of whoever was actually on the other side of the
+                        // counter, which is the one that opens their door.
+                        Self::book_the_trade(active, &site, earned);
                     }
                 }
                 KeyCode::KeyE | KeyCode::Escape => {
@@ -9341,6 +9606,7 @@ impl App {
             &active.intrusion,
             active.skills.level(skills::SECURITY),
             &active.offers,
+            !active.warrants.pending_in(site.centre),
         );
         let (width, height) = active.renderer.size();
         let panel_width = shop::SHOP_WIDTH as f32 * shop::SHOP_SCALE;
@@ -9780,6 +10046,7 @@ impl App {
             explored: &active.map,
             traffic: &traffic,
         };
+        let civic = civic_snapshot(&here, &active.warrants);
         let pixels = board::render_board(
             &active.board,
             &board::Counter {
@@ -9787,6 +10054,7 @@ impl App {
                 postings: &postings,
                 runs: &runs,
                 market: &market,
+                civic: &civic,
             },
             &active.ledger,
             &active.wallet,
@@ -10478,6 +10746,9 @@ impl App {
         if let Err(error) = active.stands.save(save.root()) {
             log::error!("could not save the disturbed stands: {error}");
         }
+        if let Err(error) = active.warrants.save(save.root()) {
+            log::error!("could not save the towns' warrants: {error}");
+        }
         if let Err(error) = active.reputation.save(save.root()) {
             log::error!("could not save the player's reputation: {error}");
         }
@@ -10676,6 +10947,7 @@ impl ApplicationHandler for App {
         let mut holes = well::Wells::default();
         let mut cabinet = arcade::Arcade::default();
         let mut stands = succession::Ledger::default();
+        let mut warrants = warrant::Docket::default();
         let mut condition = health::Health::default();
         let mut name = reputation::Reputation::default();
         let mut vaults = bank::Bank::default();
@@ -10712,6 +10984,9 @@ impl ApplicationHandler for App {
             // And which stands are still coming back, because a burn that a
             // reload forgot would be a burn that never healed.
             stands.load(save.root());
+            // And whose paperwork is out on you, for the same reason: a
+            // warrant a reload forgot would be a warrant that never happened.
+            warrants.load(save.root());
             condition.load(save.root());
             name.load(save.root());
             vaults.load(save.root());
@@ -10829,6 +11104,7 @@ impl ApplicationHandler for App {
             pump_step: 0,
             fires: Vec::new(),
             stands,
+            warrants,
             audio: audio::Audio::open(),
             launcher_rig: Rig::launcher(),
             shake: 0.0,

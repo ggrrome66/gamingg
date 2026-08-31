@@ -385,6 +385,15 @@ impl Permits {
         self.bounty += points;
     }
 
+    /// Far enough past the threshold for the sheriff to take it to the
+    /// mayor.
+    ///
+    /// **Not** "deputies are coming" any more. Stage 39 put a chain between
+    /// the two: this is the sheriff's interest, and
+    /// [`crate::warrant::Docket::granted_in`] is the signature that actually
+    /// sends anybody. The HUD tints on this because the bounty being over
+    /// the line is the thing a player needs to see; what the mayor does with
+    /// it is on the beacon panel and the `TOWN` verb.
     pub fn wanted(&self) -> bool {
         self.bounty >= WARRANT_THRESHOLD
     }

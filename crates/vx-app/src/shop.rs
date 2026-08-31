@@ -30,6 +30,8 @@ const TEXT: [u8; 4] = [235, 235, 235, 255];
 const DIM: [u8; 4] = [150, 150, 155, 255];
 const ACCENT: [u8; 4] = [255, 170, 60, 255];
 const GOOD: [u8; 4] = [120, 220, 120, 255];
+/// A refusal: the closed counter, and whatever else the town will not do.
+const BAD: [u8; 4] = [225, 95, 85, 255];
 const BACKGROUND: [u8; 4] = [10, 12, 16, 235];
 
 /// What this town pays per block, by namespaced name.
@@ -239,7 +241,16 @@ impl Shop {
         offers: &[Offer],
         post: Option<&mut MailContext>,
         standing: crate::reputation::Standing,
+        open: bool,
     ) {
+        // The civic round's consequence short of force: a town with paper out
+        // on you does not do business with you. It rides here rather than in
+        // a second code path, because a closed counter is a counter — the
+        // same rows, the same cursor, and one refusal at the front.
+        if !open {
+            self.feedback = Some("THE COUNTER IS CLOSED TO YOU".into());
+            return;
+        }
         let rows = Shop::rows(
             pile.as_deref(),
             walletbook,
@@ -463,6 +474,7 @@ pub fn render_shop(
     kit: &Intrusions,
     security: u32,
     offers: &[Offer],
+    open: bool,
 ) -> Vec<u8> {
     let mut pixels = vec![0u8; (SHOP_WIDTH * SHOP_HEIGHT * 4) as usize];
     for texel in pixels.chunks_exact_mut(4) {
@@ -484,6 +496,21 @@ pub fn render_shop(
         &credits,
     );
     y += LINE_HEIGHT as i32 + 3;
+
+    // Said at the top rather than only on a refused keypress: a player who
+    // walks into a closed shop should be able to see that it is closed.
+    if !open {
+        font::draw_text(
+            &mut pixels,
+            SHOP_WIDTH,
+            margin,
+            y,
+            1,
+            BAD,
+            "CLOSED - THERE IS PAPER OUT ON YOU",
+        );
+        y += LINE_HEIGHT as i32 + 2;
+    }
 
     let rows = Shop::rows(pile, walletbook, market, shed, rack, kit, security, offers);
     if rows.is_empty() {
@@ -719,8 +746,49 @@ mod tests {
         shop.open_at_counter();
         let mut wallet = Wallet::new();
         // Cursor 0 lands on the first Buy row (no pile rows exist).
-        shop.confirm(None, &mut wallet, &mut market(), &mut Garage::new(), &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None, crate::reputation::Standing::Neutral);
+        shop.confirm(None, &mut wallet, &mut market(), &mut Garage::new(), &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None, crate::reputation::Standing::Neutral, true);
         assert_eq!(shop.feedback.as_deref(), Some("NOT ENOUGH CR"));
+    }
+
+    /// A closed counter changes nothing. The civic round's consequence short
+    /// of force has to be a refusal rather than a worse price, or a player
+    /// with a warrant out simply pays a little more and carries on.
+    #[test]
+    fn a_closed_counter_refuses_the_sale_and_moves_nothing() {
+        let mut pile = Stockpile::default();
+        pile.add("engine:copper_ore", 40);
+        let mut wallet = Wallet::default();
+        let mut market = market();
+        let mut shop = Shop::new();
+        shop.open_at_counter();
+
+        let before = (wallet.credits(), pile.count("engine:copper_ore"), market.clone());
+        shop.confirm(
+            Some(&mut pile),
+            &mut wallet,
+            &mut market,
+            &mut Garage::new(),
+            &mut Arsenal::default(),
+            &mut Intrusions::default(),
+            1,
+            &[],
+            None,
+            crate::reputation::Standing::Neutral,
+            false,
+        );
+        assert_eq!(wallet.credits(), before.0, "a closed shop paid out");
+        assert_eq!(pile.count("engine:copper_ore"), before.1, "the pile moved");
+        assert_eq!(market, before.2, "the books moved");
+        assert_eq!(
+            shop.feedback.as_deref(),
+            Some("THE COUNTER IS CLOSED TO YOU")
+        );
+
+        // And the panel says so, rather than looking like an ordinary shop
+        // that ignores the button.
+        let open = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &Arsenal::default(), &Intrusions::default(), 1, &[], true);
+        let shut = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &Arsenal::default(), &Intrusions::default(), 1, &[], false);
+        assert_ne!(open, shut, "the closed counter draws the same panel");
     }
 
     #[test]
@@ -746,12 +814,12 @@ mod tests {
         let pile = stocked_pile();
 
         let market = market();
-        let a = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &Arsenal::default(), &Intrusions::default(), 1, &[]);
-        let b = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &Arsenal::default(), &Intrusions::default(), 1, &[]);
+        let a = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &Arsenal::default(), &Intrusions::default(), 1, &[], true);
+        let b = render_shop(&shop, Some(&pile), &wallet, &town(), &market, &Garage::new(), &Arsenal::default(), &Intrusions::default(), 1, &[], true);
         assert_eq!(a.len(), (SHOP_WIDTH * SHOP_HEIGHT * 4) as usize);
         assert_eq!(a, b);
 
-        let empty = render_shop(&shop, None, &wallet, &town(), &market, &Garage::new(), &Arsenal::default(), &Intrusions::default(), 1, &[]);
+        let empty = render_shop(&shop, None, &wallet, &town(), &market, &Garage::new(), &Arsenal::default(), &Intrusions::default(), 1, &[], true);
         assert_ne!(a, empty, "an empty shop drew a full shelf");
     }
 
@@ -773,12 +841,12 @@ mod tests {
             .expect("no drone on the shelf");
         shop.move_cursor(at as i32, rows.len());
 
-        shop.confirm(None, &mut wallet, &mut market, &mut shed, &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None, crate::reputation::Standing::Neutral);
+        shop.confirm(None, &mut wallet, &mut market, &mut shed, &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None, crate::reputation::Standing::Neutral, true);
         assert_eq!(shed.owned(garage::DRONE), 1, "the drone never arrived");
         assert_eq!(wallet.credits(), 0, "the wrong amount was spent");
 
         // And a second one is refused, because it costs more than the first.
-        shop.confirm(None, &mut wallet, &mut market, &mut shed, &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None, crate::reputation::Standing::Neutral);
+        shop.confirm(None, &mut wallet, &mut market, &mut shed, &mut Arsenal::default(), &mut Intrusions::default(), 1, &[], None, crate::reputation::Standing::Neutral, true);
         assert_eq!(shed.owned(garage::DRONE), 1, "a drone was bought on credit");
         assert_eq!(shop.feedback.as_deref(), Some("NOT ENOUGH CR"));
     }

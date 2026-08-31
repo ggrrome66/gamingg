@@ -16,6 +16,21 @@
 //! buys intel: a bearing to a bunker, the stage 19 loot loop fed by talk.
 //! Close hands you a key — an actual grant through the permits system, to
 //! that person's own door, through the rungs and not around them.
+//!
+//! # Two numbers, one ledger
+//!
+//! The civic round adds **trust**, which is not friendship. Friendship is
+//! what you buy with gifts and conversation; trust is what you buy with
+//! business, and the note is specific that it is business that opens a door
+//! — "trust through trade is the per-resident stat that unlocks guest
+//! authorization on their building".
+//!
+//! They live on the same ledger rather than in a second file, because a
+//! second file would be this one again: the same sparse map, the same
+//! [`PersonKey`], the same save. A `Trade` entry counts toward both, and
+//! [`Disposition::trust`] reads only the trade entries — so a stranger you
+//! have made rich can be let through the door without ever having been
+//! liked, and somebody's oldest friend is not automatically their supplier.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -24,7 +39,11 @@ use std::path::Path;
 use crate::people::Person;
 
 const MAGIC: &[u8; 4] = b"VXDS";
-const VERSION: u32 = 1;
+/// Two adds the `Trade` entry. Version one files still load — the layout is
+/// the same list of tagged entries and one simply has no trades in it, so
+/// dropping them would throw away friendships somebody earned for nothing.
+const VERSION: u32 = 2;
+const OLDEST: u32 = 1;
 
 /// A person, addressed the way the permits system addresses beds: town
 /// centre and resident index.
@@ -37,6 +56,20 @@ pub const NEUTRAL: i64 = 8;
 pub const HATED: i64 = -50;
 /// The first conversation of a day.
 pub const TALKED: i64 = 2;
+
+/// How many credits of business are worth one point of trust.
+///
+/// A good haul off a full pile is a few hundred credits, so a solid day's
+/// trading is worth a dozen or so points and [`TRUSTED_TRADE`] is a
+/// relationship rather than an afternoon.
+pub const CREDITS_PER_POINT: u64 = 20;
+
+/// The most one deal can be worth, however big it was. A vault's worth of
+/// bars sold in one go is a good day, not a lifetime of dealing.
+pub const TRADE_CAP: i64 = 40;
+
+/// Trust enough to be handed a key to their door.
+pub const TRUSTED_TRADE: i64 = 400;
 
 /// Gifts that score per rolling week.
 pub const GIFTS_PER_WEEK: usize = 2;
@@ -86,12 +119,19 @@ enum Entry {
     /// the bounty billed. Disposition and law stay linked but distinct: the
     /// sheriff wants credits, a neighbour just thinks less of you.
     Crime { day: u32, points: i64 },
+    /// Business done across their counter, scored from what it was worth.
+    /// Counts toward the friendship total *and* is the only thing that
+    /// counts toward trust.
+    Trade { day: u32, points: i64 },
 }
 
 impl Entry {
     fn day(&self) -> u32 {
         match self {
-            Entry::Gift { day, .. } | Entry::Talk { day } | Entry::Crime { day, .. } => *day,
+            Entry::Gift { day, .. }
+            | Entry::Talk { day }
+            | Entry::Crime { day, .. }
+            | Entry::Trade { day, .. } => *day,
         }
     }
 }
@@ -121,7 +161,9 @@ impl Disposition {
                 entries
                     .iter()
                     .map(|entry| match entry {
-                        Entry::Gift { points, .. } | Entry::Crime { points, .. } => *points,
+                        Entry::Gift { points, .. }
+                        | Entry::Crime { points, .. }
+                        | Entry::Trade { points, .. } => *points,
                         Entry::Talk { .. } => TALKED,
                     })
                     .sum()
@@ -131,6 +173,40 @@ impl Disposition {
 
     pub fn tier(&self, key: PersonKey) -> Tier {
         Tier::for_points(self.points(key))
+    }
+
+    /// What this person will trust you with, which is a different question
+    /// from what they think of you: only business counts, and only upward —
+    /// a crime lowers their opinion, but it does not un-buy the goods.
+    pub fn trust(&self, key: PersonKey) -> i64 {
+        self.ledgers.get(&key).map_or(0, |entries| {
+            entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Trade { points, .. } => Some(*points),
+                    _ => None,
+                })
+                .sum()
+        })
+    }
+
+    /// Enough business done to be let through their door.
+    pub fn trusted_with_a_key(&self, key: PersonKey) -> bool {
+        self.trust(key) >= TRUSTED_TRADE
+    }
+
+    /// Business done, in credits. Returns what it was worth.
+    ///
+    /// No weekly cap and no birthday multiplier: this is not a kindness, it
+    /// is a transaction, and the only limit is [`TRADE_CAP`] on any one deal
+    /// so a single enormous sale does not buy a key outright.
+    pub fn trade(&mut self, key: PersonKey, credits: u64, day: u32) -> i64 {
+        let points = ((credits / CREDITS_PER_POINT) as i64).clamp(1, TRADE_CAP);
+        self.ledgers
+            .entry(key)
+            .or_default()
+            .push(Entry::Trade { day, points });
+        points
     }
 
     /// Hand a person a good on a day. The caller has already taken the good
@@ -227,6 +303,11 @@ impl Disposition {
                         file.write_all(&day.to_le_bytes())?;
                         file.write_all(&points.to_le_bytes())?;
                     }
+                    Entry::Trade { day, points } => {
+                        file.write_all(&[3u8])?;
+                        file.write_all(&day.to_le_bytes())?;
+                        file.write_all(&points.to_le_bytes())?;
+                    }
                 }
             }
         }
@@ -268,7 +349,10 @@ fn read_ledgers(path: &Path) -> std::io::Result<Option<Ledgers>> {
     let mut long = [0u8; 8];
     let mut byte = [0u8; 1];
     file.read_exact(&mut word)?;
-    if u32::from_le_bytes(word) != VERSION {
+    let version = u32::from_le_bytes(word);
+    // Anything from `OLDEST` up reads with this loop; a file from the future
+    // is refused rather than guessed at, as every loader here does.
+    if !(OLDEST..=VERSION).contains(&version) {
         return Ok(None);
     }
     file.read_exact(&mut word)?;
@@ -297,6 +381,13 @@ fn read_ledgers(path: &Path) -> std::io::Result<Option<Ledgers>> {
                     }
                 }
                 1 => Entry::Talk { day },
+                3 => {
+                    file.read_exact(&mut long)?;
+                    Entry::Trade {
+                        day,
+                        points: i64::from_le_bytes(long),
+                    }
+                }
                 _ => {
                     file.read_exact(&mut long)?;
                     Entry::Crime {
@@ -411,6 +502,79 @@ mod tests {
         assert_eq!(ledger.points(((512, 512), 0)), 0);
     }
 
+    /// Trust is business and friendship is kindness. Gifts do not open a
+    /// supplier's door and deals do not make somebody your friend — the two
+    /// numbers ride the same ledger and stay separate.
+    #[test]
+    fn trust_is_bought_with_business_and_friendship_with_gifts() {
+        let prat = someone();
+        let mut ledger = Disposition::default();
+        let key = ((0, 0), 2);
+
+        // Four gifts across four weeks: real friendship, no trust.
+        for week in 0..4 {
+            ledger.gift(key, &prat, "engine:log", week * 7 + 1);
+        }
+        assert!(ledger.points(key) > 0, "gifts scored nothing");
+        assert_eq!(ledger.trust(key), 0, "a present is not a purchase order");
+        assert!(!ledger.trusted_with_a_key(key));
+
+        // And business, which counts toward both — a supplier does warm to
+        // you — but only one of them opens the door.
+        let mut trader = Disposition::default();
+        let other = ((0, 0), 1);
+        for day in 0..30 {
+            trader.trade(other, 800, day);
+        }
+        assert!(trader.trust(other) >= TRUSTED_TRADE, "{}", trader.trust(other));
+        assert!(trader.trusted_with_a_key(other));
+        assert!(trader.points(other) > 0, "business counted for nothing at all");
+    }
+
+    /// One enormous sale is a good day, not a relationship, and the smallest
+    /// one still counts for something.
+    #[test]
+    fn a_single_deal_is_capped_at_both_ends() {
+        let mut ledger = Disposition::default();
+        let key = ((0, 0), 0);
+        assert_eq!(ledger.trade(key, 1_000_000, 1), TRADE_CAP);
+        let mut small = Disposition::default();
+        assert_eq!(small.trade(key, 1, 1), 1);
+    }
+
+    /// A friends file written before trade existed still loads, with the
+    /// friendships in it intact. Dropping them would have been the easy read
+    /// of "tolerant" and the wrong one.
+    #[test]
+    fn a_ledger_from_before_trade_still_loads() {
+        use std::io::Write;
+        let directory =
+            std::env::temp_dir().join(format!("vx-friends-old-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("friends.dat");
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            file.write_all(MAGIC).unwrap();
+            file.write_all(&OLDEST.to_le_bytes()).unwrap();
+            file.write_all(&1u32.to_le_bytes()).unwrap(); // one person
+            file.write_all(&0i32.to_le_bytes()).unwrap();
+            file.write_all(&0i32.to_le_bytes()).unwrap();
+            file.write_all(&[2u8]).unwrap(); // resident index
+            file.write_all(&2u32.to_le_bytes()).unwrap(); // two entries
+            file.write_all(&[0u8]).unwrap(); // a gift
+            file.write_all(&3u32.to_le_bytes()).unwrap();
+            file.write_all(&90i64.to_le_bytes()).unwrap();
+            file.write_all(&[1u8]).unwrap(); // and a chat
+            file.write_all(&3u32.to_le_bytes()).unwrap();
+        }
+        let mut loaded = Disposition::default();
+        loaded.load(&directory);
+        let key = ((0, 0), 2);
+        assert_eq!(loaded.points(key), 90 + TALKED);
+        assert_eq!(loaded.trust(key), 0);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     #[test]
     fn the_ledger_survives_a_save() {
         let directory =
@@ -423,12 +587,15 @@ mod tests {
         ledger.gift(key, &prat, "engine:log", 3);
         ledger.talk(key, 3);
         ledger.crime((0, 0), 60, 4);
+        ledger.trade(key, 640, 4);
         ledger.save(&directory).unwrap();
 
         let mut loaded = Disposition::default();
         loaded.load(&directory);
         assert_eq!(loaded.points(key), ledger.points(key));
         assert_eq!(loaded.tier(key), ledger.tier(key));
+        assert_eq!(loaded.trust(key), ledger.trust(key));
+        assert!(loaded.trust(key) > 0, "the trade did not survive the write");
         std::fs::remove_dir_all(&directory).ok();
     }
 }

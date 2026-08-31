@@ -105,6 +105,7 @@ const VERBS: &[Verb] = &[
     Verb { name: "law", help: "WHAT THE DEPUTIES ARE DOING, AND HOW THEIR NERVE IS" },
     Verb { name: "standing", help: "YOUR NAME WITH THE TOWNS AND THE SHELTERS" },
     Verb { name: "who", help: "THE TOWN ROSTER, AND WHERE EVERYBODY IS" },
+    Verb { name: "town", help: "WHO RUNS THIS PLACE, WHAT IT EARNS, AND THE WARRANT" },
     Verb { name: "talk", help: "A WORD WITH THE NEAREST TOWNSFOLK" },
     Verb { name: "gift", help: "GIFT GOOD, HAND THE NEAREST PERSON ONE" },
     Verb { name: "scout", help: "ORBIT, DOCK, PERCH, VANGUARD, SORTIE X Z" },
@@ -161,6 +162,7 @@ pub fn parse(line: &str) -> Parsed {
         "status" | "fleet" | "where" | "bank" | "pile" | "who" | "talk" | "gift"
         | "kit" | "repair" | "law" | "standing" | "wells" | "patch" => Parsed::Ask(verb, rest),
         "weather" | "sky" | "forecast" => Parsed::Ask("weather".into(), rest),
+        "town" | "hall" | "council" => Parsed::Ask("town".into(), rest),
         "scout" => match rest.first().map(String::as_str) {
             Some("orbit") => Parsed::Run(Order::Scout(crate::journal::ScoutOrder::Orbit)),
             Some("dock") | Some("home") => {
