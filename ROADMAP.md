@@ -117,7 +117,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 39 | `ef06f2b` | Towns that work: every town has a mayor and a sheriff who are people off its own roster, its residents put goods on its books and credits in their pockets on the hours the schedule already gave them, trading with somebody buys enough trust to be handed a key to their door — and a bounty is no longer a posse, because the sheriff has to get a warrant from a mayor with an opinion of you, with a fine and a closed counter on the way there |
 | 40 | `4cdda7c` | The ballot box: a town's seats stop being permanent — it votes on its own market day, once a term, and the residents cast on the business you have put across their counters, so you can put your name in at the beacon console and be elected sheriff or mayor; a badge now belongs to the town that gave it rather than to the whole frontier, and a mayor cannot sign his own warrant, so paper on a town you run goes up the road to the next mayor along |
 | 41 | `4856472` | Seasons: the twenty-eight day year the roster already counted for birthdays now runs the sky and the woods — a week each of spring, summer, autumn and winter, one season to an election term. The leaves turn gold and go bare and come back, the sward goes to straw, the spruce barely notice and the sky goes with them; **summer is a fire season** where the ground stays tinder days after a shower and lightning actually bites, winter is sodden and nothing will light; and the woods **stop growing over the winter**, so a stand you burn in October is still black in February and only starts coming back in the spring |
-| 42 | _this_ | The floating origin: the renderer draws relative to the chunk the camera stands in — the camera's corner and every chunk's corner are exact integers, subtracted in the vertex shader before anything reaches a float multiply — and the player's body, its physics, the camera and the aim ray move to `f64`, so the millimetre skin the collision sweep runs on means what it says everywhere. Proved the only way it can be: the same scene renders byte-identical sixteen hundred kilometres out, and the same journal walks the same walk at spawn and at three thousand |
+| 42 | `7beb30b` | The floating origin: the renderer draws relative to the chunk the camera stands in — the camera's corner and every chunk's corner are exact integers, subtracted in the vertex shader before anything reaches a float multiply — and the player's body, its physics, the camera and the aim ray move to `f64`, so the millimetre skin the collision sweep runs on means what it says everywhere. Proved the only way it can be: the same scene renders byte-identical sixteen hundred kilometres out, and the same journal walks the same walk at spawn and at three thousand |
+| 43 | _this_ | Founding a town, and taking one — the civic note's other two routes into office. Print a charter, stand on flat dry ground a lattice cell clear of anybody, and `FOUND IRON REACH`: the whole town is raised out of the ground by the same generator that draws every other one — plateau, tower, shed, clinic, bank, dwellings, lockboxes, the mini star, three settlers with the market already open — with you in both chairs and a founder's due that keeps you there through the quiet first terms. Or get a warrant, break the posse it sends, and `TAKE` at the console: both chairs are yours, the Compact hates it, every neighbouring mayor signs paper on you and the residents trust you nothing, so the town votes on you at its next poll and a town you took is a town you have to keep |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2534,6 +2535,86 @@ beside this item.
 
 ---
 
+## Shipped — Stage 43: founding a town, and taking one
+
+**The civic note's last two routes into office.** Stage 40 shipped the ballot
+box; the note also said a player could *found a new town and hold its offices
+by default*, or *take a town over — the hostile path, priced by the bounty
+system itself*. Both are in.
+
+**The gap, and the idiom that crosses it.** Every civic system — the roster,
+the offices, the market, the ballot, the permits, the schedule, the wall —
+takes a `TownSite` and keys on its centre or its seed, so a town that is not
+on the lattice slots into all of them unchanged. The one thing that could not
+see such a town was worldgen, which is pure in `(seed, cell)` and stays so. The
+project's answer is the one every round since 36 has used: a stored ledger
+whose effect on the ground is a journaled edit. `charter.rs` stores the sites
+founded and the charters printed; `World` gains a list of charters and answers
+`towns_near` with the lattice's towns and those together; and
+`TerrainGenerator::generate` is split so `generate_among(pos, sites)` can be
+asked for a chunk *as if the charter had always been on the map*.
+`World::raise(site)` regenerates every chunk the town reaches that way. So a
+founded town is built by exactly the code that builds every other one —
+blended plateau, paths, tower, shed, clinic, bank, dwellings, lockboxes, mini
+star, flora and cave masks — deterministic in `(seed, site)`, and the plot is
+levelled, which means anything dug there is filled.
+
+**Derived, not authored.** A charter's site is built as the lattice builds its
+own: ground clamped the same way, the hometown's core width, a seed hashed off
+the world's and the centre. Three settlers, their trades, the market's opening
+books and the fort's trace all fall out of that seed. It is named from the
+same sixteen-by-sixteen book every town is named from — `FOUND IRON REACH` —
+and nothing downstream can tell which kind of town it is looking at.
+
+**Founding is the ordinary oracle.** `Command::Found` (tag 26) carries the
+centre and the name; both sides derive the same site and raise it with the
+same generator, and the test replays a founding plus a broken plaza block to
+the live session's exact hash — founding alone first, then with the break, and
+again off the wire. The bookkeeping beside it — the charter consumed, the
+chairs, the badges, the beacon ledger — is live-only, as `Stand`'s is. Journal
+**VERSION 28**.
+
+**The founder's due.** A player in a chair now faces the man the seed named
+at every poll, without the incumbency bonus on the challenger's side — which is
+what makes a taken town a town you have to keep, and what would have thrown a
+founder out on the first quiet market day. So `standing_with` carries a
+founder's term, sized to carry a seat against anybody's regard for the native
+with nothing else on the sheet, and no more: the test holds a quiet founder in
+across every town on the frontier and shows a mere holder with the same empty
+books thrown out somewhere along it.
+
+**Taking is the inverted oracle.** A warrant calls out a posse as before; the
+posse now knows whose it is and can say when it is *broken* — every deputy down
+or surrendered. `TAKE` at that town's console records `Command::Take` (tag 27),
+which replays as nothing because a seat is a ledger entry, and the test says
+so with a hash. The price is every ledger that already exists reading the same
+fact: `TAKEN_COMPACT` and `TAKEN_HOLDOUTS` on the factions, a vault's worth on
+the bounty sheet so the neighbours' warrant chains fire on the next civic tick,
+and `Disposition::forfeit` tearing up every book in the town. With that sheet
+unpaid the next poll throws you out; paid down and bought back, it does not —
+the test runs both.
+
+**Found on the way past.** The register kept "polled this term" per town, so
+the first office polled on a market day quietly closed the ballot for the
+second: since stage 40 no sheriff's chair has ever come up for a vote. It is
+per seat now, `elections.dat` is version two (the old shape loads and closes
+both seats, which is what it meant), and the same bump carries the taken map.
+
+**Surface.** `FOUND <HEAD> <TAIL>` and `TAKE` at the terminal, with refusals in
+words — `TOO CLOSE TO STONEHAVEN`, `THE DEPUTIES ARE STILL STANDING - 2 OF
+THEM`, the name book when a word is not in it. `TOWN` and the console's civic
+block open with `FOUNDED BY YOU - DAY 12` or `TAKEN - DAY 30`. A `TOWN CHARTER`
+row at the top of the fabricator's ladder, one at a time. `--founded` founds a
+town at `--at` and frames it from outside its wall; `--taken` photographs the
+console of a town whose chairs you seized.
+
+**Deliberately not in 43:** choosing a founded town's speciality; settlers who
+migrate in over days rather than arriving with the charter; a town's own
+standing garrison (the posse is the defence); a salary for a seat; deputies
+who answer to you; abandoning or renaming a town.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -2776,8 +2857,9 @@ orders of magnitude.
 ## Planned — the civic layer: permits, offices, elections — **finished**
 
 The town-law arc, in three rounds, and **all three have shipped**: B1 as stage
-11, B2 as 39 and B3 as 40. The user's design is kept whole below, because the
-shipped sections above are written against it.
+11, B2 as 39 and B3 as 40 — with B3's other two routes into office, founding a
+town and taking one, following in 43. The user's design is kept whole below,
+because the shipped sections above are written against it.
 
 ### B1 — Build permissions and the bounty ledger — **shipped as stage 11**
 
@@ -2873,18 +2955,17 @@ clock in 38. And the civic layer, open since stage 11, closed in 40: B1 in 11,
 B2 in 39, B3 in 40.
 
 What follows is the board's own work rather than anybody's note. Seasons
-shipped in 41; the floating origin — the oldest item on the outstanding list —
-in 42.
+shipped in 41; the floating origin in 42; the civic note's last two routes into
+office — founding a town, and taking one — in 43.
 
 | Stage | What | Why here |
 |---|---|---|
-| 43 | Founding a town, and taking one | The two routes into office stage 40 left on the board. Both want the ballot box to exist first, and now it does |
 | 44 | Snow that settles, and ice | The only half of a winter stage 41 deliberately did not do, because it is the half that *edits blocks* — and that makes it a stage of its own, with the replay oracle to satisfy rather than the inverted one |
 | 45 | Entities in `f64` | Villagers, deputies and shots still carry `f32` positions, exact to a sixteenth of a block out to a thousand kilometres and a quarter of one at three thousand. Stage 42 drew the line at the things that travel; this moves it |
 
 ## The feature map
 
-The whole game at a glance, as of stage 42.
+The whole game at a glance, as of stage 43.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -3030,7 +3111,13 @@ growing clock that stops dead over the winter and still banks a full year in a
 year); the floating origin (the renderer draws relative to the camera's own
 chunk with the subtraction done on exact integers in the vertex shader, the
 player's body, physics, camera and aim ray in `f64`, and the oracle that the
-same scene renders byte-identical sixteen hundred kilometres out); a Steam
+same scene renders byte-identical sixteen hundred kilometres out); towns of
+your own (a printed charter filed on open ground raises a whole town by the
+same generator that draws every other one, journaled as ground; three settlers
+and a market on day one; both chairs by default with a founder's due to keep
+them; and the hostile route — break a town's posse and seize its chairs at the
+console, priced by the factions, the bounty sheet, the neighbours' warrants and
+the residents' torn-up trust, so the town votes on you next term); a Steam
 Deck dist build every round.
 
 **Planned, in arc order:** seasons over the weather and succession clocks that

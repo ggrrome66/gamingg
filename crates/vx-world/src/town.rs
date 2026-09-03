@@ -50,11 +50,11 @@ pub const HOME_GROUND_Y: i32 = 72;
 pub const HOME_CORE_HALF: i32 = 26;
 
 /// Ground must clear the sea by this much for a town to be built on it.
-const MIN_DRY: i32 = 3;
+pub const MIN_DRY: i32 = 3;
 
 /// The most a town's plot may rise and fall before it is rejected as too
 /// steep. Towns belong in valleys and on plains, not bulldozed into a cliff.
-const MAX_RELIEF: i32 = 28;
+pub const MAX_RELIEF: i32 = 28;
 
 /// Fraction of lattice cells that hold a town at all.
 const PRESENCE: f32 = 0.55;
@@ -112,6 +112,36 @@ impl TownName {
     pub fn tail(self) -> &'static str {
         TAILS[self.tail as usize % TAILS.len()]
     }
+
+    /// A name from two words out of the book, for a town somebody founds.
+    ///
+    /// Case-insensitive, because it is typed at a terminal; `None` if either
+    /// word is not in the book, because a founded town is named from the
+    /// same sixteen-by-sixteen vocabulary every other town is — nothing
+    /// downstream can tell which kind it is, and that is the point.
+    pub fn from_words(head: &str, tail: &str) -> Option<TownName> {
+        let head = HEADS.iter().position(|word| word.eq_ignore_ascii_case(head.trim()))?;
+        let tail = TAILS.iter().position(|word| word.eq_ignore_ascii_case(tail.trim()))?;
+        Some(TownName {
+            head: head as u8,
+            tail: tail as u8,
+        })
+    }
+
+    /// The two indices, for the wire.
+    pub fn indices(self) -> (u8, u8) {
+        (self.head, self.tail)
+    }
+
+    /// A name back off the wire. Any byte is a name; the tables wrap.
+    pub fn from_indices(head: u8, tail: u8) -> TownName {
+        TownName { head, tail }
+    }
+}
+
+/// The book every town is named from: the head words and the tail words.
+pub fn name_book() -> (&'static [&'static str], &'static [&'static str]) {
+    (&HEADS, &TAILS)
 }
 
 impl std::fmt::Display for TownName {
@@ -216,19 +246,7 @@ fn site_in_cell(
     // Buildable: a town levels its plot, so it may not be asked to level a
     // mountainside. Probing the corners costs four noise evaluations, paid
     // only by candidates that got this far.
-    let mut lowest = ground;
-    let mut highest = ground;
-    for (dx, dz) in [
-        (-core_half, -core_half),
-        (core_half, -core_half),
-        (-core_half, core_half),
-        (core_half, core_half),
-    ] {
-        let corner = natural_height_at(centre.0 + dx, centre.1 + dz);
-        lowest = lowest.min(corner);
-        highest = highest.max(corner);
-    }
-    if highest - lowest > MAX_RELIEF {
+    if !buildable(natural_height_at, centre, core_half) {
         return None;
     }
 
@@ -251,6 +269,33 @@ fn site_in_cell(
             ^ (cell_x as i64 as u64).wrapping_mul(0x1656_67b1_9e37_79f9)
             ^ (cell_z as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
     })
+}
+
+/// Could a town level this plot?
+///
+/// The four corners of the core against the centre, within [`MAX_RELIEF`].
+/// The lattice asks it of every candidate cell; a founded town is asked the
+/// same question of the ground the player is standing on, so nobody gets to
+/// charter a mountainside the lattice would have refused.
+pub fn buildable(
+    natural_height_at: &impl Fn(i32, i32) -> i32,
+    centre: (i32, i32),
+    core_half: i32,
+) -> bool {
+    let ground = natural_height_at(centre.0, centre.1);
+    let mut lowest = ground;
+    let mut highest = ground;
+    for (dx, dz) in [
+        (-core_half, -core_half),
+        (core_half, -core_half),
+        (-core_half, core_half),
+        (core_half, core_half),
+    ] {
+        let corner = natural_height_at(centre.0 + dx, centre.1 + dz);
+        lowest = lowest.min(corner);
+        highest = highest.max(corner);
+    }
+    highest - lowest <= MAX_RELIEF
 }
 
 /// Every town whose core or skirt could reach the column box `min..=max`.

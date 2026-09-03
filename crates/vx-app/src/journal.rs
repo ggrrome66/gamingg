@@ -179,7 +179,7 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // the wire changed, but a log recorded under 26 replays its movement through
 // a different integrator and may land a block off where it did — so it is a
 // different version, and the loader stays as tolerant as it has always been.
-const VERSION: u32 = 27;
+const VERSION: u32 = 28;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -331,6 +331,22 @@ pub enum Command {
     /// the same reason `Talk` and `Gift` are — it is a thing the player did —
     /// and replay drops it, because nothing downstream of it touches a block.
     Stand { town: (i32, i32), office: u8, on: bool },
+    /// A town founded: where, and its name out of the book.
+    ///
+    /// The order is the ground. Founding *raises* a town — every chunk the
+    /// plot reaches is regenerated as if the charter had always been on the
+    /// map — so this is the ordinary oracle, not the inverted one: both sides
+    /// derive the same site from the same seed and the same centre, and both
+    /// sides raise it. What the charter cost and who sits in its chairs is
+    /// bookkeeping beside it, and replay drops that as it drops `Stand`.
+    Found { x: i32, z: i32, head: u8, tail: u8 },
+    /// A town taken: both chairs seized after its posse was broken.
+    ///
+    /// Recorded because the player did it; replayed as nothing, because a
+    /// seat is a ledger entry and a ledger entry is not ground. The price —
+    /// the factions, the bounty, the neighbours' paper, the residents' trust
+    /// — is every bit as live-only as the seat.
+    Take { town: (i32, i32) },
     /// A tree put on the ground: the stump block that was cut, and the face
     /// it was cut from.
     ///
@@ -766,17 +782,31 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 state.pumps.retain(|other| other != at);
             }
         }
-        Command::Stand { .. } => {
+        Command::Stand { .. } | Command::Take { .. } => {
             // Live-only. Who holds a seat decides who signs a warrant and
             // which locks open for you — credits, ledgers and paperwork, none
             // of which is ground. `Rebuilt` carries no register for the same
-            // reason it carries no wallet.
+            // reason it carries no wallet. Taking a town is the same fact
+            // with a fight in front of it, and the fight was slugs, which the
+            // log already carries.
+        }
+        Command::Found { x, z, head, tail } => {
+            // The site is derived exactly as the live game derived it — the
+            // world's seed, the centre and the name — and the town is raised
+            // by the same generator asked the same question. Deterministic in
+            // all of it, which is what puts founding on this side of the
+            // oracle rather than the inverted one.
+            let name = vx_world::town::TownName::from_indices(*head, *tail);
+            let generator = world.generator().clone();
+            let natural = |x: i32, z: i32| generator.natural_height_at(x, z);
+            let site = crate::charter::site_at(world.seed(), (*x, *z), name, &natural);
+            world.raise(site);
         }
         Command::Fell { at, face } => {
             // Find the tree the same way the live game did — off worldgen,
             // which is pure — and start the same stem falling. The arc is
             // ticked below, on the same clock as the slugs.
-            let sites = world.generator().towns_near((at.x, at.z), 96);
+            let sites = world.towns_near((at.x, at.z), 96);
             if let Some(tree) = crate::felling::standing_tree(world, *at, &sites) {
                 let lean = crate::felling::lean_at(world, tree.base.x, tree.base.z);
                 let (direction, chair) = crate::felling::aim(*face as usize, lean);
@@ -1009,7 +1039,7 @@ pub fn burn_and_grow(
 
     // And what is coming back. Once a day is plenty for a forest.
     if tick.is_multiple_of(64 * 30) && !stands.is_empty() {
-        let sites = world.generator().towns_near((at.x, at.z), 160);
+        let sites = world.towns_near((at.x, at.z), 160);
         stands.advance(world, tick, &sites);
     }
 }
@@ -1192,6 +1222,17 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             file.write_all(&town.0.to_le_bytes())?;
             file.write_all(&town.1.to_le_bytes())?;
             file.write_all(&[*office, u8::from(*on)])?;
+        }
+        Command::Found { x, z, head, tail } => {
+            file.write_all(&[26u8])?;
+            file.write_all(&x.to_le_bytes())?;
+            file.write_all(&z.to_le_bytes())?;
+            file.write_all(&[*head, *tail])?;
+        }
+        Command::Take { town } => {
+            file.write_all(&[27u8])?;
+            file.write_all(&town.0.to_le_bytes())?;
+            file.write_all(&town.1.to_le_bytes())?;
         }
         Command::Fell { at, face } => {
             file.write_all(&[23u8])?;
@@ -1550,6 +1591,29 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
                 office: pair[0],
                 on: pair[1] != 0,
             }
+        }
+        26 => {
+            let mut word = [0u8; 4];
+            file.read_exact(&mut word)?;
+            let x = i32::from_le_bytes(word);
+            file.read_exact(&mut word)?;
+            let z = i32::from_le_bytes(word);
+            let mut pair = [0u8; 2];
+            file.read_exact(&mut pair)?;
+            Command::Found {
+                x,
+                z,
+                head: pair[0],
+                tail: pair[1],
+            }
+        }
+        27 => {
+            let mut word = [0u8; 4];
+            file.read_exact(&mut word)?;
+            let x = i32::from_le_bytes(word);
+            file.read_exact(&mut word)?;
+            let z = i32::from_le_bytes(word);
+            Command::Take { town: (x, z) }
         }
         other => return Err(std::io::Error::other(format!("unknown command {other}"))),
     };
@@ -2579,7 +2643,6 @@ mod fire_tests {
 
             // Find a standing tree the same way the game does.
             let sites = world
-                .generator()
                 .towns_near((woods.0, woods.1), crate::felling::TOWN_REACH);
             let generator = world.generator();
             let height_at = |x: i32, z: i32| generator.height_with_sites(x, z, &sites);
@@ -3196,6 +3259,7 @@ mod civic_tests {
             incumbent_troubled: false,
             standing: true,
             seat: crate::permits::Office::Sheriff,
+            founder: false,
         };
         let held = register
             .hold(&field, crate::permits::Office::Sheriff, poll_day)
@@ -3328,7 +3392,6 @@ mod season_tests {
         };
         let near = |world: &World| {
             world
-                .generator()
                 .towns_overlapping((WOODS.0 - 80, WOODS.1 - 80), (WOODS.0 + 80, WOODS.1 + 80))
         };
 
@@ -3398,5 +3461,154 @@ mod season_tests {
             spring_ground, meadow,
             "nothing grew back, so the test proved nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod charter_tests {
+    use super::*;
+    use crate::charter;
+    use vx_core::ChunkPos;
+    use vx_world::region_hash;
+    use vx_world::town::{self, TownName};
+
+    /// The first plot east of the hometown the lattice left open, dry and
+    /// flat: where every founding below happens.
+    fn open_ground(world: &World) -> (i32, i32) {
+        let name = TownName::from_words("iron", "reach").unwrap();
+        (1..12)
+            .map(|step| (step * town::CELL + 60, 40))
+            .find(|at| charter::may_found(world, *at, name).is_ok())
+            .expect("no chartable ground within twelve cells")
+    }
+
+    /// **Founding is the ordinary oracle.** A journal that founds a town and
+    /// breaks a block in its plaza replays to exactly the ground the live
+    /// session left — the site is derived on both sides from the same seed
+    /// and centre, and both sides raise it with the same generator. And it is
+    /// a real town: the hash moved a long way from the empty hillside.
+    #[test]
+    fn a_founding_replays_to_the_same_town() {
+        let name = TownName::from_words("iron", "reach").unwrap();
+        let (head, tail) = name.indices();
+        let probe = World::new(2024);
+        let at = open_ground(&probe);
+        let site = charter::may_found(&probe, at, name).unwrap();
+        // A plain block of the levelled plaza, not a fixture: the counter and
+        // the mailbox are registered unbreakable, and the point is the
+        // ground under the town, not the furniture on it.
+        let counter = BlockPos::new(site.centre.0 + 7, site.ground, site.centre.1 + 7);
+        let span = (
+            BlockPos::new(at.0 - 56, 0, at.1 - 56),
+            BlockPos::new(at.0 + 56, 200, at.1 + 56),
+        );
+
+        // The live session: the order applied the way `found_a_town` does.
+        let mut lived = World::new(2024);
+        lived.raise(site);
+        assert_eq!(lived.towns_near(at, 8).first().map(|s| s.centre), Some(at));
+        let founded_hash = region_hash(&lived, span.0, span.1);
+        assert!(!lived.block(counter).is_air(), "the plaza block was already air");
+        assert!(
+            vx_world::break_block(&mut lived, &EventBus::new(), counter).is_ok(),
+            "the plaza block would not break"
+        );
+        let lived_hash = region_hash(&lived, span.0, span.1);
+        assert_ne!(lived_hash, founded_hash, "breaking a block changed nothing");
+
+        // Founding alone replays to the same ground.
+        let mut only_founded = CommandLog::default();
+        only_founded.record(Command::Found {
+            x: at.0,
+            z: at.1,
+            head,
+            tail,
+        });
+        let mut just_raised = World::new(2024);
+        replay(&only_founded, &mut just_raised, &EventBus::new());
+        assert_eq!(
+            region_hash(&just_raised, span.0, span.1),
+            founded_hash,
+            "the replayed founding is a different town before anybody touched it"
+        );
+
+        // The same two orders, replayed over a world that knows nothing.
+        let mut journal = CommandLog::default();
+        journal.record(Command::Found {
+            x: at.0,
+            z: at.1,
+            head,
+            tail,
+        });
+        journal.record(Command::Break { at: counter });
+        let mut replayed = World::new(2024);
+        replay(&journal, &mut replayed, &EventBus::new());
+        assert_eq!(
+            region_hash(&replayed, span.0, span.1),
+            lived_hash,
+            "the replayed founding is a different town"
+        );
+        assert_eq!(
+            replayed.towns_near(at, 8).first().map(|s| s.name),
+            Some(name),
+            "replay raised the ground but never told the world"
+        );
+
+        // And it survives the wire.
+        let directory = std::env::temp_dir().join(format!("vx-found-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+        let mut again = World::new(2024);
+        replay(&read_back, &mut again, &EventBus::new());
+        assert_eq!(region_hash(&again, span.0, span.1), lived_hash);
+
+        // Non-vacuous: a town is not an empty hillside.
+        let mut empty = World::new(2024);
+        empty.load_around(BlockPos::new(at.0, 0, at.1).chunk(), 5);
+        assert_ne!(region_hash(&empty, span.0, span.1), lived_hash);
+    }
+
+    /// **Taking is the inverted oracle.** `Take` over a journal moves no
+    /// block: the seats, the price and the paper are ledgers, and ledgers
+    /// are not ground.
+    #[test]
+    fn taking_a_town_moves_nothing() {
+        let site = town::towns_near(2024, (0, 0), 6_000, &|_, _| 90)
+            .into_iter()
+            .find(|site| !site.is_home())
+            .unwrap();
+        let span = (
+            BlockPos::new(-60, 40, -60),
+            BlockPos::new(60, 200, 60),
+        );
+        let patch = || {
+            let mut world = World::new(2024);
+            world.load_around(ChunkPos::new(0, 0), 4);
+            world
+        };
+        let mut journal = CommandLog::default();
+        journal.record(Command::Take { town: site.centre });
+        journal.record(Command::Advance {
+            ticks: crate::schedule::TICKS_PER_DAY as u32,
+        });
+        let mut taken = patch();
+        replay(&journal, &mut taken, &EventBus::new());
+        assert_eq!(
+            region_hash(&taken, span.0, span.1),
+            region_hash(&patch(), span.0, span.1),
+            "seizing a town's chairs moved a block"
+        );
+        // And the order round-trips.
+        let directory = std::env::temp_dir().join(format!("vx-take-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(matches!(
+            read_back.entries()[0].command,
+            Command::Take { town } if town == site.centre
+        ));
     }
 }

@@ -314,7 +314,7 @@ pub fn render_map_sized(
 
     // One lattice gather for the whole picture rather than one per pixel.
     let half = size / 2 * zoom;
-    let sites = world.generator().towns_overlapping(
+    let sites = world.towns_overlapping(
         (centre.0 - half, centre.1 - half),
         (centre.0 + half, centre.1 + half),
     );
@@ -660,7 +660,7 @@ mod tests {
         // Explored but unloaded: the recomputed-surface path, which is where
         // the town lattice has to be consulted.
         state.explore_around(ChunkPos::new(0, 0), 8);
-        let sites = world.generator().towns_overlapping((-128, -128), (128, 128));
+        let sites = world.towns_overlapping((-128, -128), (128, 128));
         assert!(!sites.is_empty(), "the hometown vanished");
 
         let (plot, _) = column_colour(&world, &state, &sites, 0, 0).expect("the plot is unmapped");

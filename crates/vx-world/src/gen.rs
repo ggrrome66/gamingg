@@ -616,12 +616,24 @@ impl TerrainGenerator {
 
     /// Generate the chunk at `pos`.
     pub fn generate(&self, pos: ChunkPos) -> Chunk {
-        let mut chunk = Chunk::empty(pos);
-        let origin = pos.origin();
-
         // The towns reaching this chunk, gathered once. Every helper below
         // shares the list, which is what keeps them agreeing about a column.
         let sites = self.sites_for_chunk(pos);
+        self.generate_among(pos, &sites)
+    }
+
+    /// Generate the chunk at `pos` as if `sites` were the towns reaching it.
+    ///
+    /// [`TerrainGenerator::generate`] hands this the lattice's answer, and
+    /// that is the only difference between them: this is pure in
+    /// `(seed, pos, sites)`, so a town that is not on the lattice — one
+    /// somebody founded — is raised by the same code, blended plateau, paths,
+    /// buildings, walls and masks alike, by asking for the chunk *among* a
+    /// list that includes it. The generator itself is told nothing and keeps
+    /// nothing; the caller owns what the extra sites are.
+    pub fn generate_among(&self, pos: ChunkPos, sites: &[TownSite]) -> Chunk {
+        let mut chunk = Chunk::empty(pos);
+        let origin = pos.origin();
         let bunkers = self.bunkers_for_chunk(pos);
 
         // Gather the ore bodies reaching this chunk once. Hashing the deposit
@@ -651,7 +663,7 @@ impl TerrainGenerator {
             for local_x in 0..CHUNK_SIZE {
                 let world_x = origin.x + local_x;
                 let world_z = origin.z + local_z;
-                let surface = self.height_with_sites(world_x, world_z, &sites);
+                let surface = self.height_with_sites(world_x, world_z, sites);
                 let biome = crate::forest::biome_at(self.seed, world_x, world_z, &natural_at);
                 self.fill_column(
                     &mut chunk,
@@ -661,7 +673,7 @@ impl TerrainGenerator {
                     biome,
                     &deposits,
                     &reservoirs,
-                    &sites,
+                    sites,
                     &bunkers,
                 );
             }
@@ -670,14 +682,14 @@ impl TerrainGenerator {
         // Trees, gathered like ore: every tree whose canopy reaches this
         // chunk, stamped only where it lands inside. Trunks overwrite the
         // tufts fill_column may have dropped on their base columns.
-        let height_at = |x: i32, z: i32| self.height_with_sites(x, z, &sites);
+        let height_at = |x: i32, z: i32| self.height_with_sites(x, z, sites);
         let mut trees = crate::flora::trees_overlapping(
             self.seed,
             (origin.x, origin.z),
             (origin.x + CHUNK_SIZE - 1, origin.z + CHUNK_SIZE - 1),
             &height_at,
             &natural_at,
-            &sites,
+            sites,
         );
         // No tree grows over a cave mouth: its base block was never placed.
         // The field is pure, so every chunk a canopy reaches drops the same
@@ -739,14 +751,14 @@ impl TerrainGenerator {
         }
 
         // Each town's authored buildings, where this chunk overlaps them.
-        crate::town::plan::stamp(&mut chunk, pos, &sites, &self.blocks);
+        crate::town::plan::stamp(&mut chunk, pos, sites, &self.blocks);
 
         // The walls a town has earned, raised on the blended ground the town
         // itself levelled — outside the buildings, so the order against the
         // town stamp does not matter, but after it for the same reason a real
         // one is: the place existed before it was worth walling.
-        crate::fort::stamp(&mut chunk, pos, &sites, &self.blocks, &|x, z| {
-            self.height_with_sites(x, z, &sites)
+        crate::fort::stamp(&mut chunk, pos, sites, &self.blocks, &|x, z| {
+            self.height_with_sites(x, z, sites)
         });
 
         // And whatever is buried here. Last, because a bunker is cut *into*

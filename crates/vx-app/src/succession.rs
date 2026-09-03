@@ -357,7 +357,6 @@ mod tests {
         let mut world = World::new(2024);
         world.load_around(ChunkPos::new(WOODS.0 / 16, WOODS.1 / 16), 3);
         let sites = world
-            .generator()
             .towns_overlapping((WOODS.0 - 80, WOODS.1 - 80), (WOODS.0 + 80, WOODS.1 + 80));
         (world, sites)
     }

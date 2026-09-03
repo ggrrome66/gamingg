@@ -10,6 +10,7 @@ use vx_core::{BlockId, BlockPos, BlockRegistry, ChunkPos, Face};
 
 use crate::chunk::{BlockView, Chunk};
 use crate::gen::{TerrainBlocks, TerrainGenerator};
+use crate::town::TownSite;
 
 /// Loaded chunks plus the generator that fills in missing ones.
 pub struct World {
@@ -34,6 +35,15 @@ pub struct World {
     /// work lasts. Counted rather than a flag, so overlapping operations
     /// cannot unpin each other's ground.
     pinned: HashMap<ChunkPos, u32>,
+    /// Towns that are not on the lattice: the ones somebody founded.
+    ///
+    /// A charter is a fact the world is *told*, the same way an edit is,
+    /// never one it derives — the generator stays pure in `(seed, pos)` and
+    /// knows nothing of these. What the world does with them is answer
+    /// [`World::towns_near`] with the lattice's towns and these together, so
+    /// everything downstream that asks "what towns are here" sees a founded
+    /// town without knowing it was founded.
+    charters: Vec<TownSite>,
 }
 
 impl World {
@@ -47,7 +57,112 @@ impl World {
             chunks: HashMap::new(),
             edit_count: 0,
             pinned: HashMap::new(),
+            charters: Vec::new(),
         }
+    }
+
+    /// Tell the world about a founded town.
+    ///
+    /// Idempotent on the centre, so a charter loaded from disk and the same
+    /// charter replayed from the journal do not double up.
+    pub fn found(&mut self, site: TownSite) {
+        if !self.charters.iter().any(|known| known.centre == site.centre) {
+            self.charters.push(site);
+        }
+    }
+
+    /// The founded towns, in the order they were founded.
+    pub fn charters(&self) -> &[TownSite] {
+        &self.charters
+    }
+
+    /// Every town within `radius` of `at`, nearest first — the lattice's
+    /// towns and the founded ones together.
+    ///
+    /// This, not the generator's own `towns_near`, is what the game asks:
+    /// the generator answers for the seed, the world answers for the seed
+    /// *and* what has been done in it.
+    pub fn towns_near(&self, at: (i32, i32), radius: i32) -> Vec<TownSite> {
+        let mut towns = self.generator.towns_near(at, radius);
+        let reach = radius as i64 * radius as i64;
+        for site in &self.charters {
+            let dx = (site.centre.0 - at.0) as i64;
+            let dz = (site.centre.1 - at.1) as i64;
+            if dx * dx + dz * dz <= reach {
+                towns.push(*site);
+            }
+        }
+        towns.sort_by_key(|site| {
+            let dx = (site.centre.0 - at.0) as i64;
+            let dz = (site.centre.1 - at.1) as i64;
+            dx * dx + dz * dz
+        });
+        towns
+    }
+
+    /// Every town whose footprint reaches into the box `min..=max`, the
+    /// lattice's and the founded ones together.
+    pub fn towns_overlapping(&self, min: (i32, i32), max: (i32, i32)) -> Vec<TownSite> {
+        let mut towns = self.generator.towns_overlapping(min, max);
+        for site in &self.charters {
+            let reach = site.core_half + crate::town::SKIRT;
+            let reaches = site.centre.0 + reach >= min.0
+                && site.centre.0 - reach <= max.0
+                && site.centre.1 + reach >= min.1
+                && site.centre.1 - reach <= max.1;
+            if reaches {
+                towns.push(*site);
+            }
+        }
+        towns
+    }
+
+    /// Raise a founded town out of the ground.
+    ///
+    /// Every chunk the town reaches is loaded and then **regenerated among
+    /// the lattice's towns plus this one** — the same code that builds every
+    /// other town, asked for the chunk as if the charter had always been on
+    /// the map. Blended plateau, paths, buildings, lockboxes, the wall, the
+    /// flora and cave masks: all of it, deterministic in `(seed, site)`,
+    /// which is what lets the journal replay a founding to the same ground.
+    ///
+    /// The plot is levelled, and that means **anything dug on it is
+    /// filled**. The regenerated chunks are marked modified so they save, and
+    /// dirty so they remesh. Returns how many chunks were raised.
+    pub fn raise(&mut self, site: TownSite) -> usize {
+        self.found(site);
+        let reach = crate::town::REACH;
+        let size = vx_core::CHUNK_SIZE;
+        let min = ChunkPos::new(
+            (site.centre.0 - reach).div_euclid(size),
+            (site.centre.1 - reach).div_euclid(size),
+        );
+        let max = ChunkPos::new(
+            (site.centre.0 + reach).div_euclid(size),
+            (site.centre.1 + reach).div_euclid(size),
+        );
+        let mut raised = 0;
+        for z in min.z..=max.z {
+            for x in min.x..=max.x {
+                let pos = ChunkPos::new(x, z);
+                let origin = pos.origin();
+                // The same gather the generator does for itself, with the
+                // charters folded in — so a founded town next to another
+                // founded town blends against it too.
+                let margin = crate::flora::CANOPY_REACH;
+                let sites = self.towns_overlapping(
+                    (origin.x - margin, origin.z - margin),
+                    (origin.x + size - 1 + margin, origin.z + size - 1 + margin),
+                );
+                let mut chunk = self.generator.generate_among(pos, &sites);
+                chunk.mark_modified();
+                chunk.mark_dirty();
+                self.chunks.insert(pos, chunk);
+                self.edit_count += 1;
+                raised += 1;
+            }
+        }
+        raised
     }
 
     pub fn registry(&self) -> &BlockRegistry {
@@ -567,5 +682,141 @@ mod tests {
         world.unpin_span(&span);
         world.unpin_span(&span);
         assert_eq!(world.pinned_count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod charter_tests {
+    use super::*;
+    use crate::town::{self, Speciality, TownName, TownSite};
+
+    /// A charter site a full cell east of the hometown, on ground the
+    /// lattice left empty.
+    fn charter(world: &World) -> TownSite {
+        let centre = (town::CELL + 60, 40);
+        let ground = world.generator().natural_height_at(centre.0, centre.1);
+        TownSite {
+            centre,
+            ground: ground.clamp(crate::gen::SEA_LEVEL + town::MIN_DRY + 1, 140),
+            core_half: town::HOME_CORE_HALF,
+            speciality: Speciality::Depot,
+            name: TownName::from_words("iron", "reach").unwrap(),
+            seed: 0x5eed_c4a7_7e55,
+        }
+    }
+
+    /// The world answers for the seed and for what was done in it: a founded
+    /// town is in `towns_near` the moment the world is told, and the lattice
+    /// still does not know it.
+    #[test]
+    fn a_founded_town_is_in_the_worlds_answer_but_not_the_lattices() {
+        let mut world = World::new(2024);
+        let site = charter(&world);
+        let before = world.towns_near(site.centre, 100);
+        assert!(before.iter().all(|known| known.centre != site.centre));
+
+        world.found(site);
+        world.found(site);
+        assert_eq!(world.charters().len(), 1, "telling the world twice doubled it");
+
+        let after = world.towns_near(site.centre, 100);
+        assert_eq!(after.first().map(|s| s.centre), Some(site.centre));
+        assert!(world.generator().towns_near(site.centre, 100).is_empty());
+        assert!(
+            world
+                .towns_overlapping((site.centre.0 - 8, site.centre.1 - 8), (site.centre.0 + 8, site.centre.1 + 8))
+                .iter()
+                .any(|s| s.centre == site.centre)
+        );
+    }
+
+    /// Day one: raising a charter puts the whole town in the ground — the
+    /// beacon, the counter, the vault, the cots, the wall — and it is the
+    /// same ground twice, because it is the same generator asked the same
+    /// question.
+    #[test]
+    fn raising_a_charter_puts_a_whole_town_in_the_ground_deterministically() {
+        let build = || {
+            let mut world = World::new(2024);
+            let site = charter(&world);
+            let centre = vx_core::BlockPos::new(site.centre.0, 0, site.centre.1).chunk();
+            world.load_around(centre, 5);
+            // Dig a hole where the plaza will be: the charter fills it.
+            let dug = vx_core::BlockPos::new(site.centre.0, site.ground, site.centre.1);
+            world.set_block(dug, BlockId::AIR);
+            let raised = world.raise(site);
+            (world, site, raised, dug)
+        };
+        let (world, site, raised, dug) = build();
+        assert!(raised >= 36, "only {raised} chunks were raised");
+
+        // The plot was levelled and the hole is gone.
+        assert!(!world.block(dug).is_air(), "the charter did not level the plot");
+
+        // The fixtures every other system reaches for are where they say.
+        let registry = world.registry();
+        let name_at = |at: vx_core::BlockPos| registry.get_or_air(world.block(at)).name.clone();
+        assert!(name_at(town::beacon_position(&site)).contains("beacon"), "no beacon: {}", name_at(town::beacon_position(&site)));
+        assert!(name_at(town::counter_position(&site)).contains("counter"), "no counter");
+        let buildings = town::plan::buildings(&site);
+        assert!(buildings.iter().any(|b| b.role == town::plan::Role::Bank), "no bank in the plan");
+        assert!(!town::plan::lockboxes(&site).is_empty(), "no lockboxes");
+        for (lock, _) in town::plan::lockboxes(&site) {
+            assert!(name_at(lock).contains("permit"), "lockbox missing at {lock:?}: {}", name_at(lock));
+        }
+        // And the wall: somewhere on the fort's reach there is a rampart.
+        let fort = crate::fort::fort_for(&site);
+        let mut walled = false;
+        for x in site.centre.0 - fort.reach()..=site.centre.0 + fort.reach() {
+            for y in site.ground..site.ground + 6 {
+                let at = vx_core::BlockPos::new(x, y, site.centre.1);
+                if name_at(at).contains("rampart") || name_at(at).contains("wall") {
+                    walled = true;
+                }
+            }
+        }
+        assert!(walled, "no wall was raised");
+
+        // Byte-identical the second time.
+        let (again, _, _, _) = build();
+        let span = (
+            vx_core::BlockPos::new(site.centre.0 - 64, 0, site.centre.1 - 64),
+            vx_core::BlockPos::new(site.centre.0 + 64, 200, site.centre.1 + 64),
+        );
+        assert_eq!(
+            crate::region_hash(&world, span.0, span.1),
+            crate::region_hash(&again, span.0, span.1),
+            "raising the same charter twice gave two different towns"
+        );
+
+        // Raised chunks save and remesh.
+        let centre = vx_core::BlockPos::new(site.centre.0, 0, site.centre.1).chunk();
+        assert!(world.chunk(centre).unwrap().is_modified());
+        assert!(world.chunk(centre).unwrap().is_dirty());
+    }
+
+    /// The book: a founded town is named from the same sixteen-by-sixteen
+    /// vocabulary as every other town, case-insensitively, and a word that
+    /// is not in it is refused.
+    #[test]
+    fn a_founded_town_is_named_from_the_book() {
+        let (heads, tails) = town::name_book();
+        assert_eq!(heads.len(), 16);
+        assert_eq!(tails.len(), 16);
+        let name = TownName::from_words("Iron", "REACH").unwrap();
+        assert_eq!(name.to_string(), "IRONREACH");
+        let (head, tail) = name.indices();
+        assert_eq!(TownName::from_indices(head, tail), name);
+        assert!(TownName::from_words("harvest", "moon").is_none());
+        assert!(TownName::from_words("iron", "moon").is_none());
+    }
+
+    /// The lattice's own siting rule, asked of arbitrary ground.
+    #[test]
+    fn buildable_is_the_lattices_relief_rule() {
+        let flat = |_: i32, _: i32| 80;
+        assert!(town::buildable(&flat, (0, 0), town::HOME_CORE_HALF));
+        let cliff = |x: i32, _: i32| if x > 0 { 80 + town::MAX_RELIEF + 1 } else { 80 };
+        assert!(!town::buildable(&cliff, (0, 0), town::HOME_CORE_HALF));
     }
 }

@@ -69,6 +69,16 @@ pub const ELECTED_COMPACT: i64 = 30;
 /// And the Holdouts' view of somebody who has taken the towns' shilling.
 pub const ELECTED_HOLDOUTS: i64 = -20;
 
+/// Seizing a town's chairs over its broken deputies.
+///
+/// The Compact is the towns' own opinion of you, and you have just thrown a
+/// town's law down in its own square: worse than a vault, because a vault is
+/// against one town's money and this is against every town's order. The
+/// shelters, who have never had much use for a mayor, think rather better of
+/// it — not enough to make a friend, enough to notice.
+pub const TAKEN_COMPACT: i64 = -80;
+pub const TAKEN_HOLDOUTS: i64 = 40;
+
 /// Where you stand with a people.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Standing {

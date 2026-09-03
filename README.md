@@ -872,6 +872,38 @@ closed door. So there is a whole middle now between "nothing happened" and
 "there are four lads with guns coming over the hill", and you can talk, pay or
 run your way out of it.
 
+### A town of your own, one way or the other
+
+Getting voted in was the only way to run a town. Now there are two more.
+
+**Found one.** Print a **town charter** at a fabricator — it is the dearest
+thing on the ladder, and meant to be — walk out to flat, dry ground a good way
+from anybody else, and say `FOUND IRON REACH` at the terminal. The names come
+from the same book every town is named from; ask for a word that is not in it
+and the terminal shows you the book. Then there is a town. All of it: the
+tower, the shop, the clinic, the bank, the houses, the paths, the wall, and
+three settlers who arrived with the charter and are already open for business.
+It is built by exactly the code that builds every other town, so nobody can
+tell it was founded. You hold the mayor's chair and the sheriff's, because it
+is your town — and it is still a town, so it votes. A settler owes the founder
+the roof over their head, which keeps you in through the quiet first terms;
+after that you trade with them like anybody else.
+
+The plot is levelled when the town goes up. Anything you dug there is filled.
+
+**Or take one.** Get a warrant on you somewhere, and the deputies come. Put
+every one of them down or into surrender, then walk to that town's console and
+say `TAKE`. Both chairs are yours. So is the bill: the Compact will remember
+it, every mayor within radio range signs a warrant on you by the next civic
+tick, and the three people who live there now trust you exactly nothing. At
+the next poll they will throw you straight back out unless you have paid the
+fines and bought them back. A town you took is a town you have to keep.
+
+`TOWN` and the console say which it was — `FOUNDED BY YOU - DAY 12`, `TAKEN -
+DAY 30` — and, on the way past, every town's *sheriff* now comes up for a vote:
+since stage 40 the first seat polled on a market day had been quietly closing
+the ballot for the second.
+
 ### The country goes on
 
 There used to be a place, about fifty minutes' walk in any one direction, where
@@ -1801,6 +1833,11 @@ cargo run --release -p vx-app -- --screenshot winter.ppm --at 0,10 --forest cove
 # three thousand kilometres from spawn, with the hand lamp on at dusk
 cargo run --release -p vx-app -- --screenshot far.ppm --at 3000000,3000000 --time 0.5
 cargo run --release -p vx-app -- --screenshot far-lamp.ppm --at 3000000,3000000 --time 0.85 --optic lamp
+
+# a town founded at --at (or the first open plot east of it), framed from its wall,
+# and the console of a town whose chairs you seized
+cargo run --release -p vx-app -- --screenshot founded.ppm --at 600,40 --founded --time 0.5
+cargo run --release -p vx-app -- --screenshot taken.ppm --at 0,10 --taken
 
 # the pocket arcade, mid-fight, on the raised handheld
 cargo run --release -p vx-app -- --screenshot arcade.ppm --at 0,10 --arcade

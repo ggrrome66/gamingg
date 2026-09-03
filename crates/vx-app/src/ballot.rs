@@ -46,7 +46,9 @@ use crate::people::{self, Archetype, PEOPLE};
 use crate::permits::Office;
 
 const MAGIC: &[u8; 4] = b"VXBL";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+/// The oldest file this loader still reads: one without the taken map.
+const OLDEST: u32 = 1;
 
 /// How many days a term runs. A week, so a town's politics move on a clock a
 /// player can actually watch turn rather than one they take on trust.
@@ -172,6 +174,9 @@ pub struct Field<'a> {
     /// Which seat is being polled. Only read when the player is defending
     /// one, because a player has no roster index to look the office up from.
     pub seat: Office,
+    /// Did the player found this town? A settler owes the founder the roof
+    /// over their head — see [`crate::charter::FOUNDER`].
+    pub founder: bool,
 }
 
 /// One voter's choice, with the arithmetic that produced it.
@@ -219,11 +224,13 @@ pub fn poll(field: &Field<'_>, incumbent: Candidate) -> (Candidate, Vec<Vote>) {
                     + record(field.incumbent_troubled)
             }
             // A player defending a seat is judged the same way they won it,
-            // with the chair worth the same to them as it is to anybody.
+            // with the chair worth the same to them as it is to anybody —
+            // and with the founder's due on top, if this is their town.
             Candidate::Player => {
                 standing_with(field.friends, field.site.centre, voter, field.bounty)
                     + INCUMBENCY
                     + record(field.incumbent_troubled)
+                    + if field.founder { crate::charter::FOUNDER } else { 0 }
             }
         }
     };
@@ -244,19 +251,41 @@ pub fn poll(field: &Field<'_>, incumbent: Candidate) -> (Candidate, Vec<Vote>) {
         return (native, votes);
     }
 
-    // Otherwise exactly one candidate can be challenging: the player, and
-    // only when they have put their name in against somebody else.
-    let challenger = (field.standing && !incumbent.is_player()).then_some(Candidate::Player);
+    // Otherwise exactly one candidate can be challenging. Against a
+    // resident it is the player, and only with their name in. Against a
+    // *player* in the chair it is the man the seed always said should have
+    // it: a town that elected an outsider, or was founded by one, or was
+    // taken by one, weighs that outsider against its own every term. This is
+    // what makes a taken town a town you have to keep, and the founder's due
+    // the thing that keeps a founder in through the first quiet terms.
+    let challenger = if incumbent.is_player() {
+        Some(native)
+    } else if field.standing {
+        Some(Candidate::Player)
+    } else {
+        None
+    };
 
     let mut votes = Vec::with_capacity(PEOPLE);
     let mut for_challenger = 0usize;
     for voter in 0..PEOPLE {
         let held = sitting(voter);
         let (cast_for, score) = match challenger {
-            Some(_) => {
+            Some(Candidate::Player) => {
                 let theirs = standing_with(field.friends, field.site.centre, voter, field.bounty);
                 if theirs > held {
                     (Candidate::Player, theirs)
+                } else {
+                    (incumbent, held)
+                }
+            }
+            Some(Candidate::Resident(index)) => {
+                // The native stands on who he is, without the chair's own
+                // weight: the incumbency bonus is the player's this term.
+                let person = people::person(field.site, index);
+                let theirs = regard(field.site, voter, index) + bearing(person.temperament.archetype);
+                if theirs > held {
+                    (Candidate::Resident(index), theirs)
                 } else {
                     (incumbent, held)
                 }
@@ -294,12 +323,20 @@ pub struct Seat {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Register {
     seats: BTreeMap<((i32, i32), u8), Seat>,
-    /// The last term each town has actually polled, so an election is held
+    /// The last term each seat has actually polled, so an election is held
     /// once rather than every tick of its polling day.
-    polled: BTreeMap<(i32, i32), u32>,
+    ///
+    /// Per seat, not per town — stage 40 kept this per town, which meant the
+    /// first office polled on a market day quietly closed the ballot for the
+    /// second. Found on the way past in 43, when a taken town's sheriff's
+    /// chair never came up for a vote.
+    polled: BTreeMap<((i32, i32), u8), u32>,
     /// Which seats the player is standing for. An order sets this, so it is
     /// state the journal replays rather than a derivation.
     standing: std::collections::BTreeSet<((i32, i32), u8)>,
+    /// Towns whose chairs were seized rather than won, and the day. Only
+    /// the panels read it; a seized seat polls like any other.
+    taken: BTreeMap<(i32, i32), u32>,
 }
 
 fn slot(office: Office) -> u8 {
@@ -352,6 +389,37 @@ impl Register {
         self.standing.contains(&(town, slot(office)))
     }
 
+    /// Seat the player, standing, in one chair — a founded town's default,
+    /// and half of a taken one.
+    pub fn seat_player(&mut self, town: (i32, i32), office: Office, day: u32) {
+        self.seats.insert(
+            (town, slot(office)),
+            Seat {
+                holder: Candidate::Player,
+                since: term_of(day),
+            },
+        );
+        self.standing.insert((town, slot(office)));
+    }
+
+    /// Both chairs to the player, by force. Remembered as taken, so the
+    /// panels can say so — the seats themselves are ordinary entries and
+    /// the next poll treats them as any player-held seat.
+    pub fn seize(&mut self, town: (i32, i32), day: u32) {
+        for office in crate::office::OFFICES {
+            self.seat_player(town, office, day);
+        }
+        self.taken.insert(town, day);
+    }
+
+    /// The day this town was taken, if it was — and still held.
+    pub fn taken(&self, town: (i32, i32)) -> Option<u32> {
+        let held = crate::office::OFFICES
+            .into_iter()
+            .any(|office| self.player_holds(town, office));
+        held.then(|| self.taken.get(&town).copied()).flatten()
+    }
+
     /// Put your name in, or take it out. The journal's `Stand` order.
     pub fn stand(&mut self, town: (i32, i32), office: Office, on: bool) {
         if on {
@@ -361,10 +429,10 @@ impl Register {
         }
     }
 
-    /// Has this town already polled this term?
-    pub fn polled_this_term(&self, town: (i32, i32), day: u32) -> bool {
+    /// Has this seat already polled this term?
+    pub fn polled_this_term(&self, town: (i32, i32), office: Office, day: u32) -> bool {
         self.polled
-            .get(&town)
+            .get(&(town, slot(office)))
             .is_some_and(|term| *term >= term_of(day))
     }
 
@@ -375,14 +443,14 @@ impl Register {
     /// neither side needs an order to know an election happened.
     pub fn hold(&mut self, field: &Field<'_>, office: Office, day: u32) -> Option<Held> {
         let town = field.site.centre;
-        if !is_polling_day(field.site, day) || self.polled_this_term(town, day) {
+        if !is_polling_day(field.site, day) || self.polled_this_term(town, office, day) {
             return None;
         }
         let before = self.seated(field.site, office);
         let (winner, votes) = poll(field, before);
         // The bookkeeping goes in either way, so the town does not re-poll
         // for the rest of the day.
-        self.polled.insert(town, term_of(day));
+        self.polled.insert((town, slot(office)), term_of(day));
         if winner == before {
             return Some(Held {
                 office,
@@ -435,9 +503,10 @@ impl Register {
         }
 
         file.write_all(&(self.polled.len() as u32).to_le_bytes())?;
-        for ((x, z), term) in &self.polled {
+        for (((x, z), slot), term) in &self.polled {
             file.write_all(&x.to_le_bytes())?;
             file.write_all(&z.to_le_bytes())?;
+            file.write_all(&[*slot])?;
             file.write_all(&term.to_le_bytes())?;
         }
 
@@ -446,6 +515,14 @@ impl Register {
             file.write_all(&x.to_le_bytes())?;
             file.write_all(&z.to_le_bytes())?;
             file.write_all(&[*slot])?;
+        }
+
+        // Version two: the towns whose chairs were seized, and the day.
+        file.write_all(&(self.taken.len() as u32).to_le_bytes())?;
+        for ((x, z), day) in &self.taken {
+            file.write_all(&x.to_le_bytes())?;
+            file.write_all(&z.to_le_bytes())?;
+            file.write_all(&day.to_le_bytes())?;
         }
         file.flush()
     }
@@ -485,7 +562,8 @@ fn read_register(path: &Path) -> std::io::Result<Option<Register>> {
     let mut pair = [0u8; 2];
     let mut byte = [0u8; 1];
     file.read_exact(&mut word)?;
-    if u32::from_le_bytes(word) != VERSION {
+    let version = u32::from_le_bytes(word);
+    if version != VERSION && version != OLDEST {
         return Ok(None);
     }
     let mut register = Register::default();
@@ -515,8 +593,17 @@ fn read_register(path: &Path) -> std::io::Result<Option<Register>> {
         let x = i32::from_le_bytes(word);
         file.read_exact(&mut word)?;
         let z = i32::from_le_bytes(word);
-        file.read_exact(&mut word)?;
-        register.polled.insert((x, z), u32::from_le_bytes(word));
+        // Version one kept one term per town; it closes both seats.
+        if version >= 2 {
+            file.read_exact(&mut byte)?;
+            file.read_exact(&mut word)?;
+            register.polled.insert(((x, z), byte[0]), u32::from_le_bytes(word));
+        } else {
+            file.read_exact(&mut word)?;
+            let term = u32::from_le_bytes(word);
+            register.polled.insert(((x, z), 0), term);
+            register.polled.insert(((x, z), 1), term);
+        }
     }
 
     file.read_exact(&mut word)?;
@@ -527,6 +614,20 @@ fn read_register(path: &Path) -> std::io::Result<Option<Register>> {
         let z = i32::from_le_bytes(word);
         file.read_exact(&mut byte)?;
         register.standing.insert(((x, z), byte[0]));
+    }
+
+    // Version two: the towns whose chairs were seized. A version-one file
+    // simply has none, which is the truth about it.
+    if version >= 2 {
+        file.read_exact(&mut word)?;
+        for _ in 0..u32::from_le_bytes(word) {
+            file.read_exact(&mut word)?;
+            let x = i32::from_le_bytes(word);
+            file.read_exact(&mut word)?;
+            let z = i32::from_le_bytes(word);
+            file.read_exact(&mut word)?;
+            register.taken.insert((x, z), u32::from_le_bytes(word));
+        }
     }
     Ok(Some(register))
 }
@@ -548,6 +649,7 @@ mod tests {
             incumbent_troubled: false,
             standing: false,
             seat: Office::Mayor,
+            founder: false,
         }
     }
 
@@ -761,7 +863,7 @@ mod tests {
                 since: 1,
             },
         );
-        register.polled.insert((0, 0), 3);
+        register.polled.insert(((0, 0), 0), 3);
         register.stand((-512, 1_024), Office::Sheriff, true);
         register.save(&directory).unwrap();
 
@@ -794,5 +896,149 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod charter_tests {
+    use super::*;
+    use vx_world::town;
+
+    fn frontier() -> Vec<TownSite> {
+        town::towns_near(2024, (0, 0), 6_000, &|_, _| 90)
+            .into_iter()
+            .filter(|site| !site.is_home())
+            .collect()
+    }
+
+    /// A founder with no trade on the books keeps both chairs through a
+    /// quiet term in every town on the frontier — the founder's due is sized
+    /// to carry a seat against anybody's regard for the man the seed named.
+    /// The same player in a town they merely hold, with the same empty
+    /// books, is thrown out somewhere along the same frontier.
+    #[test]
+    fn the_founders_due_keeps_a_quiet_founder_in_and_nobody_else() {
+        let friends = Disposition::default();
+        let mut thrown_out_somewhere = false;
+        for site in frontier().into_iter().take(12) {
+            for office in office::OFFICES {
+                let mut register = Register::default();
+                register.seat_player(site.centre, office, 0);
+                let day = next_poll(&site, 1);
+                let founded = Field {
+                    site: &site,
+                    friends: &friends,
+                    bounty: 0,
+                    incumbent_troubled: false,
+                    standing: true,
+                    seat: office,
+                    founder: true,
+                };
+                let held = register.hold(&founded, office, day).expect("no poll");
+                assert!(
+                    held.after.is_player(),
+                    "{} threw out its founder as {:?}",
+                    site.name,
+                    office
+                );
+
+                let mut register = Register::default();
+                register.seat_player(site.centre, office, 0);
+                let merely = Field { founder: false, ..founded };
+                let held = register.hold(&merely, office, day).expect("no poll");
+                if !held.after.is_player() {
+                    thrown_out_somewhere = true;
+                    // And losing forgets the entry: the register is sparse.
+                    assert!(!register.player_holds(site.centre, office));
+                }
+            }
+        }
+        assert!(
+            thrown_out_somewhere,
+            "a player holding a seat with no trade is never voted out anywhere"
+        );
+    }
+
+    /// A taken town is a town you have to keep. Seized with a vault's worth
+    /// of bounty on the sheet and every ledger torn up, the next poll throws
+    /// you out; with the fines paid and the trust bought back, it does not.
+    #[test]
+    fn a_taken_town_throws_you_out_unless_you_pay_and_buy_it_back() {
+        let site = frontier()[0];
+        let mut register = Register::default();
+        register.seize(site.centre, 3);
+        assert_eq!(register.taken(site.centre), Some(3));
+        for office in office::OFFICES {
+            assert!(register.player_holds(site.centre, office));
+        }
+
+        let torn_up = Disposition::default();
+        let day = next_poll(&site, 4);
+        let field = Field {
+            site: &site,
+            friends: &torn_up,
+            bounty: crate::permits::TAKEN_BOUNTY,
+            incumbent_troubled: false,
+            standing: true,
+            seat: Office::Mayor,
+            founder: false,
+        };
+        let held = register.hold(&field, Office::Mayor, day).expect("no poll");
+        assert!(!held.after.is_player(), "a town you just took kept you with the sheet unpaid");
+        assert!(!register.player_holds(site.centre, Office::Mayor));
+        // Losing the chairs forgets that they were taken.
+        let mut both = Register::default();
+        both.seize(site.centre, 3);
+        for office in office::OFFICES {
+            both.hold(&Field { seat: office, ..field }, office, day);
+        }
+        assert_eq!(both.taken(site.centre), None, "a town that threw you out is still 'taken'");
+
+        // Paid down and bought back: every resident traded with, hard.
+        let mut bought = Disposition::default();
+        for voter in 0..people::PEOPLE as u8 {
+            for day in 0..40 {
+                bought.trade((site.centre, voter), 900, day);
+            }
+        }
+        let mut register = Register::default();
+        register.seize(site.centre, 3);
+        let paid = Field {
+            friends: &bought,
+            bounty: 0,
+            ..field
+        };
+        let held = register.hold(&paid, Office::Mayor, day).expect("no poll");
+        assert!(held.after.is_player(), "a town you bought back still threw you out");
+    }
+
+    /// The taken map survives the file, and a version-one file loads
+    /// without one.
+    #[test]
+    fn the_taken_map_survives_a_save_and_an_old_file_still_loads() {
+        let directory = std::env::temp_dir().join(format!("vx-taken-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let site = frontier()[1];
+        let mut register = Register::default();
+        register.seize(site.centre, 9);
+        register.save(&directory).unwrap();
+        let mut back = Register::default();
+        back.load(&directory);
+        assert_eq!(back, register);
+        assert_eq!(back.taken(site.centre), Some(9));
+
+        // A version-one file: the same bytes up to the taken map, with the
+        // version word rewritten. It loads, and nothing is taken.
+        let path = directory.join("elections.dat");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        let cut = bytes.len() - 4 - 12; // the taken count and one entry
+        bytes.truncate(cut);
+        std::fs::write(&path, bytes).unwrap();
+        let mut old = Register::default();
+        old.load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(old.taken(site.centre), None);
+        assert!(old.player_holds(site.centre, Office::Mayor), "the old file lost its seats");
     }
 }

@@ -372,6 +372,9 @@ pub struct TradeView<'a> {
 pub struct Civic {
     /// `("MAYOR", "GRANT THE MEEK")`, in office order.
     pub seats: Vec<(String, String)>,
+    /// How the player came to hold this town, when not by the ballot box:
+    /// `FOUNDED BY YOU - DAY 12`, `TAKEN - DAY 30`.
+    pub charter: Option<String>,
     /// The warrant line, when there is one.
     pub warrant: Option<String>,
     /// Whether the town will trade with you at all.
@@ -489,6 +492,10 @@ pub fn render_board(
             DIM,
             &format!("{title:<8} {name}"),
         );
+        y += LINE_HEIGHT as i32;
+    }
+    if let Some(charter) = &civic.charter {
+        font::draw_text(&mut pixels, BOARD_WIDTH, margin, y, 1, DIM, charter);
         y += LINE_HEIGHT as i32;
     }
     if let Some(warrant) = &civic.warrant {
@@ -1162,6 +1169,7 @@ mod tests {
                 ("MAYOR".into(), "GRANT THE MEEK".into()),
                 ("SHERIFF".into(), "HOLLIS THE GRIM".into()),
             ],
+            charter: None,
             warrant: Some("WARRANT PETITIONED - FILED ON 140 CR".into()),
             closed: true,
         };

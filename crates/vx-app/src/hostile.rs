@@ -345,6 +345,9 @@ pub struct Posse {
     exposed: bool,
     /// The squad's shared route toward its belief.
     pub pathing: Pathing,
+    /// Whose deputies these are: the town whose warrant sent them. `None`
+    /// for a squad a fixture called out on open ground.
+    town: Option<(i32, i32)>,
 }
 
 /// Seconds of sustained contact before the squad is made to back off.
@@ -360,11 +363,19 @@ impl Posse {
         !self.deputies.is_empty()
     }
 
-    /// Send a squad, spread around `near` at arm's length from the player.
-    pub fn call_out(&mut self, near: Vec3, ground: impl Fn(f32, f32) -> f32, seed: u64) {
+    /// Send a squad, spread around `near` at arm's length from the player,
+    /// on `town`'s warrant.
+    pub fn call_out(
+        &mut self,
+        near: Vec3,
+        ground: impl Fn(f32, f32) -> f32,
+        seed: u64,
+        town: Option<(i32, i32)>,
+    ) {
         if self.called_out() {
             return;
         }
+        self.town = town;
         self.deputies = (0..SQUAD)
             .map(|index| {
                 // Fanned out on an arc, never on top of the player: the note's
@@ -393,6 +404,21 @@ impl Posse {
         self.belief.abandon();
         self.pressure = 0.0;
         self.backing_off = 0.0;
+        self.town = None;
+    }
+
+    /// Whose deputies are out.
+    pub fn town(&self) -> Option<(i32, i32)> {
+        self.town
+    }
+
+    /// Is the squad out and every deputy in it down or surrendered?
+    ///
+    /// This is the moment a town can be taken: its law came for you and
+    /// none of it is standing. It lasts exactly as long as the callout does
+    /// — settle the bill or let them muster again and it is gone.
+    pub fn broken(&self) -> bool {
+        self.called_out() && self.deputies.iter().all(|deputy| !deputy.active())
     }
 
     /// What each deputy is doing, for the terminal's `law` verb. Naming

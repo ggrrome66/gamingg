@@ -415,7 +415,7 @@ fn clear_path(
         // tick, so a replay sees it the same way.
         // The towns are gathered here rather than passed in, so the live
         // game and a replay of it cannot disagree about which list was used.
-        let sites = world.generator().towns_near((pos.x, pos.z), TOWN_REACH);
+        let sites = world.towns_near((pos.x, pos.z), TOWN_REACH);
         if let Some(neighbour) = standing_tree(world, pos, &sites) {
             if neighbour.base != fall.base && fall.energy() > energy(neighbour.species, 3) {
                 started.push(Falling {
@@ -526,7 +526,7 @@ mod tests {
     }
 
     fn sites_here(world: &World) -> Vec<TownSite> {
-        world.generator().towns_overlapping(
+        world.towns_overlapping(
             (WOODS.0 - 80, WOODS.1 - 80),
             (WOODS.0 + 80, WOODS.1 + 80),
         )

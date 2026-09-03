@@ -70,8 +70,10 @@ pub enum Output {
     Module(&'static str),
     /// A piece of the optics kit: a better lamp or a visor.
     Optic(&'static str),
-    /// The arcade cartridge: a toy, and the last thing on the ladder.
+    /// The arcade cartridge: a toy, and nearly the last thing on the ladder.
     Cartridge,
+    /// A town charter: the paper that founds a town, filed on open ground.
+    Charter,
     /// One mark on an upgrade line — the same line the counter sells, paid
     /// for in materials instead of credits.
     Upgrade(&'static str),
@@ -314,6 +316,21 @@ pub const CATALOGUE: &[Recipe] = &[
             ("engine:log", 10),
         ],
         seconds: 150.0,
+        floor: 30,
+    },
+    Recipe {
+        label: "TOWN CHARTER",
+        output: Output::Charter,
+        // The dearest thing on the ladder, and the only row whose product is
+        // a place rather than a thing: file it on open ground a cell clear
+        // of anybody and there is a town there, with your name in both of
+        // its chairs. Dear in bars because a town is dear.
+        inputs: &[
+            ("engine:copper_bar", 20),
+            ("engine:plank", 8),
+            ("engine:copper_ore", 8),
+        ],
+        seconds: 90.0,
         floor: 30,
     },
 ];
@@ -588,6 +605,7 @@ mod tests {
                 "POCKET ARCADE",
                 "KESTREL",
                 "GROUND DRONE",
+                "TOWN CHARTER",
             ]
         );
         let mut floor = 0;

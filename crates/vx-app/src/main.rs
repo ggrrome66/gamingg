@@ -13,6 +13,7 @@ mod arsenal;
 mod audio;
 mod awareness;
 mod ballot;
+mod charter;
 mod bank;
 mod beacon;
 mod belief;
@@ -271,6 +272,10 @@ struct Options {
     ballot: bool,
     /// The ballot page of a town that has already elected you.
     elected: bool,
+    /// The console of a town whose chairs you seized.
+    taken: bool,
+    /// Found a town at `--at` and frame it from outside its wall.
+    founded: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -331,6 +336,8 @@ fn parse_args() -> Result<Options, String> {
         warrant: false,
         ballot: false,
         elected: false,
+        taken: false,
+        founded: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -432,6 +439,11 @@ fn parse_args() -> Result<Options, String> {
                 options.board = true;
                 options.ballot = true;
             }
+            "--taken" => {
+                options.board = true;
+                options.taken = true;
+            }
+            "--founded" => options.founded = true,
             "--elected" => {
                 options.board = true;
                 options.elected = true;
@@ -518,6 +530,8 @@ fn parse_args() -> Result<Options, String> {
                      --warrant           the same console with a warrant standing\n  \
                      --ballot            the console's voting page, with a poll due\n  \
                      --elected           the voting page of a town that elected you\n  \
+                     --taken             the console of a town whose chairs you seized\n  \
+                     --founded           found a town at --at and frame it from its wall\n  \
                      --fire <when>       a stand alight (burning) or the ash after (after)\n  \
                      --view-distance <n> chunks visible in every direction (4-16, default 8)\n  \
                      --gold              enable the operator console (F10; dev builds only)\n  \
@@ -1211,7 +1225,6 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // how far both run below the plaza. Cut here rather than drawn,
         // because the point is what generation actually put in the ground.
         let site = world
-            .generator()
             .towns_near(options.at, 2_000)
             .into_iter()
             .next()
@@ -1255,7 +1268,6 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // its own trace: a bastioned wall only reads as bastioned from a
         // height, which is the honest reason forts are drawn on maps.
         let site = world
-            .generator()
             .towns_near(options.at, 4_000)
             .into_iter()
             .find(|site| vx_world::fort::fort_for(site).trace != vx_world::fort::Trace::Palisade)
@@ -1283,7 +1295,6 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // The bank's box, found by looking for it rather than by arithmetic:
         // if the blueprint moves, the capture follows it.
         let site = world
-            .generator()
             .towns_near(options.at, 2_000)
             .into_iter()
             .next()
@@ -1690,6 +1701,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                     .map_or(player.y, |top| (top + 1) as f32)
             },
             0xc0ffee,
+            None,
         );
         // Run the callout for a few seconds so they close, take cover and
         // settle into modes rather than standing where they spawned.
@@ -2067,6 +2079,51 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         );
     }
 
+    if options.founded {
+        // Found a town where `--at` points — or the first open plot east of
+        // it the lattice's own rules allow — exactly as the FOUND order does,
+        // and frame it from outside its wall with the tower in the middle.
+        // The picture is the whole claim of the round: a place that was a
+        // hillside a moment ago, indistinguishable from a town the seed drew.
+        let name = vx_world::town::TownName::from_words("iron", "reach").unwrap();
+        let mut plot = None;
+        for step in 0..12 {
+            let at = (options.at.0 + step * vx_world::town::CELL, options.at.1);
+            match charter::may_found(&world, at, name) {
+                Ok(site) => {
+                    plot = Some(site);
+                    break;
+                }
+                Err(refusal) => println!("founding at {at:?}: {}", refusal.line()),
+            }
+        }
+        let site = plot.ok_or("no chartable ground within twelve cells of --at")?;
+        let raised = world.raise(site);
+        remesh_all(&context, &mut renderer, &mut world);
+        let fort = vx_world::fort::fort_for(&site);
+        let centre = glam::DVec3::new(
+            site.centre.0 as f64 + 0.5,
+            site.ground as f64,
+            site.centre.1 as f64 + 0.5,
+        );
+        // A high oblique from just outside the wall: well above anything the
+        // lattice's relief rule lets stand within the town's reach, so no
+        // hillside and no canopy can get between the eye and the plot.
+        let back = fort.reach() as f64 + 6.0;
+        camera.position = centre + glam::DVec3::new(back * 0.25, 58.0, back);
+        look_at(&mut camera, centre + glam::DVec3::Y * 3.0);
+        renderer.update_camera(&context.queue, &camera);
+        println!(
+            "founded capture: {} at {},{} — ground {}, {raised} chunks raised, {} buildings, wall reach {}",
+            site.name,
+            site.centre.0,
+            site.centre.1,
+            site.ground,
+            vx_world::town::plan::buildings(&site).len(),
+            fort.reach()
+        );
+    }
+
     if options.storm {
         // Weather over real country. The conditions are not invented: the
         // fixture walks the clock forward until `weather::at` says this
@@ -2330,7 +2387,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // burn and the clock stamps the stand it grew back to.
         let mut regrown = 0;
         if after {
-            let sites = world.generator().towns_near((x, z), 160);
+            let sites = world.towns_near((x, z), 160);
             // Far enough on that the slowest thing here is back to a mixed
             // stand rather than bare ground: the clock runs per species, and
             // conifer is the slowest of the three.
@@ -3036,7 +3093,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     if options.ministar {
         // A whole one for the picture: a third of them have been let go, and
         // a ruin shows the rubble rather than the shape.
-        let near = world.generator().towns_near(options.at, 6_000);
+        let near = world.towns_near(options.at, 6_000);
         let mini = |site: &&vx_world::town::TownSite| {
             vx_world::fort::fort_for(site).trace == vx_world::fort::Trace::MiniStar
         };
@@ -3870,7 +3927,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // states show: work on offer, and work in hand pointing somewhere the
         // player has never been.
         let here = vx_world::town::home_site();
-        let neighbours = world.generator().towns_near(here.centre, RADIO_RANGE);
+        let neighbours = world.towns_near(here.centre, RADIO_RANGE);
         let postings = beacon::postings_for(&here, &neighbours);
         let mut ledger = beacon::Ledger::new();
         ledger.visit(here.centre);
@@ -3931,10 +3988,15 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                         filed.map_or(0, |filed| filed.fine)
                     );
                 }
-                let civic = civic_snapshot(&here, &docket);
                 // The fixture's own register, so `--ballot` can photograph a
-                // seat held without a session behind it.
+                // seat held without a session behind it — and `--taken` a
+                // pair of chairs seized over a broken posse.
                 let mut register = ballot::Register::default();
+                let charters = charter::Charters::default();
+                if options.taken {
+                    register.seize(here.centre, 3);
+                    println!("taken capture: both chairs of {} seized on day 4", here.name);
+                }
                 if options.elected {
                     register.stand(here.centre, permits::Office::Sheriff, true);
                     let mut friends = disposition::Disposition::default();
@@ -3950,10 +4012,12 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                         incumbent_troubled: false,
                         standing: true,
                         seat: permits::Office::Sheriff,
+                        founder: false,
                     };
                     let day = ballot::next_poll(&here, 0);
                     register.hold(&field, permits::Office::Sheriff, day);
                 }
+                let civic = civic_snapshot(&here, &docket, &charters, &register);
                 let mut voters = disposition::Disposition::default();
                 for voter in 0..people::PEOPLE {
                     for day in 0..(6 + voter * 14) {
@@ -4130,7 +4194,13 @@ fn ballot_snapshot(
 ///
 /// A snapshot, not a borrow of the ledgers: the panel is a pure function over
 /// what it is given, which is why it can be tested without a town.
-fn civic_snapshot(site: &vx_world::town::TownSite, docket: &warrant::Docket) -> board::Civic {
+fn civic_snapshot(
+    site: &vx_world::town::TownSite,
+    docket: &warrant::Docket,
+    charters: &charter::Charters,
+    elections: &ballot::Register,
+) -> board::Civic {
+    let charter = charter_line(site, charters, elections);
     let seats = office::OFFICES
         .into_iter()
         .map(|office| {
@@ -4149,9 +4219,25 @@ fn civic_snapshot(site: &vx_world::town::TownSite, docket: &warrant::Docket) -> 
     });
     board::Civic {
         seats,
+        charter,
         warrant,
         closed: docket.pending_in(site.centre),
     }
+}
+
+/// How the player came to hold a town, when it was not the ballot box.
+fn charter_line(
+    site: &vx_world::town::TownSite,
+    charters: &charter::Charters,
+    elections: &ballot::Register,
+) -> Option<String> {
+    if let Some(paper) = charters.get(site.centre) {
+        let day = paper.founded / schedule::TICKS_PER_DAY;
+        return Some(format!("FOUNDED BY YOU - DAY {}", day + 1));
+    }
+    elections
+        .taken(site.centre)
+        .map(|day| format!("TAKEN - DAY {}", day + 1))
 }
 
 fn trunk_rig(fall: &felling::Falling) -> rig::Rig {
@@ -4401,6 +4487,8 @@ struct Active {
     /// Every seat anywhere that is not what the seed said, and the ones you
     /// are standing for.
     elections: ballot::Register,
+    /// The towns you founded, and the charters you have not filed yet.
+    charters: charter::Charters,
     /// The speaker, when the machine has one.
     audio: audio::Audio,
     /// The launcher's viewmodel shape, built once.
@@ -4865,7 +4953,7 @@ impl App {
                 active.player.position.x as i32,
                 active.player.position.z as i32,
             );
-            let nearby = active.world.generator().towns_near(column, RADIO_RANGE);
+            let nearby = active.world.towns_near(column, RADIO_RANGE);
             active.permits.borrow_mut().set_sites(nearby);
         }
         if let Some(line) = active.villagers.greeting_for() {
@@ -5027,7 +5115,6 @@ impl App {
                 active.last_scan = column;
                 let near = active
                     .world
-                    .generator()
                     .towns_near(column, beacon::DISCOVERY_RANGE);
                 for site in &near {
                     if active.ledger.visit(site.centre) {
@@ -5062,7 +5149,7 @@ impl App {
                 active.player.position.x.floor() as i32,
                 active.player.position.z.floor() as i32,
             );
-            let reachable = active.world.generator().towns_near(column, RADIO_RANGE);
+            let reachable = active.world.towns_near(column, RADIO_RANGE);
             for landed in active.economy.run(&reachable, now) {
                 // Mail lands whether or not the player is anywhere near home:
                 // nothing about it needs the destination market, so it must
@@ -5628,7 +5715,7 @@ impl App {
                         .surface_y(x.floor() as i32, z.floor() as i32)
                         .map_or(at.y, |top| (top + 1) as f32)
                 };
-                active.posse.call_out(at, ground, seed);
+                active.posse.call_out(at, ground, seed, Some(town.centre));
                 let line = format!(
                     "{} SIGNED THE WARRANT. DEPUTIES ARE COMING",
                     office::seat(&town, permits::Office::Mayor).name
@@ -5759,7 +5846,7 @@ impl App {
         if !name.ends_with("log") {
             return None;
         }
-        let sites = active.world.generator().towns_near(
+        let sites = active.world.towns_near(
             (hit.block.x, hit.block.z),
             felling::TOWN_REACH,
         );
@@ -6182,6 +6269,16 @@ impl App {
             active.printer.feedback = Some("YOU ALREADY OWN ONE".into());
             return;
         }
+        // A charter is filed before another is printed: one town at a time
+        // is a decision, a drawer full of them is a land grab.
+        if matches!(
+            printer::recipe(index).map(|recipe| recipe.output),
+            Some(printer::Output::Charter)
+        ) && active.charters.unfiled > 0
+        {
+            active.printer.feedback = Some("FILE THE CHARTER YOU HOLD FIRST".into());
+            return;
+        }
         let Some(base) = active.mining.fleet.base.as_mut() else {
             active.printer.feedback = Some("NO BASE PILE TO DRAW ON".into());
             return;
@@ -6287,7 +6384,6 @@ impl App {
                 )];
                 match active
                     .world
-                    .generator()
                     .towns_near((at.x.floor() as i32, at.z.floor() as i32), 900)
                     .into_iter()
                     .next()
@@ -6320,7 +6416,6 @@ impl App {
                 let at = active.player.position;
                 let Some(site) = active
                     .world
-                    .generator()
                     .towns_near((at.x.floor() as i32, at.z.floor() as i32), 900)
                     .into_iter()
                     .next()
@@ -6578,6 +6673,8 @@ impl App {
                 }
                 lines
             }
+            "found" => Self::found_a_town(active, args),
+            "take" => Self::take_the_town(active),
             "town" => {
                 // The whole civic layer in one screen: who runs it, what the
                 // people who live here are worth, and where the paperwork on
@@ -6595,6 +6692,9 @@ impl App {
                         site.centre.1
                     ),
                 ];
+                if let Some(line) = charter_line(&site, &active.charters, &active.elections) {
+                    lines.push(line);
+                }
                 for office in office::OFFICES {
                     match active.elections.seated(&site, office) {
                         ballot::Candidate::Player => lines.push(format!(
@@ -6867,6 +6967,124 @@ impl App {
     /// made; the election that follows is not recorded, because polling day
     /// and the count are both pure functions of things both sides already
     /// hold.
+    /// `FOUND <HEAD> <TAIL>`: file a charter on the ground you stand on.
+    ///
+    /// The order is the ground — the journal carries it and both sides raise
+    /// the same town from it. Everything else here is the bookkeeping that
+    /// lives beside the ground: the charter consumed, the chairs, the badge,
+    /// the beacon ledger, and you moved onto the plaza you just levelled.
+    fn found_a_town(active: &mut Active, words: &[String]) -> Vec<String> {
+        if active.charters.unfiled == 0 {
+            return vec!["YOU HAVE NO CHARTER TO FILE - PRINT ONE".into()];
+        }
+        let (head, tail) = match (words.first(), words.get(1)) {
+            (Some(head), Some(tail)) => (head.as_str(), tail.as_str()),
+            _ => return vec!["FOUND WANTS TWO WORDS OUT OF THE BOOK, LIKE IRON REACH".into()],
+        };
+        let Some(name) = vx_world::town::TownName::from_words(head, tail) else {
+            let (heads, tails) = vx_world::town::name_book();
+            return vec![
+                format!("NO SUCH NAME. HEADS: {}", heads.join(" ")),
+                format!("TAILS: {}", tails.join(" ")),
+            ];
+        };
+        let at = (
+            active.player.position.x.floor() as i32,
+            active.player.position.z.floor() as i32,
+        );
+        let site = match charter::may_found(&active.world, at, name) {
+            Ok(site) => site,
+            Err(refusal) => return vec![refusal.line()],
+        };
+        let tick = active.journal.tick();
+        let day = (tick / schedule::TICKS_PER_DAY) as u32;
+        let (head, tail) = name.indices();
+        active.journal.record(Command::Found {
+            x: at.0,
+            z: at.1,
+            head,
+            tail,
+        });
+        // The ground, exactly as replay will do it.
+        let raised = active.world.raise(site);
+        // The bookkeeping beside it.
+        active.charters.file(site, tick);
+        for office in office::OFFICES {
+            active.elections.seat_player(site.centre, office, day);
+            active.permits.borrow_mut().take_office(site.centre, office);
+        }
+        active.ledger.visit(site.centre);
+        // Onto the plaza: the plot was levelled under your feet, and standing
+        // inside the new ground is nobody's idea of a first morning.
+        let plaza = vx_world::town::beacon_position(&site);
+        active.player.position =
+            glam::DVec3::new(plaza.x as f64 + 2.5, plaza.y as f64, plaza.z as f64 + 2.5);
+        active.player.velocity = glam::DVec3::ZERO;
+        active.player.on_ground = false;
+        let line = format!(
+            "FOUNDED {}{}. THREE SETTLERS ARRIVED. YOU ARE MAYOR AND SHERIFF",
+            site.name.head(),
+            site.name.tail()
+        );
+        active.greeting = Some((line.clone(), Instant::now()));
+        vec![line, format!("{raised} CHUNKS RAISED - THE PLOT IS LEVELLED")]
+    }
+
+    /// `TAKE`: seize this town's chairs over its broken deputies.
+    ///
+    /// Only at the town's own console, and only while its posse is out and
+    /// none of it is standing. Recorded because you did it; replayed as
+    /// nothing, because a seat is a ledger entry. The price is every ledger
+    /// that already exists reading the same fact.
+    fn take_the_town(active: &mut Active) -> Vec<String> {
+        let town = *active.villagers.site();
+        if !active.board.open {
+            return vec!["TAKE IT AT THE TOWN'S OWN CONSOLE".into()];
+        }
+        if office::OFFICES
+            .into_iter()
+            .all(|office| active.elections.player_holds(town.centre, office))
+        {
+            return vec!["YOU ALREADY HOLD IT".into()];
+        }
+        if active.posse.town() != Some(town.centre) {
+            return vec!["THIS IS NOT YOUR FIGHT - NO DEPUTIES OF THIS TOWN ARE OUT".into()];
+        }
+        if !active.posse.broken() {
+            return vec![format!(
+                "THE DEPUTIES ARE STILL STANDING - {} OF THEM",
+                active.posse.active()
+            )];
+        }
+        let tick = active.journal.tick();
+        let day = (tick / schedule::TICKS_PER_DAY) as u32;
+        active.journal.record(Command::Take { town: town.centre });
+        active.elections.seize(town.centre, day);
+        for office in office::OFFICES {
+            active.permits.borrow_mut().take_office(town.centre, office);
+        }
+        active.posse.stand_down();
+        // The price, read off what exists: the factions, the sheet, the
+        // neighbours' paper on the next civic tick, and the people who live
+        // here — who trust you exactly nothing from this morning on.
+        active.reputation.with_compact(reputation::TAKEN_COMPACT);
+        active.reputation.with_holdouts(reputation::TAKEN_HOLDOUTS);
+        active.permits.borrow_mut().bounty += permits::TAKEN_BOUNTY;
+        active.friends.forfeit(town.centre);
+        active.warrants.clear(town.centre);
+        let line = format!(
+            "{}{} IS YOURS. THE COMPACT WILL REMEMBER IT",
+            town.name.head(),
+            town.name.tail()
+        );
+        active.greeting = Some((line.clone(), Instant::now()));
+        vec![
+            line,
+            "BOTH CHAIRS ARE YOURS. THE TOWN VOTES ON YOU AT ITS NEXT POLL".into(),
+            "EVERY NEIGHBOUR WILL HAVE PAPER ON YOU BY MORNING".into(),
+        ]
+    }
+
     fn put_your_name_in(active: &mut Active, town: &vx_world::town::TownSite) {
         let Some(office) = office::OFFICES.get(active.board.cursor()).copied() else {
             return;
@@ -6905,9 +7123,9 @@ impl App {
     /// stage 39 oracle test still holds with elections running through it.
     fn hold_the_polls(active: &mut Active, town: &vx_world::town::TownSite, tick: u64) {
         let day = (tick / schedule::TICKS_PER_DAY) as u32;
-        if !ballot::is_polling_day(town, day)
-            || active.elections.polled_this_term(town.centre, day)
-        {
+        // Each seat checks its own term inside `hold`, so a market day polls
+        // both chairs rather than the first one shutting the second out.
+        if !ballot::is_polling_day(town, day) {
             return;
         }
         let bounty = active.permits.borrow().bounty;
@@ -6921,6 +7139,7 @@ impl App {
                 incumbent_troubled: troubled,
                 standing: active.elections.is_standing(town.centre, office),
                 seat: office,
+                founder: active.charters.founded(town.centre),
             };
             if let Some(held) = active.elections.hold(&field, office, day) {
                 results.push(held);
@@ -6997,7 +7216,6 @@ impl App {
         // it, because somebody has to and he is the one holding the paper.
         let neighbours = active
             .world
-            .generator()
             .towns_near(town.centre, beacon::DISCOVERY_RANGE * 40);
         for other in neighbours {
             if other.centre == town.centre {
@@ -7563,6 +7781,12 @@ impl App {
                 // is not state a replay carries.
                 active.arcade.print();
                 "PRINTED A CARTRIDGE - IT IS ON THE HANDHELD".to_string()
+            }
+            printer::Output::Charter => {
+                // Live-only too: the charter is paper until it is filed, and
+                // filing is the order the journal carries.
+                active.charters.print();
+                "PRINTED A TOWN CHARTER - FOUND <HEAD> <TAIL> ON OPEN GROUND".to_string()
             }
             printer::Output::Upgrade(line) => {
                 // The same line the counter sells, raised the same way —
@@ -9357,7 +9581,6 @@ impl App {
                 let column = (hit.block.x, hit.block.z);
                 match active
                     .world
-                    .generator()
                     .towns_near(column, vx_world::town::REACH)
                     .into_iter()
                     .next()
@@ -9370,7 +9593,7 @@ impl App {
                         // the first seen.
                         let now = active.journal.tick();
                         let neighbours =
-                            active.world.generator().towns_near(site.centre, RADIO_RANGE);
+                            active.world.towns_near(site.centre, RADIO_RANGE);
                         let home = vx_world::town::home_site().centre;
                         let mut offers = Vec::new();
                         for good in 0..economy::GOODS.len() {
@@ -9413,7 +9636,6 @@ impl App {
                 let column = (hit.block.x, hit.block.z);
                 let Some(site) = active
                     .world
-                    .generator()
                     .towns_near(column, vx_world::town::REACH)
                     .into_iter()
                     .next()
@@ -9421,7 +9643,7 @@ impl App {
                     log::warn!("a beacon at {column:?} with no town behind it");
                     return;
                 };
-                let neighbours = active.world.generator().towns_near(site.centre, RADIO_RANGE);
+                let neighbours = active.world.towns_near(site.centre, RADIO_RANGE);
                 let postings = beacon::postings_for(&site, &neighbours);
                 // What this town will pay somebody to carry, and where to: the
                 // goods it is sitting on that a neighbour is short of.
@@ -9493,7 +9715,6 @@ impl App {
                 // town that is.
                 match active
                     .world
-                    .generator()
                     .towns_near((hit.block.x, hit.block.z), vx_world::town::REACH)
                     .into_iter()
                     .next()
@@ -10256,7 +10477,6 @@ impl App {
                 let now = active.journal.tick();
                 let site = active
                     .world
-                    .generator()
                     .towns_near((*x, *z), vx_world::town::REACH)
                     .into_iter()
                     .next();
@@ -10315,7 +10535,6 @@ impl App {
         );
         let town = active
             .world
-            .generator()
             .towns_near(column, vx_world::town::REACH)
             .into_iter()
             .next();
@@ -10485,7 +10704,7 @@ impl App {
             explored: &active.map,
             traffic: &traffic,
         };
-        let civic = civic_snapshot(&here, &active.warrants);
+        let civic = civic_snapshot(&here, &active.warrants, &active.charters, &active.elections);
         let day = (active.journal.tick() / schedule::TICKS_PER_DAY) as u32;
         let bounty = active.permits.borrow().bounty;
         let ballot = ballot_snapshot(&here, &active.elections, &active.friends, bounty, day);
@@ -10773,7 +10992,6 @@ impl App {
         let Some(town) = active.banks.town else { return };
         let name = active
             .world
-            .generator()
             .towns_near(town, 4)
             .into_iter()
             .next()
@@ -10855,7 +11073,6 @@ impl App {
             .and_then(|at| {
                 active
                     .world
-                    .generator()
                     .towns_near((at.x, at.z), vx_world::town::REACH)
                     .into_iter()
                     .next()
@@ -11195,6 +11412,9 @@ impl App {
         if let Err(error) = active.elections.save(save.root()) {
             log::error!("could not save the towns' elections: {error}");
         }
+        if let Err(error) = active.charters.save(save.root()) {
+            log::error!("could not save the charters: {error}");
+        }
         if let Err(error) = active.reputation.save(save.root()) {
             log::error!("could not save the player's reputation: {error}");
         }
@@ -11395,6 +11615,7 @@ impl ApplicationHandler for App {
         let mut stands = succession::Ledger::default();
         let mut warrants = warrant::Docket::default();
         let mut elections = ballot::Register::default();
+        let mut charters = charter::Charters::default();
         let mut condition = health::Health::default();
         let mut name = reputation::Reputation::default();
         let mut vaults = bank::Bank::default();
@@ -11437,6 +11658,10 @@ impl ApplicationHandler for App {
             // And which seats you hold, because a badge a reload forgot would
             // be an election that never happened.
             elections.load(save.root());
+            // And which towns you founded. The ground is in the region files
+            // already; the world only has to be told to answer for them.
+            charters.load(save.root());
+            charters.tell(&mut world);
             condition.load(save.root());
             name.load(save.root());
             vaults.load(save.root());
@@ -11560,6 +11785,7 @@ impl ApplicationHandler for App {
             stands,
             warrants,
             elections,
+            charters,
             audio: audio::Audio::open(),
             launcher_rig: Rig::launcher(),
             shake: 0.0,

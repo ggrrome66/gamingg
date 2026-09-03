@@ -61,6 +61,11 @@ pub const BOUNTY_BREACH: u64 = 60;
 pub const BOUNTY_VAULT: u64 = 500;
 /// Where stage 12's warrant chain starts paying attention.
 pub const WARRANT_THRESHOLD: u64 = 100;
+/// What seizing a town's chairs adds to the sheet: a vault's worth, so the
+/// warrant chain in every neighbouring town is looking at you by the next
+/// civic tick. The hostile route into office is priced by the bounty system
+/// itself, which is what the civic note asked for.
+pub const TAKEN_BOUNTY: u64 = BOUNTY_VAULT;
 
 /// What breaching a lock costs, by the grade of what was breached.
 ///

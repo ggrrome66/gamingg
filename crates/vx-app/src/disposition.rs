@@ -264,6 +264,17 @@ impl Disposition {
         true
     }
 
+    /// Every ledger in a town torn up: trust, friendship, all of it.
+    ///
+    /// What taking a town costs you with the people who live in it. Not a
+    /// crime entry the years soften — the book is simply gone, and the
+    /// business that would refill it starts from a blank page.
+    pub fn forfeit(&mut self, town: (i32, i32)) {
+        for index in 0..crate::people::PEOPLE as u8 {
+            self.ledgers.remove(&(town, index));
+        }
+    }
+
     /// A crime the town saw, spread across everyone who lives there. The
     /// scale is deliberately soft: neighbours forgive faster than the law.
     pub fn crime(&mut self, town: (i32, i32), billed: u64, day: u32) {
