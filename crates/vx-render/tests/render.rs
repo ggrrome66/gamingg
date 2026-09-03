@@ -105,7 +105,7 @@ fn terrain_renders_and_fills_the_lower_half_of_the_frame() {
     // Stand above the surface at the origin, looking slightly down.
     let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
     let camera = Camera {
-        position: glam::Vec3::new(0.0, surface as f32 + 12.0, 24.0),
+        position: glam::DVec3::new(0.0, surface as f64 + 12.0, 24.0),
         yaw: 0.0,
         pitch: -0.45,
         aspect: WIDTH as f32 / HEIGHT as f32,
@@ -152,7 +152,7 @@ fn the_camera_looking_up_sees_only_sky() {
 
     let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
     let camera = Camera {
-        position: glam::Vec3::new(0.0, surface as f32 + 4.0, 0.0),
+        position: glam::DVec3::new(0.0, surface as f64 + 4.0, 0.0),
         pitch: 1.4, // very nearly straight up
         aspect: WIDTH as f32 / HEIGHT as f32,
         ..Camera::default()
@@ -201,7 +201,7 @@ fn nearer_geometry_occludes_farther_geometry() {
     // because packed quads are chunk-local and unsigned: a chunk's origin has
     // y = 0, so geometry cannot sit below it.
     let camera = Camera {
-        position: glam::Vec3::new(0.0, 16.0, 0.0),
+        position: glam::DVec3::new(0.0, 16.0, 0.0),
         yaw: 0.0,
         pitch: 0.0,
         aspect: WIDTH as f32 / HEIGHT as f32,
@@ -259,7 +259,7 @@ fn solid_terrain_has_no_interior_faces() {
 
     let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
     let camera = Camera {
-        position: glam::Vec3::new(0.0, surface as f32 - 8.0, 0.0),
+        position: glam::DVec3::new(0.0, surface as f64 - 8.0, 0.0),
         pitch: 0.0,
         aspect: WIDTH as f32 / HEIGHT as f32,
         ..Camera::default()
@@ -396,7 +396,7 @@ fn frustum_culling_does_not_change_the_image() {
 
     let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
     let camera = Camera {
-        position: glam::Vec3::new(0.0, surface as f32 + 8.0, 0.0),
+        position: glam::DVec3::new(0.0, surface as f64 + 8.0, 0.0),
         yaw: 0.7,
         pitch: -0.2,
         aspect: WIDTH as f32 / HEIGHT as f32,
@@ -442,7 +442,7 @@ fn culling_holds_up_from_several_directions() {
 
     for step in 0..8 {
         let camera = Camera {
-            position: glam::Vec3::new(4.0, surface as f32 + 6.0, 4.0),
+            position: glam::DVec3::new(4.0, surface as f64 + 6.0, 4.0),
             yaw: step as f32 * std::f32::consts::FRAC_PI_4,
             pitch: if step % 3 == 0 { -0.6 } else { 0.3 },
             aspect: WIDTH as f32 / HEIGHT as f32,
@@ -473,7 +473,7 @@ fn culling_skips_most_of_the_world_when_looking_one_way() {
 
     let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
     let camera = Camera {
-        position: glam::Vec3::new(0.0, surface as f32 + 4.0, 0.0),
+        position: glam::DVec3::new(0.0, surface as f64 + 4.0, 0.0),
         yaw: 0.0,
         pitch: 0.0,
         aspect: WIDTH as f32 / HEIGHT as f32,
@@ -505,7 +505,7 @@ fn breaking_a_block_changes_what_is_drawn() {
     let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
     let camera = Camera {
         // Directly above the target, looking straight down at it.
-        position: glam::Vec3::new(0.5, surface as f32 + 4.0, 0.5),
+        position: glam::DVec3::new(0.5, surface as f64 + 4.0, 0.5),
         pitch: -std::f32::consts::FRAC_PI_2 + 0.05,
         aspect: WIDTH as f32 / HEIGHT as f32,
         ..Camera::default()
@@ -551,7 +551,7 @@ fn breaking_a_block_changes_what_is_drawn() {
 fn surface_camera(world: &World, height: f32, pitch: f32) -> Camera {
     let surface = world.surface_y(0, 0).expect("origin chunk is loaded");
     Camera {
-        position: Vec3::new(0.5, surface as f32 + height, 0.5),
+        position: glam::DVec3::new(0.5, surface as f64 + height as f64, 0.5),
         yaw: 0.0,
         pitch,
         aspect: WIDTH as f32 / HEIGHT as f32,
@@ -574,7 +574,7 @@ fn an_object_appears_where_it_is_placed_and_moves_with_its_transform() {
 
     // A cube a few blocks ahead, floating clear of the ground so terrain
     // cannot be what changed.
-    let ahead = Vec3::new(camera.position.x, camera.position.y, camera.position.z - 6.0);
+    let ahead = (camera.position - glam::DVec3::Z * 6.0).as_vec3();
     let object = Object::standing(ahead, 1.5, vx_render::tiles::slot::COPPER_ORE);
     renderer.set_objects(&context.device, &context.queue, &[object]);
     assert_eq!(renderer.visible_object_count(), 1);
@@ -657,9 +657,9 @@ fn culling_stays_pixel_identical_with_objects_present() {
         .map(|step| {
             let angle = step as f32 * std::f32::consts::TAU / 24.0;
             let centre = Vec3::new(
-                camera.position.x + angle.cos() * 12.0,
+                camera.position.x as f32 + angle.cos() * 12.0,
                 surface + 1.0,
-                camera.position.z + angle.sin() * 12.0,
+                camera.position.z as f32 + angle.sin() * 12.0,
             );
             Object::standing(centre, 1.2, vx_render::tiles::slot::SAND)
         })
@@ -707,7 +707,7 @@ fn a_swarm_of_objects_draws_in_one_call() {
             let x = (index % 20) as f32 - 10.0;
             let z = -(index / 20) as f32 - 2.0;
             Object::standing(
-                Vec3::new(camera.position.x + x, surface + 6.0, camera.position.z + z),
+                Vec3::new(camera.position.x as f32 + x, surface + 6.0, camera.position.z as f32 + z),
                 0.8,
                 vx_render::tiles::slot::BEDROCK,
             )
@@ -811,5 +811,101 @@ fn greedy_meshing_keeps_the_triangle_count_modest() {
         per_chunk < 20_000,
         "{per_chunk} triangles per chunk suggests merging is not working \
          (a {CHUNK_SIZE}-wide column of naive cubes would be far more)"
+    );
+}
+
+/// **The floating origin, proved the only way it can be.**
+///
+/// The same chunk meshes uploaded at the origin and again a hundred thousand
+/// chunks out — 1,600,000 blocks, sixteen hundred kilometres — with the
+/// camera, an object and the hand lamp moved by exactly the same offset. The
+/// two frames must be **byte-identical**. Not close: identical. There is no
+/// rounding to be close about, because nothing large ever reaches an `f32`
+/// multiply — the camera's chunk corner is subtracted from each chunk's corner
+/// in exact integer arithmetic before the vertex shader adds the local offset.
+///
+/// Before stage 42 this frame jittered by whole texels at that distance, and
+/// the object drifted off its block. If anything in the render path ever goes
+/// back to absolute world space this is the test that goes red.
+#[test]
+fn the_same_scene_renders_byte_identical_sixteen_hundred_kilometres_out() {
+    let Some(context) = context() else { return };
+
+    const FAR_CHUNKS: i32 = 100_000;
+    let far_blocks = (FAR_CHUNKS * vx_core::CHUNK_SIZE) as f64;
+    let far = glam::DVec3::new(far_blocks, 0.0, far_blocks);
+
+    // The meshes, built once. They are chunk-local, so the same bytes serve
+    // both uploads.
+    let mut world = World::new(2024);
+    world.load_around(ChunkPos::new(0, 0), 2);
+    let positions: Vec<ChunkPos> = (-2..=2)
+        .flat_map(|x| (-2..=2).map(move |z| ChunkPos::new(x, z)))
+        .filter(|pos| world.is_loaded(*pos))
+        .collect();
+    let meshes: Vec<(ChunkPos, vx_mesh::Mesh)> = positions
+        .iter()
+        .map(|pos| {
+            let origin = pos.origin();
+            (*pos, build_mesh(&world, world.registry(), [origin.x, 0, origin.z]))
+        })
+        .collect();
+    let surface = world.surface_y(0, 0).expect("origin chunk is loaded") as f64;
+
+    let frame = |offset_chunks: i32, offset: glam::DVec3| {
+        let mut renderer = Renderer::new(&context, CAPTURE_FORMAT, WIDTH, HEIGHT);
+        for (pos, mesh) in &meshes {
+            let shifted = ChunkPos::new(pos.x + offset_chunks, pos.z + offset_chunks);
+            renderer.set_chunk_mesh(&context.device, shifted, mesh);
+        }
+        // A camera that is not on a chunk line, looking across the country.
+        let camera = Camera {
+            position: glam::DVec3::new(3.25, surface + 5.5, 9.75) + offset,
+            yaw: 0.35,
+            pitch: -0.28,
+            aspect: WIDTH as f32 / HEIGHT as f32,
+            ..Camera::default()
+        };
+        renderer.update_camera(&context.queue, &camera);
+
+        // The hand lamp from the eye, so the fragment shader's own
+        // subtraction is in the picture too.
+        let mut sun = vx_render::SunUniform::default();
+        sun.light[0] = 0.2;
+        sun.light[1] = 0.1;
+        let eye = renderer.relative(camera.position);
+        let aim = camera.forward();
+        sun.lamp_position = [eye.x, eye.y, eye.z, 1.4];
+        sun.lamp_direction = [aim.x, aim.y, aim.z, 30.0];
+        renderer.set_sun(&context.queue, sun);
+
+        // One object ahead of the camera. Its absolute position is an `f32`,
+        // so it is placed on an eighth of a block: exact at either offset.
+        let ahead = camera.position + glam::DVec3::new(1.5, -1.0, -7.0);
+        let object = Object::standing(ahead.as_vec3(), 1.5, vx_render::tiles::slot::COPPER_ORE);
+        renderer.set_objects(&context.device, &context.queue, &[object]);
+        assert_eq!(renderer.visible_object_count(), 1, "the object was culled");
+        assert!(renderer.visible_chunk_count() > 3, "the country was culled");
+
+        capture_frame(&context, &renderer, WIDTH, HEIGHT)
+    };
+
+    let here = frame(0, glam::DVec3::ZERO);
+    let there = frame(FAR_CHUNKS, far);
+    save(&here, "origin_here.ppm");
+    save(&there, "origin_there.ppm");
+
+    // Sanity: it is a real picture, with ground and an object in it.
+    assert!(here.fraction_differing_from(sky_rgb()) > 0.3, "the scene is mostly sky");
+
+    let differing = here
+        .pixels
+        .iter()
+        .zip(there.pixels.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        differing, 0,
+        "{differing} bytes differ between the origin and sixteen hundred kilometres out"
     );
 }

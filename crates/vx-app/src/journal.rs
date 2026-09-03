@@ -175,7 +175,11 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // every stand a saw cleared — come back through meadow, thicket and mixed
 // forest on the day clock. A log recorded before this replays a country with
 // no weather, no fire and no regrowth, over ground that all three moved.
-const VERSION: u32 = 26;
+// 27: the player's body and its physics run in `f64` (stage 42). Nothing on
+// the wire changed, but a log recorded under 26 replays its movement through
+// a different integrator and may land a block off where it did — so it is a
+// different version, and the loader stays as tolerant as it has always been.
+const VERSION: u32 = 27;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -635,7 +639,7 @@ pub fn replay_from(
     log: &CommandLog,
     world: &mut World,
     events: &EventBus,
-    start: glam::Vec3,
+    start: glam::DVec3,
 ) -> Rebuilt {
     let mut state = Rebuilt {
         player: PlayerBody {
@@ -655,8 +659,8 @@ pub fn replay_from(
 /// Deterministic from the seed, which is what an oracle needs; it is not
 /// necessarily where the player actually stood.
 pub fn replay(log: &CommandLog, world: &mut World, events: &EventBus) -> Rebuilt {
-    let ground = world.surface_y(0, 0).unwrap_or(64) as f32;
-    replay_from(log, world, events, glam::Vec3::new(0.5, ground, 0.5))
+    let ground = world.surface_y(0, 0).unwrap_or(64) as f64;
+    replay_from(log, world, events, glam::DVec3::new(0.5, ground, 0.5))
 }
 
 fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Rebuilt) {
@@ -718,8 +722,8 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 }
             }
             Admin::Teleport { x, y, z } => {
-                state.player.position = glam::Vec3::new(*x as f32 + 0.5, *y as f32, *z as f32 + 0.5);
-                state.player.velocity = glam::Vec3::ZERO;
+                state.player.position = glam::DVec3::new(*x as f64 + 0.5, *y as f64, *z as f64 + 0.5);
+                state.player.velocity = glam::DVec3::ZERO;
                 state.player.on_ground = false;
             }
             Admin::SetStat { key, value } => {
@@ -920,7 +924,7 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 // recorded: the weather is a pure function of the tick and
                 // the strike is hashed off the same, so both sides get the
                 // same storm over the same ground.
-                let standing = state.player.position;
+                let standing = state.player.position.as_vec3();
                 burn_and_grow(
                     &mut state.fires,
                     &mut state.stands,
@@ -1982,7 +1986,7 @@ mod movement_replay_tests {
 
         let walked = replay(&journal, &mut world, &events);
 
-        let travelled = (walked.player.position - start).length();
+        let travelled = (walked.player.position - start.as_dvec3()).length();
         assert!(travelled > 3.0, "the replayed player only moved {travelled}");
     }
 
@@ -2008,6 +2012,51 @@ mod movement_replay_tests {
         let a = replay(&whole, &mut world(), &events);
         let b = replay(&split, &mut world(), &events);
         assert_eq!(a.player.position, b.player.position);
+    }
+
+    /// **The journal walks the same walk three thousand kilometres out.**
+    ///
+    /// The same recorded run replayed from the origin and from a start
+    /// three thousand kilometres away, over the same flat floor laid at both
+    /// places, must displace the player identically to a micrometre. In the
+    /// old `f32` integrator the far body's per-tick moves were rounded to a
+    /// quarter of a block and it stuck to the floor's own skin; this is the
+    /// stage 42 claim that the player is the one thing that travels, and
+    /// that the journal — the oracle everything else rests on — does not
+    /// care where on the map it was written.
+    #[test]
+    fn the_journal_walks_the_same_walk_three_thousand_kilometres_out() {
+        let floor = |world: &mut World, ox: i32, oz: i32| {
+            world.load_around(vx_core::BlockPos::new(ox, 0, oz).chunk(), 2);
+            let stone = world.registry().id_of("engine:stone").unwrap();
+            for x in -24..40 {
+                for z in -24..24 {
+                    for y in 60..90 {
+                        world.set_block(vx_core::BlockPos::new(ox + x, y, oz + z), vx_core::BlockId::AIR);
+                    }
+                    world.set_block(vx_core::BlockPos::new(ox + x, 64, oz + z), stone);
+                }
+            }
+        };
+        let journal = recorded();
+        let events = EventBus::new();
+
+        let walk = |ox: i32, oz: i32| {
+            let mut world = World::new(2024);
+            floor(&mut world, ox, oz);
+            let start = glam::DVec3::new(ox as f64 + 0.5, 65.0, oz as f64 + 0.5);
+            let done = replay_from(&journal, &mut world, &events, start);
+            (done.player.position - start, done.movement.stance)
+        };
+
+        let (here, stance_here) = walk(0, 0);
+        let (there, stance_there) = walk(3_000_000, 3_000_000);
+        assert!(here.length() > 3.0, "the player did not walk: {here}");
+        assert!(
+            (here - there).length() < 1.0e-6,
+            "the same journal walked {here} at spawn and {there} far out"
+        );
+        assert_eq!(stance_here, stance_there);
     }
 
     #[test]
@@ -2182,7 +2231,7 @@ mod admin_tests {
         let rebuilt = replay(&journal, &mut world(), &events);
         assert_eq!(
             rebuilt.player.position,
-            glam::Vec3::new(100.5, 80.0, -39.5),
+            glam::DVec3::new(100.5, 80.0, -39.5),
             "the landing spot moved"
         );
     }

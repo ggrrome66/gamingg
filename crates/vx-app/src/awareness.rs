@@ -196,8 +196,8 @@ impl Perception {
                 (Some(world), Some(registry)) => sight::sees(
                     world,
                     registry,
-                    from,
-                    candidate.position + Vec3::Y * candidate.eye,
+                    from.as_dvec3(),
+                    (candidate.position + Vec3::Y * candidate.eye).as_dvec3(),
                     range,
                 ),
                 // No terrain to get in the way.

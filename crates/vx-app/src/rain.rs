@@ -62,7 +62,11 @@ pub fn drops(sky: &Conditions) -> usize {
 /// Pure in `(seed, seconds, eye, sky)`. `seconds` is wall time rather than
 /// the game tick so the rain keeps moving smoothly between the 64 Hz steps —
 /// nothing downstream of this reads it, so it never touches the hash.
-pub fn streaks(seed: u64, seconds: f32, eye: Vec3, sky: &Conditions) -> Vec<Object> {
+pub fn streaks(seed: u64, seconds: f32, eye: glam::DVec3, sky: &Conditions) -> Vec<Object> {
+    // The sheet is drawn around the eye and never more than a chunk from it,
+    // so it is built in the eye's own frame and narrowed once — a streak's
+    // position is exact however far the eye is from the world's origin.
+    let eye = eye.as_vec3();
     let count = drops(sky);
     if count == 0 {
         return Vec::new();
@@ -138,7 +142,7 @@ mod tests {
     #[test]
     fn dry_weather_draws_no_rain() {
         assert_eq!(drops(&sky(0.0, (0.0, 0.0))), 0);
-        assert!(streaks(7, 3.0, Vec3::ZERO, &sky(0.0, (0.0, 0.0))).is_empty());
+        assert!(streaks(7, 3.0, glam::DVec3::ZERO, &sky(0.0, (0.0, 0.0))).is_empty());
     }
 
     /// And a downpour draws more than a shower.
@@ -157,10 +161,10 @@ mod tests {
     #[test]
     fn the_same_moment_draws_the_same_rain() {
         let conditions = sky(0.7, (3.0, -2.0));
-        let first = streaks(11, 4.25, Vec3::new(8.0, 70.0, -3.0), &conditions);
-        let again = streaks(11, 4.25, Vec3::new(8.0, 70.0, -3.0), &conditions);
+        let first = streaks(11, 4.25, glam::DVec3::new(8.0, 70.0, -3.0), &conditions);
+        let again = streaks(11, 4.25, glam::DVec3::new(8.0, 70.0, -3.0), &conditions);
         assert_eq!(first, again);
-        let elsewhen = streaks(11, 4.30, Vec3::new(8.0, 70.0, -3.0), &conditions);
+        let elsewhen = streaks(11, 4.30, glam::DVec3::new(8.0, 70.0, -3.0), &conditions);
         assert_ne!(first, elsewhen);
     }
 
@@ -170,7 +174,7 @@ mod tests {
     fn the_sheet_travels_with_you() {
         let conditions = sky(1.0, (0.0, 0.0));
         let eye = Vec3::new(2_000.0, 90.0, -1_400.0);
-        for streak in streaks(3, 1.0, eye, &conditions) {
+        for streak in streaks(3, 1.0, eye.as_dvec3(), &conditions) {
             let centre = (streak.bounds_min + streak.bounds_max) * 0.5;
             assert!((centre.x - eye.x).abs() <= COLUMN + LENGTH);
             assert!((centre.z - eye.z).abs() <= COLUMN + LENGTH);
@@ -186,8 +190,8 @@ mod tests {
     #[test]
     fn wind_slants_the_streaks() {
         let eye = Vec3::new(0.0, 64.0, 0.0);
-        let calm = streaks(5, 2.0, eye, &sky(1.0, (0.0, 0.0)));
-        let blown = streaks(5, 2.0, eye, &sky(1.0, (13.0, 0.0)));
+        let calm = streaks(5, 2.0, eye.as_dvec3(), &sky(1.0, (0.0, 0.0)));
+        let blown = streaks(5, 2.0, eye.as_dvec3(), &sky(1.0, (13.0, 0.0)));
         let width = |objects: &[Object]| {
             objects
                 .iter()

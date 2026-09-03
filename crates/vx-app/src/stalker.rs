@@ -369,8 +369,8 @@ impl TheDark {
             && vx_world::sight::sees(
                 world,
                 registry,
-                stalker.eye(),
-                player + Vec3::new(0.0, 1.5, 0.0),
+                stalker.eye().as_dvec3(),
+                (player + Vec3::new(0.0, 1.5, 0.0)).as_dvec3(),
                 SIGHT,
             );
 
@@ -392,7 +392,7 @@ impl TheDark {
             stalker.belief.clear_seen(|x, z| {
                 let at = Vec3::new(x as f32 + 0.5, eye.y, z as f32 + 0.5);
                 (at - eye).length() <= SIGHT
-                    && vx_world::sight::sees(world, registry, eye, at, SIGHT)
+                    && vx_world::sight::sees(world, registry, eye.as_dvec3(), at.as_dvec3(), SIGHT)
             });
             // A fresh rumour, but never over a fresh sighting — the shelters'
             // rule, and for the same reason.

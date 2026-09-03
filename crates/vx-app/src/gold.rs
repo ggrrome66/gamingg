@@ -125,7 +125,7 @@ impl Row {
 /// never holds game state, it looks at it.
 pub struct Telemetry<'a> {
     pub tick: u64,
-    pub position: glam::Vec3,
+    pub position: glam::DVec3,
     pub stance: &'static str,
     pub stamina: f32,
     pub credits: u64,
@@ -201,6 +201,16 @@ impl Gold {
             Row::note(
                 "AT",
                 format!("{:.0} {:.0} {:.0}  {}", at.x, at.y, at.z, telemetry.stance),
+            ),
+            // The chunk corner the renderer measures from: the floating
+            // origin, made visible to whoever is tuning.
+            Row::note(
+                "ORIGIN",
+                format!(
+                    "{:.0} {:.0}",
+                    (at.x / 16.0).floor() * 16.0,
+                    (at.z / 16.0).floor() * 16.0
+                ),
             ),
             Row::note("STAMINA", format!("{:.0}", telemetry.stamina)),
             Row::note("CREDITS", format!("{}", telemetry.credits)),
@@ -457,7 +467,7 @@ mod tests {
     fn telemetry(tuning: &tuning::Tuning) -> Telemetry<'_> {
         Telemetry {
             tick: 4_200,
-            position: glam::Vec3::new(-13.5, 73.0, 9.5),
+            position: glam::DVec3::new(-13.5, 73.0, 9.5),
             stance: "STAND",
             stamina: 87.0,
             credits: 250,

@@ -13,7 +13,7 @@
 //! it: an obstruction only counts when it is meaningfully nearer than the
 //! target.
 
-use glam::Vec3;
+use glam::DVec3;
 use vx_core::BlockRegistry;
 
 use crate::chunk::BlockView;
@@ -32,10 +32,13 @@ pub const SIGHT_SLACK: f32 = 0.1;
 pub fn obstruction(
     view: &impl BlockView,
     registry: &BlockRegistry,
-    from: Vec3,
-    to: Vec3,
+    from: DVec3,
+    to: DVec3,
 ) -> Option<RayHit> {
-    let along = to - from;
+    // The difference is taken in `f64` and only then narrowed: two eyes far
+    // from the origin are close to each other, and that is the number that
+    // has to be exact.
+    let along = (to - from).as_vec3();
     let reach = along.length();
     if reach < f32::EPSILON {
         // Standing in the same spot: nothing can be between you.
@@ -49,11 +52,11 @@ pub fn obstruction(
 pub fn sees(
     view: &impl BlockView,
     registry: &BlockRegistry,
-    from: Vec3,
-    to: Vec3,
+    from: DVec3,
+    to: DVec3,
     range: f32,
 ) -> bool {
-    if (to - from).length() > range {
+    if (to - from).length() > range as f64 {
         return false;
     }
     obstruction(view, registry, from, to).is_none()
@@ -81,7 +84,7 @@ mod tests {
         chunk
     }
 
-    fn visible(chunk: &Chunk, from: Vec3, to: Vec3, range: f32) -> bool {
+    fn visible(chunk: &Chunk, from: DVec3, to: DVec3, range: f32) -> bool {
         sees(&SoloChunkView(chunk), &registry(), from, to, range)
     }
 
@@ -90,8 +93,8 @@ mod tests {
         let empty = Chunk::empty(ChunkPos::new(0, 0));
         assert!(visible(
             &empty,
-            Vec3::new(2.5, 40.5, 2.5),
-            Vec3::new(12.5, 40.5, 12.5),
+            DVec3::new(2.5, 40.5, 2.5),
+            DVec3::new(12.5, 40.5, 12.5),
             40.0
         ));
     }
@@ -101,8 +104,8 @@ mod tests {
         let chunk = wall_at(8, 40, 8);
         assert!(!visible(
             &chunk,
-            Vec3::new(8.5, 40.5, 2.5),
-            Vec3::new(8.5, 40.5, 14.5),
+            DVec3::new(8.5, 40.5, 2.5),
+            DVec3::new(8.5, 40.5, 14.5),
             40.0
         ));
     }
@@ -112,8 +115,8 @@ mod tests {
         // The classic false negative: the ray clips the block the target is
         // pressed up against a hair before reaching them.
         let chunk = wall_at(8, 40, 8);
-        let watcher = Vec3::new(8.5, 40.5, 2.5);
-        let leaning = Vec3::new(8.5, 40.5, 7.95);
+        let watcher = DVec3::new(8.5, 40.5, 2.5);
+        let leaning = DVec3::new(8.5, 40.5, 7.95);
         assert!(
             visible(&chunk, watcher, leaning, 40.0),
             "somebody leaning on a wall went invisible"
@@ -126,8 +129,8 @@ mod tests {
         let chunk = wall_at(8, 40, 8);
         assert!(!visible(
             &chunk,
-            Vec3::new(8.5, 40.5, 8.5),
-            Vec3::new(8.5, 40.5, 14.5),
+            DVec3::new(8.5, 40.5, 8.5),
+            DVec3::new(8.5, 40.5, 14.5),
             40.0
         ));
     }
@@ -135,8 +138,8 @@ mod tests {
     #[test]
     fn sight_stops_at_the_range_limit() {
         let empty = Chunk::empty(ChunkPos::new(0, 0));
-        let watcher = Vec3::new(2.5, 40.5, 2.5);
-        let far = Vec3::new(2.5, 40.5, 22.5);
+        let watcher = DVec3::new(2.5, 40.5, 2.5);
+        let far = DVec3::new(2.5, 40.5, 22.5);
         assert!(visible(&empty, watcher, far, 25.0));
         assert!(!visible(&empty, watcher, far, 10.0), "range was not honoured");
     }
@@ -144,7 +147,7 @@ mod tests {
     #[test]
     fn a_zero_length_line_is_clear_rather_than_looping() {
         let chunk = wall_at(8, 40, 8);
-        let here = Vec3::new(4.5, 40.5, 4.5);
+        let here = DVec3::new(4.5, 40.5, 4.5);
         assert!(obstruction(&SoloChunkView(&chunk), &registry(), here, here).is_none());
         assert!(visible(&chunk, here, here, 1.0));
     }
@@ -155,11 +158,11 @@ mod tests {
         // one-sided stares possible and is exactly the sort of thing that
         // shows up as a bug much later.
         let chunk = wall_at(8, 40, 8);
-        let a = Vec3::new(8.5, 40.5, 2.5);
-        let b = Vec3::new(8.5, 40.5, 14.5);
+        let a = DVec3::new(8.5, 40.5, 2.5);
+        let b = DVec3::new(8.5, 40.5, 14.5);
         assert_eq!(visible(&chunk, a, b, 40.0), visible(&chunk, b, a, 40.0));
 
-        let open = Vec3::new(3.5, 40.5, 14.5);
+        let open = DVec3::new(3.5, 40.5, 14.5);
         assert_eq!(visible(&chunk, a, open, 40.0), visible(&chunk, open, a, 40.0));
     }
 }

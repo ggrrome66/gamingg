@@ -189,7 +189,7 @@ mod tests {
         raycast_solid(
             world,
             world.registry(),
-            Vec3::new(x as f32 + 0.5, top as f32 + 5.0, z as f32 + 0.5),
+            glam::DVec3::new(x as f64 + 0.5, top as f64 + 5.0, z as f64 + 0.5),
             Vec3::NEG_Y,
             20.0,
         )

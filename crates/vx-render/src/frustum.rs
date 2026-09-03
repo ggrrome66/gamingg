@@ -108,7 +108,7 @@ mod tests {
 
     fn camera() -> Camera {
         Camera {
-            position: Vec3::ZERO,
+            position: glam::DVec3::ZERO,
             yaw: 0.0,
             pitch: 0.0,
             aspect: 16.0 / 9.0,

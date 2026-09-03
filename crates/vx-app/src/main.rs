@@ -694,7 +694,7 @@ fn build_scene(
 
     let surface = world.surface_y(at.0, at.1).unwrap_or(80);
     let camera = Camera {
-        position: glam::Vec3::new(at.0 as f32, surface as f32 + 10.0, at.1 as f32 + 20.0),
+        position: glam::DVec3::new(at.0 as f64, surface as f64 + 10.0, at.1 as f64 + 20.0),
         pitch: -0.35,
         ..Camera::default()
     };
@@ -869,10 +869,10 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                 .ok_or("the bunker has no rooms")?;
             let base = site.level_base(room.level);
             let (cx, cz) = room.centre();
-            camera.position = glam::Vec3::new(
-                cx as f32 + 0.5 - room.w as f32 * 0.32,
-                base as f32 + 2.2,
-                cz as f32 + 0.5,
+            camera.position = glam::DVec3::new(
+                cx as f64 + 0.5 - room.w as f64 * 0.32,
+                base as f64 + 2.2,
+                cz as f64 + 0.5,
             );
             look_at(
                 &mut camera,
@@ -887,8 +887,11 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             let local = world
                 .surface_y(stand.x.floor() as i32, stand.z.floor() as i32)
                 .unwrap_or(site.hatch_ground);
-            camera.position =
-                glam::Vec3::new(stand.x, local.max(site.hatch_ground) as f32 + 7.0, stand.z);
+            camera.position = glam::DVec3::new(
+                stand.x as f64,
+                local.max(site.hatch_ground) as f64 + 7.0,
+                stand.z as f64,
+            );
             look_at(
                 &mut camera,
                 glam::Vec3::new(
@@ -946,10 +949,10 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                 heading = (dx, dz, clear);
             }
         }
-        camera.position = glam::Vec3::new(
-            spot.x as f32 + 0.5,
-            spot.y as f32 + 1.1,
-            spot.z as f32 + 0.5,
+        camera.position = glam::DVec3::new(
+            spot.x as f64 + 0.5,
+            spot.y as f64 + 1.1,
+            spot.z as f64 + 0.5,
         );
         camera.yaw = (heading.0 as f32).atan2(-(heading.1 as f32));
         camera.pitch = -0.08;
@@ -1187,10 +1190,10 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             .sum();
         println!("wound capture: {wounds} composite blocks, {cells} cells taken");
 
-        camera.position = glam::Vec3::new(
-            options.at.0 as f32 + 0.5,
-            ground as f32 + 3.0,
-            wall_z as f32 - if options.close { 3.0 } else { 6.5 },
+        camera.position = glam::DVec3::new(
+            options.at.0 as f64 + 0.5,
+            ground as f64 + 3.0,
+            wall_z as f64 - if options.close { 3.0 } else { 6.5 },
         );
         look_at(
             &mut camera,
@@ -1243,7 +1246,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             site.ground as f32 - 2.5,
             bank.max.z as f32 + 1.0,
         );
-        camera.position = look + glam::Vec3::new(-1.5, 1.0, 6.5);
+        camera.position = (look + glam::Vec3::new(-1.5, 1.0, 6.5)).as_dvec3();
         look_at(&mut camera, look);
     }
 
@@ -1271,7 +1274,8 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         remesh_all(&context, &mut renderer, &mut world);
 
         let look = glam::Vec3::new(site.centre.0 as f32, site.ground as f32, site.centre.1 as f32);
-        camera.position = look + glam::Vec3::new(0.0, fort.radius * 1.5, fort.radius * 1.45);
+        camera.position =
+            (look + glam::Vec3::new(0.0, fort.radius * 1.5, fort.radius * 1.45)).as_dvec3();
         look_at(&mut camera, look);
     }
 
@@ -1311,7 +1315,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         let at = found.ok_or("this town has no vault")?;
         println!("vault at {at:?} in {}", site.name.head());
         camera.position =
-            glam::Vec3::new(at.x as f32 + 0.5, at.y as f32 + 1.3, at.z as f32 + 3.4);
+            glam::DVec3::new(at.x as f64 + 0.5, at.y as f64 + 1.3, at.z as f64 + 3.4);
         look_at(
             &mut camera,
             glam::Vec3::new(at.x as f32 + 0.5, at.y as f32 + 0.6, at.z as f32 + 0.5),
@@ -1358,10 +1362,10 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             remesh_all(&context, &mut renderer, &mut world);
         }
         println!("electrolyser stood at {stand:?}");
-        camera.position = glam::Vec3::new(
-            stand.x as f32 + 3.4,
-            stand.y as f32 + 2.4,
-            stand.z as f32 + 4.2,
+        camera.position = glam::DVec3::new(
+            stand.x as f64 + 3.4,
+            stand.y as f64 + 2.4,
+            stand.z as f64 + 4.2,
         );
         look_at(
             &mut camera,
@@ -1383,7 +1387,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                 // panel: the capture that shows the block, not the screen.
                 let subject =
                     glam::Vec3::new(x as f32 + 0.5, ground as f32 + 0.5, z as f32 + 0.5);
-                camera.position = subject + glam::Vec3::new(2.4, 1.6, 3.0);
+                camera.position = (subject + glam::Vec3::new(2.4, 1.6, 3.0)).as_dvec3();
                 look_at(&mut camera, subject);
             }
         }
@@ -1419,7 +1423,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             } else {
                 glam::Vec3::new(0.7, 0.0, 0.7).normalize()
             };
-            camera.position = subject + out * 3.2 + glam::Vec3::Y * 1.2;
+            camera.position = (subject + out * 3.2 + glam::Vec3::Y * 1.2).as_dvec3();
             look_at(&mut camera, subject);
         } else {
             let centre = glam::Vec3::new(
@@ -1429,8 +1433,9 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             );
             let span = workings.size();
             let stand_off = (span[0].max(span[2]) as f32 * 1.4).max(24.0);
-            camera.position = centre
-                + glam::Vec3::new(stand_off * 0.7, stand_off * 0.8, stand_off * 0.7);
+            camera.position = (centre
+                + glam::Vec3::new(stand_off * 0.7, stand_off * 0.8, stand_off * 0.7))
+            .as_dvec3();
             look_at(&mut camera, centre);
         }
         let _ = portal;
@@ -1503,15 +1508,23 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // the drill by default, the launcher under `--launcher`.
         let camera_forward = camera.forward();
         let camera_right = camera.right();
-        let drill_position =
-            camera.position + camera_forward * 0.85 + camera_right * 0.42 - glam::Vec3::Y * 0.38;
+        // In the renderer's own frame, marked so: the tool in your hand is
+        // the one object that must never be a quarter of a block off.
+        let drill_position = renderer.relative(camera.position)
+            + camera_forward * 0.85
+            + camera_right * 0.42
+            - glam::Vec3::Y * 0.38;
         let drill_yaw = rig::yaw_towards(camera_forward.x, camera_forward.z).unwrap_or(0.0);
         let held = if options.launcher {
             Rig::launcher()
         } else {
             Rig::hand_drill()
         };
-        objects.extend(held.objects_pitched(drill_position, drill_yaw, camera.pitch, 0.7));
+        objects.extend(
+            held.objects_pitched(drill_position, drill_yaw, camera.pitch, 0.7)
+                .into_iter()
+                .map(vx_render::Object::already_relative),
+        );
 
         renderer.set_objects(&context.device, &context.queue, &objects);
 
@@ -1639,7 +1652,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // exactly as the live view does it.
         let pivot = camera.position;
         let placed = view::camera_placement(&world, &camera, pivot, view::ViewMode::ThirdPerson);
-        let body = pivot - glam::Vec3::Y * 1.62;
+        let body = (pivot - glam::DVec3::Y * 1.62).as_vec3();
         let forward = camera.forward();
         let yaw = rig::yaw_towards(forward.x, forward.z).unwrap_or(0.0);
         let mut objects = Rig::player().objects(body, yaw, 0.0);
@@ -1766,10 +1779,11 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                 .iter()
                 .fold(player, |sum, deputy| sum + deputy.position)
                 / (posse.deputies.len() + 1) as f32;
-            camera.position = glam::Vec3::new(overhead.x, overhead.y + 18.0, overhead.z + 0.1);
+            camera.position =
+                glam::Vec3::new(overhead.x, overhead.y + 18.0, overhead.z + 0.1).as_dvec3();
             look_at(&mut camera, overhead);
         } else {
-            camera.position = player + glam::Vec3::new(0.0, 6.0, 14.0);
+            camera.position = (player + glam::Vec3::new(0.0, 6.0, 14.0)).as_dvec3();
             look_at(&mut camera, player);
         }
         renderer.update_camera(&context.queue, &camera);
@@ -1882,7 +1896,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             .flat_map(|squad| &squad.holders)
             .fold(hatch, |sum, holder| sum + holder.position)
             / (squads.squads.iter().map(|squad| squad.holders.len()).sum::<usize>() + 1) as f32;
-        camera.position = glam::Vec3::new(centre.x, centre.y + 16.0, centre.z + 0.1);
+        camera.position = glam::Vec3::new(centre.x, centre.y + 16.0, centre.z + 0.1).as_dvec3();
         look_at(&mut camera, centre);
         renderer.update_camera(&context.queue, &camera);
         println!(
@@ -2025,7 +2039,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             ground as f32 + 3.1,
             (z - towards.1 * 13) as f32 + 0.5,
         );
-        camera.position = eye;
+        camera.position = eye.as_dvec3();
         look_at(
             &mut camera,
             glam::Vec3::new(x as f32 + 0.5, ground as f32 + 1.4, z as f32 + 0.5),
@@ -2130,7 +2144,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // looking out along the wind, so the streaks lean across the frame
         // and the country is under them rather than behind one trunk.
         let eye = glam::Vec3::new(x as f32 + 0.5, top as f32 + 13.0, z as f32 + 0.5);
-        camera.position = eye;
+        camera.position = eye.as_dvec3();
         let along = glam::Vec3::new(sky.wind.0, 0.0, sky.wind.1).normalize_or_zero();
         let out = if along == glam::Vec3::ZERO { glam::Vec3::Z } else { along };
         look_at(&mut camera, eye + out * 60.0 - glam::Vec3::Y * 22.0);
@@ -2138,7 +2152,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         renderer.set_objects(
             &context.device,
             &context.queue,
-            &rain::streaks(seed, tick as f32 / 64.0, eye, &sky),
+            &rain::streaks(seed, tick as f32 / 64.0, eye.as_dvec3(), &sky),
         );
         weather_over = Some(sky);
 
@@ -2338,7 +2352,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // the bottom of the frame.
         let heart = glam::Vec3::new(start.x as f32 + 0.5, start.y as f32, start.z as f32 + 0.5);
         let eye = heart + glam::Vec3::Y * 11.0 - back * 24.0;
-        camera.position = eye;
+        camera.position = eye.as_dvec3();
         look_at(&mut camera, heart + back * 6.0);
         renderer.update_camera(&context.queue, &camera);
         renderer.set_objects(&context.device, &context.queue, &[]);
@@ -2438,7 +2452,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         );
         let across = glam::Vec3::new(-direction.z, 0.0, direction.x);
         let eye = hinge + direction * 9.0 + across * 15.0 + glam::Vec3::Y * 7.0;
-        camera.position = eye;
+        camera.position = eye.as_dvec3();
         look_at(&mut camera, hinge + direction * 4.0 + glam::Vec3::Y * 2.5);
         // Camera before objects: `set_objects` culls against the last
         // uploaded frustum, the trap stage 31 found the hard way.
@@ -2581,7 +2595,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             ground.max(behind) + 13.0,
             back_z as f32,
         );
-        camera.position = eye;
+        camera.position = eye.as_dvec3();
         look_at(&mut camera, glam::Vec3::new(x as f32, ground + 6.0, z as f32));
         renderer.update_camera(&context.queue, &camera);
 
@@ -2703,7 +2717,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // culler throws away.
         // Framed off-centre on purpose: the panel is drawn in the middle of
         // the screen, so the machine it belongs to has to live beside it.
-        camera.position = at + glam::Vec3::new(7.0, 4.0, 9.0);
+        camera.position = (at + glam::Vec3::new(7.0, 4.0, 9.0)).as_dvec3();
         look_at(&mut camera, at + glam::Vec3::new(4.0, 1.0, 5.0));
         renderer.update_camera(&context.queue, &camera);
 
@@ -2764,7 +2778,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         );
         // Camera first, then the scene: the culler works off the last
         // uploaded frustum.
-        camera.position = face + glam::Vec3::new(2.5, 2.0, -7.0);
+        camera.position = (face + glam::Vec3::new(2.5, 2.0, -7.0)).as_dvec3();
         look_at(&mut camera, face);
         renderer.update_camera(&context.queue, &camera);
 
@@ -2897,7 +2911,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // player sees before it is on them, so the picture is that distance
         // and not a safer one.
         let towards = (at - player).normalize_or_zero();
-        camera.position = at - towards * 3.2 + glam::Vec3::Y * 1.45;
+        camera.position = (at - towards * 3.2 + glam::Vec3::Y * 1.45).as_dvec3();
         look_at(&mut camera, at + glam::Vec3::Y * 0.55);
         renderer.update_camera(&context.queue, &camera);
 
@@ -2996,7 +3010,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // The camera first: `set_objects` culls against the last uploaded
         // frustum, which is the trap stage 31 found the hard way.
         let front = player + glam::Vec3::new(0.0, 0.0, 3.2);
-        camera.position = front + glam::Vec3::new(0.0, 1.55, 0.0);
+        camera.position = (front + glam::Vec3::new(0.0, 1.55, 0.0)).as_dvec3();
         look_at(&mut camera, player + glam::Vec3::new(0.0, 1.45, 0.0));
         renderer.update_camera(&context.queue, &camera);
 
@@ -3006,9 +3020,9 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             let rig = &rigs[index % rigs.len()];
             // Facing the camera, and looking at it: the gaze is computed by
             // the same call the game makes every frame.
-            let yaw = rig::yaw_towards(0.0, camera.position.z - at.z).unwrap_or(0.0);
+            let yaw = rig::yaw_towards(0.0, (camera.position.z - at.z as f64) as f32).unwrap_or(0.0);
             let eye = at + glam::Vec3::new(0.0, 1.4, 0.0);
-            let gaze = rig::Gaze::towards(eye, yaw, camera.position);
+            let gaze = rig::Gaze::towards(eye, yaw, camera.position.as_vec3());
             objects.extend(rig.objects_looking(at, yaw, 0.0, gaze));
         }
         renderer.set_objects(&context.device, &context.queue, &objects);
@@ -3050,7 +3064,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // High enough that the whole ring fits: at a sixty-degree field of
         // view the ground covered is about the height, so anything less than
         // twice the radius crops the wall the picture is about.
-        camera.position = middle + glam::Vec3::new(0.0, fort.radius * 2.7, 0.1);
+        camera.position = (middle + glam::Vec3::new(0.0, fort.radius * 2.7, 0.1)).as_dvec3();
         look_at(&mut camera, middle);
         renderer.update_camera(&context.queue, &camera);
         renderer.set_objects(&context.device, &context.queue, &[]);
@@ -3104,7 +3118,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             site.ground as f32 + 1.0,
             site.centre.1 as f32 + 7.0,
         );
-        camera.position = door + glam::Vec3::new(-8.0, 9.0, -15.0);
+        camera.position = (door + glam::Vec3::new(-8.0, 9.0, -15.0)).as_dvec3();
         look_at(&mut camera, door + glam::Vec3::new(1.0, 0.0, 3.0));
         renderer.update_camera(&context.queue, &camera);
         let cot = vx_core::BlockPos::new(site.centre.0 + 14, site.ground + 1, site.centre.1 + 12);
@@ -3131,7 +3145,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         if options.handheld_map {
             handheld.turn_page();
         }
-        let roster = mining.roster(camera.position);
+        let roster = mining.roster(camera.position.as_vec3());
         // The map page needs the country under it; the roster page does not.
         let explored = {
             let mut seen = map::MapState::new();
@@ -3248,14 +3262,18 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         renderer.update_camera(&context.queue, &camera);
         let forward = camera.forward();
         let right = camera.right();
-        let held = device::carried_at(camera.position, forward, right, handheld.raise);
+        let held = device::carried_at(renderer.relative(camera.position), forward, right, handheld.raise);
         let (_, _, _, tilt) = device::carry(handheld.raise);
-        let mut objects = Rig::handheld().objects_pitched(
-            held,
-            rig::yaw_towards(forward.x, forward.z).unwrap_or(0.0),
-            camera.pitch - tilt,
-            0.0,
-        );
+        let mut objects: Vec<vx_render::Object> = Rig::handheld()
+            .objects_pitched(
+                held,
+                rig::yaw_towards(forward.x, forward.z).unwrap_or(0.0),
+                camera.pitch - tilt,
+                0.0,
+            )
+            .into_iter()
+            .map(vx_render::Object::already_relative)
+            .collect();
         // Whoever was already on screen stays on screen.
         let rigs = Villagers::rigs();
         let mut town = Villagers::new();
@@ -3267,7 +3285,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         renderer.set_objects(&context.device, &context.queue, &objects);
 
         // And the readout on its glass, exactly as the game places it.
-        let corners = device::screen_corners(camera.position, forward, right, handheld.raise);
+        let corners = device::screen_corners(camera.local_position(), forward, right, handheld.raise);
         if let Some(rect) =
             device::screen_rect(camera.view_projection(), corners, (width as f32, height as f32))
         {
@@ -3313,7 +3331,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         let tuning = tuning::Tuning::default();
         let telemetry = gold::Telemetry {
             tick: 4_200,
-            position: glam::Vec3::new(-13.5, 73.0, 9.5),
+            position: glam::DVec3::new(-13.5, 73.0, 9.5),
             stance: "STAND",
             stamina: 87.0,
             credits: 250,
@@ -3994,7 +4012,8 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     match options.optic.as_deref() {
         Some("lamp") => {
             let aim = camera.forward();
-            sun.lamp_position = [camera.position.x, camera.position.y, camera.position.z, 1.35];
+            let eye = renderer.relative(camera.position);
+            sun.lamp_position = [eye.x, eye.y, eye.z, 1.35];
             sun.lamp_direction = [aim.x, aim.y, aim.z, 30.0];
         }
         Some("nvg") => {
@@ -4150,8 +4169,10 @@ fn trunk_rig(fall: &felling::Falling) -> rig::Rig {
     rig::Rig::trunk(fall.height, thickness, bark, crown)
 }
 
-fn look_at(camera: &mut Camera, target: glam::Vec3) {
-    let to = target - camera.position;
+fn look_at(camera: &mut Camera, target: impl Into<glam::DVec3>) {
+    // The difference in `f64`, then narrowed: a fixture three thousand
+    // kilometres out aims as precisely as one at spawn.
+    let to = (target.into() - camera.position).as_vec3();
     camera.yaw = to.x.atan2(-to.z);
     camera.pitch = to.y.atan2((to.x * to.x + to.z * to.z).sqrt());
     camera.clamp_pitch();
@@ -4580,7 +4601,7 @@ impl App {
             || active.intro.open
             || feed.is_some();
         if busy || active.resuming {
-            active.player.velocity = glam::Vec3::ZERO;
+            active.player.velocity = glam::DVec3::ZERO;
         }
         let trading = busy;
 
@@ -4593,8 +4614,8 @@ impl App {
                 // drops the player where they are looking from, not wherever
                 // they last stood.
                 active.player.position =
-                    active.camera.position - glam::Vec3::Y * active.player.eye_height;
-                active.player.velocity = glam::Vec3::ZERO;
+                    active.camera.position - glam::DVec3::Y * active.player.eye_height;
+                active.player.velocity = glam::DVec3::ZERO;
                 active.player.on_ground = false;
             }
             // Just back from a feed: the ground under the body may still be
@@ -4671,11 +4692,12 @@ impl App {
                 active.shake * active.shake * active.movement.tuning.shake_power * 0.14;
             let phase = active.shake_phase;
             pivot
-                + glam::Vec3::new(
+                + (glam::Vec3::new(
                     phase.sin(),
                     (phase * 1.31).sin(),
                     (phase * 0.73).cos(),
-                ) * wobble
+                ) * wobble)
+                    .as_dvec3()
         } else {
             pivot
         };
@@ -4697,7 +4719,7 @@ impl App {
             active.mining.set_pilot_command(command);
             active.mining.set_pilot_look(active.camera.yaw);
             if let Some(eye) = active.mining.machine_eye(machine) {
-                active.camera.position = eye;
+                active.camera.position = eye.as_dvec3();
             }
         }
 
@@ -4768,9 +4790,11 @@ impl App {
         // the whole of the stealth system: prone is 0.35 m, and a one-block
         // wall is 1.0 m.
         let around = awareness::Surroundings {
-            player_eye: active.player.eye_height,
+            player_eye: active.player.eye_height as f32,
             world: Some(&active.world),
-            player: Some(active.player.position),
+            // Narrowed: the townsfolk are `f32`, and this is the number they
+            // measure themselves against.
+            player: Some(active.player.position.as_vec3()),
             machines: &machines,
         };
         // Ground witnesses, plus the eye in the sky. The roost counting as
@@ -4778,7 +4802,7 @@ impl App {
         let aerial = active.roost.as_ref().is_some_and(|roost| {
             roost.sees(
                 &active.world,
-                active.player.position + glam::Vec3::Y * active.player.eye_height,
+                active.player.eye_position().as_vec3(),
             )
         });
         active.watched = aerial || active.villagers.witnesses(&around) > 0;
@@ -4850,7 +4874,7 @@ impl App {
         // And standing on somebody's feet earns a noise rather than a line.
         // Both the sound and the toast, because a machine with no speaker is
         // a supported machine here and the tell has to survive one.
-        if let Some(variant) = active.villagers.grunt_for(active.player.position) {
+        if let Some(variant) = active.villagers.grunt_for(active.player.position.as_vec3()) {
             active.audio.play(audio::Cue::Grunt(variant), 0.7);
             active.greeting = Some((
                 "SOMEBODY GRUNTS AND SHIFTS OUT OF YOUR WAY".into(),
@@ -5127,7 +5151,9 @@ impl App {
                 beam.reach,
                 active.wallet.upgrade(wallet::LAMP),
             );
-            let eye = active.camera.position;
+            // In the renderer's frame: the one world position that reaches
+            // a uniform by hand goes through the one seam for it.
+            let eye = active.renderer.relative(active.camera.position);
             let aim = active.camera.forward();
             sun.lamp_position = [eye.x, eye.y, eye.z, strength];
             sun.lamp_direction = [aim.x, aim.y, aim.z, reach];
@@ -5194,8 +5220,8 @@ impl App {
         let now = active.journal.tick();
         for load in active.economy.shipments() {
             let (x, z) = load.position_at(now);
-            let (dx, dz) = (x - eye.x, z - eye.z);
-            if dx * dx + dz * dz > CARAVAN_SIGHT * CARAVAN_SIGHT {
+            let (dx, dz) = (x as f64 - eye.x, z as f64 - eye.z);
+            if dx * dx + dz * dz > (CARAVAN_SIGHT * CARAVAN_SIGHT) as f64 {
                 continue;
             }
             let ground = active
@@ -5280,7 +5306,11 @@ impl App {
             0.0
         };
         let recoil_back = active.shake * 0.16;
-        let drill_position = active.camera.position
+        // The viewmodel is built in the renderer's own frame and marked so.
+        // It is the one thing that sits right in front of the eye, where a
+        // quarter-block quantisation far from the origin would show most.
+        let eye_relative = active.renderer.relative(active.camera.position);
+        let drill_position = eye_relative
             + camera_forward * (0.85 - recoil_back)
             + camera_right * 0.42
             + glam::Vec3::Y * (-0.38 + bob);
@@ -5290,35 +5320,36 @@ impl App {
             // the launcher go away. That is the whole reason raising it
             // reads as a gesture rather than as a menu: checking on your
             // fleet with something chasing you is a decision now.
-            if active.device.showing() {
+            let carried: Vec<vx_render::Object> = if active.device.showing() {
                 let held = device::carried_at(
-                    active.camera.position,
+                    eye_relative,
                     camera_forward,
                     camera_right,
                     active.device.raise,
                 );
                 let (_, _, _, tilt) = device::carry(active.device.raise);
-                objects.extend(active.handheld_rig.objects_pitched(
+                active.handheld_rig.objects_pitched(
                     held,
                     drill_yaw,
                     active.camera.pitch - tilt,
                     0.0,
-                ));
+                )
             } else if active.arsenal.equipped {
-                objects.extend(active.launcher_rig.objects_pitched(
+                active.launcher_rig.objects_pitched(
                     drill_position,
                     drill_yaw,
                     active.camera.pitch + active.shake * 0.25,
                     0.0,
-                ));
+                )
             } else {
-                objects.extend(active.hand_rig.objects_pitched(
+                active.hand_rig.objects_pitched(
                     drill_position,
                     drill_yaw,
                     active.camera.pitch,
                     active.drill_spin,
-                ));
-            }
+                )
+            };
+            objects.extend(carried.into_iter().map(vx_render::Object::already_relative));
         }
 
         // Your own body, once you can actually see it.
@@ -5334,7 +5365,14 @@ impl App {
             let posed = active
                 .player_rig
                 .compressed(stance.body_height() / movement::STAND_HEIGHT);
-            objects.extend(posed.objects(active.player.position, facing, 0.0));
+            // Your own body rides the same frame as the tool in your hand.
+            let feet = active.renderer.relative(active.player.position);
+            objects.extend(
+                posed
+                    .objects(feet, facing, 0.0)
+                    .into_iter()
+                    .map(vx_render::Object::already_relative),
+            );
         }
 
         // Machines and people darken with the ground they stand on, by the
@@ -5555,7 +5593,7 @@ impl App {
             active.warrant_check = 5.0;
             active
                 .garrisons
-                .muster_near(&active.world, active.player.position);
+                .muster_near(&active.world, active.player.position.as_vec3());
             // The chain, which is what stands between a bounty and a posse
             // now. The sheriff asks; the mayor decides; the town starts
             // leaning on you the moment the asking happens.
@@ -5583,7 +5621,7 @@ impl App {
             let wanted = active.warrants.granted_in(town.centre);
             if wanted && !active.posse.called_out() {
                 let seed = active.journal.tick() ^ 0x51ed_5eed;
-                let at = active.player.position;
+                let at = active.player.position.as_vec3();
                 let ground = |x: f32, z: f32| {
                     active
                         .world
@@ -5610,7 +5648,7 @@ impl App {
         let held = active.garrisons.update(
             dt,
             &active.world,
-            active.player.position,
+            active.player.position.as_vec3(),
             !active.health.standing(),
             // The truce is what Neutral buys: a challenge before a volley.
             active.reputation.holdouts() >= reputation::Standing::Neutral,
@@ -5636,7 +5674,7 @@ impl App {
         let report = active.posse.update(
             dt,
             &active.world,
-            active.player.position,
+            active.player.position.as_vec3(),
             !active.health.standing(),
         );
 
@@ -5692,10 +5730,10 @@ impl App {
         let ground = active
             .world
             .surface_y(home.centre.0, home.centre.1)
-            .map_or(active.player.position.y, |top| (top + 1) as f32);
+            .map_or(active.player.position.y, |top| (top + 1) as f64);
         active.player.position =
-            glam::Vec3::new(home.centre.0 as f32 + 0.5, ground, home.centre.1 as f32 + 0.5);
-        active.player.velocity = glam::Vec3::ZERO;
+            glam::DVec3::new(home.centre.0 as f64 + 0.5, ground, home.centre.1 as f64 + 0.5);
+        active.player.velocity = glam::DVec3::ZERO;
         active.resuming = true;
 
         let line = if paid < owed {
@@ -5799,7 +5837,7 @@ impl App {
                 // going past. The energy span from a sapling to an
                 // old-growth giant is a thousandfold; the hits are the
                 // compressed version of it, and the ordering is the design.
-                let body = active.player.position + glam::Vec3::Y * 0.9;
+                let body = (active.player.position + glam::DVec3::Y * 0.9).as_vec3();
                 if arsenal::segment_hits_box(
                     sweep.from,
                     sweep.to,
@@ -5824,7 +5862,7 @@ impl App {
                 active.villagers.startled(landing.at);
                 active.garrisons.hear(landing.at);
                 active.dark.hear(landing.at, 6.0);
-                let heard = (landing.at - active.player.eye_position()).length();
+                let heard = (landing.at.as_dvec3() - active.player.eye_position()).length() as f32;
                 let volume = (1.0 - heard / 90.0).clamp(0.1, 1.0);
                 active.audio.play(audio::Cue::Thud, volume);
                 let line = if landing.hung_up {
@@ -5875,7 +5913,7 @@ impl App {
             // Running water is a noise, and a noise is a thing that carries.
             let heard = match active.water.first().map(|body| body.origin) {
                 Some(at) => glam::Vec3::new(at.x as f32, at.y as f32, at.z as f32)
-                    .distance(active.player.eye_position()),
+                    .distance(active.player.eye_position().as_vec3()),
                 None => 0.0,
             };
             let volume = (1.0 - heard / 40.0).clamp(0.0, 0.5);
@@ -5897,7 +5935,7 @@ impl App {
     /// wetting the ground, and the lines that tell you the woods are alight.
     fn advance_weather(active: &mut Active, ticks: u32) {
         let seed = active.world.seed();
-        let standing = active.player.position;
+        let standing = active.player.position.as_vec3();
         let at = vx_core::BlockPos::new(
             standing.x.floor() as i32,
             standing.y.floor() as i32,
@@ -6020,7 +6058,7 @@ impl App {
                 // the shelters hear it as a zone, never a spot.
                 active.garrisons.hear(impact.at);
                 active.dark.hear(impact.at, 4.0);
-                let heard = (impact.at - active.player.eye_position()).length();
+                let heard = (impact.at.as_dvec3() - active.player.eye_position()).length() as f32;
                 let volume = (1.0 - heard / 80.0).clamp(0.1, 1.0);
                 active.audio.play(audio::Cue::Thud, volume);
                 if impact.broke {
@@ -6040,9 +6078,9 @@ impl App {
             return;
         }
         let around = awareness::Surroundings {
-            player_eye: active.player.eye_height,
+            player_eye: active.player.eye_height as f32,
             world: Some(&active.world),
-            player: Some(active.player.position),
+            player: Some(active.player.position.as_vec3()),
             machines: &[],
         };
         let mut seen = active.villagers.witnesses(&around);
@@ -6052,7 +6090,7 @@ impl App {
             roost.observed
                 && roost.sees(
                     &active.world,
-                    active.player.position + glam::Vec3::Y * active.player.eye_height,
+                    active.player.eye_position().as_vec3(),
                 )
         });
         seen += usize::from(overhead);
@@ -6223,7 +6261,7 @@ impl App {
                 lines
             }
             "fleet" => {
-                let rows = active.mining.roster(active.player.position);
+                let rows = active.mining.roster(active.player.position.as_vec3());
                 if rows.is_empty() {
                     return vec!["NO MACHINES. BUY ONE AT A COUNTER.".into()];
                 }
@@ -6702,7 +6740,7 @@ impl App {
         let Some(active) = &mut self.active else {
             return Vec::new();
         };
-        let rows = active.mining.roster(active.player.position);
+        let rows = active.mining.roster(active.player.position.as_vec3());
         let wanted: Option<mining::MachineRef> = if args.is_empty() {
             // No name: the machine holding everyone else up, which is the
             // one the player means nine times in ten.
@@ -6760,7 +6798,7 @@ impl App {
             .positions()
             .into_iter()
             .enumerate()
-            .map(|(index, at)| (index, (at - player).length()))
+            .map(|(index, at)| (index, (at.as_dvec3() - player).length() as f32))
             .filter(|(_, distance)| *distance <= Self::TALK_RANGE)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(index, _)| index)
@@ -7303,7 +7341,7 @@ impl App {
         let seed = active.world.seed() ^ active.journal.tick();
         let report = active
             .dark
-            .update(dt, &active.world, active.player.position, seed);
+            .update(dt, &active.world, active.player.position.as_vec3(), seed);
         for line in report.tells {
             active.terminal.say(terminal::Kind::Warn, line.clone());
             active.greeting = Some((line, Instant::now()));
@@ -7329,7 +7367,7 @@ impl App {
         active.dose_check -= dt;
         let rads = if active.dose_check <= 0.0 {
             active.dose_check = 0.25;
-            active.last_rads = dose::exposure(&active.world, active.player.position);
+            active.last_rads = dose::exposure(&active.world, active.player.position.as_vec3());
             active.last_rads
         } else {
             active.last_rads
@@ -7771,7 +7809,7 @@ impl App {
             fitted: active.garage.fitted(frame.coil()),
             security: active.skills.level(skills::SECURITY),
             reach: (machine_at - target_centre).length(),
-            link: (machine_at - active.player.eye_position()).length(),
+            link: (machine_at.as_dvec3() - active.player.eye_position()).length() as f32,
             target: job.target,
         };
 
@@ -7858,7 +7896,7 @@ impl App {
                 .generator()
                 .height_at(crash.x.floor() as i32, crash.z.floor() as i32);
             let at = glam::Vec3::new(crash.x, ground as f32 + 1.0, crash.z);
-            let near = (at - feet).length() < 3.0;
+            let near = (at.as_dvec3() - feet).length() < 3.0;
             if near && active.mining.fleet.base.is_some() {
                 collected.push(*crash);
                 false
@@ -7937,12 +7975,12 @@ impl App {
         // wanted: run it loud and rich, or slow and quiet, or dig decoy
         // noise a valley over and work in the shadow of your own diversion.
         if active.journal.tick().is_multiple_of(16) {
-            active.garrisons.hear(active.player.position);
+            active.garrisons.hear(active.player.position.as_vec3());
             // And the deep hears it better than the shelters do. This is the
             // whole attachment between the hunt and the mining loop: a hole
             // being cut is a dinner bell, and the only dial the player has
             // is how long they keep cutting.
-            active.dark.hear(active.player.position, 0.55);
+            active.dark.hear(active.player.position.as_vec3(), 0.55);
         }
 
         let Some(hit) = raycast_solid(
@@ -8543,7 +8581,7 @@ impl App {
         if self.active.as_ref().is_some_and(|active| active.device.open) {
             let (roster_len, selected) = {
                 let Some(active) = &self.active else { return };
-                let from = active.player.eye_position();
+                let from = active.player.eye_position().as_vec3();
                 let roster = active.mining.roster(from);
                 (roster.len(), active.device.selected(&roster))
             };
@@ -9060,7 +9098,7 @@ impl App {
                     active.mode = active.mode.toggled();
                     // Entering walk mode drops the player from wherever the
                     // camera was, so clear any stale fall speed.
-                    active.player.velocity = glam::Vec3::ZERO;
+                    active.player.velocity = glam::DVec3::ZERO;
                     log::info!("movement mode: {:?}", active.mode);
                 }
             }
@@ -9293,7 +9331,7 @@ impl App {
             if let Some(active) = &mut self.active {
                 if let Some(pay) = active
                     .garrisons
-                    .arrest_near(active.player.position, 3.0)
+                    .arrest_near(active.player.position.as_vec3(), 3.0)
                 {
                     active.wallet.earn(pay);
                     let line = format!("TAKEN IN - {pay} CREDITS FROM THE BOARD");
@@ -9662,7 +9700,7 @@ impl App {
             return;
         };
         let player = active.player.position;
-        let ahead = player + active.camera.forward_level() * 30.0;
+        let ahead = player + (active.camera.forward_level() * 30.0).as_dvec3();
         // The orders carrying a place are filled in here, from where the
         // player actually is and is looking, and the *filled-in* order is
         // what the log records.
@@ -9735,7 +9773,7 @@ impl App {
             fitted: active.garage.fitted(frame.coil()),
             security: active.skills.level(skills::SECURITY),
             reach: (machine_at - centre).length(),
-            link: (machine_at - active.player.eye_position()).length(),
+            link: (machine_at.as_dvec3() - active.player.eye_position()).length() as f32,
             target,
         };
         match intrusion::refuse(&attempt) {
@@ -9807,7 +9845,7 @@ impl App {
         if !active.device.showing() {
             return;
         }
-        let from = active.player.eye_position();
+        let from = active.player.eye_position().as_vec3();
         let roster = active.mining.roster(from);
         // The handheld's map: where you are, what you own, the towns you have
         // found and the traffic in the air — over the same fog the corner
@@ -9921,7 +9959,7 @@ impl App {
         let (width, height) = active.renderer.size();
         let rect = if active.view.draws_viewmodel() {
             let corners = device::screen_corners(
-                active.camera.position,
+                active.camera.local_position(),
                 active.camera.forward(),
                 active.camera.right(),
                 active.device.raise,
@@ -9958,7 +9996,7 @@ impl App {
     fn refresh_feed(&mut self) {
         let Some(active) = &mut self.active else { return };
         let Some(machine) = active.device.feed() else { return };
-        let from = active.player.eye_position();
+        let from = active.player.eye_position().as_vec3();
         let Some(listing) = active.mining.listing(machine, from) else { return };
         let strength = device::signal(listing.distance);
         let piloting = active.device.is_piloting();
@@ -10132,7 +10170,7 @@ impl App {
                         let order = if let journal::Admin::Teleport { x: 0, y: 0, z: 0 } = order
                         {
                             let ahead = active.camera.forward_level();
-                            let target = active.player.position + ahead * 50.0;
+                            let target = active.player.position + (ahead * 50.0).as_dvec3();
                             journal::Admin::Teleport {
                                 x: target.x.floor() as i32,
                                 y: (target.y.floor() as i32).max(1) + 4,
@@ -10191,8 +10229,8 @@ impl App {
             }
             Admin::Teleport { x, y, z } => {
                 active.player.position =
-                    glam::Vec3::new(*x as f32 + 0.5, *y as f32, *z as f32 + 0.5);
-                active.player.velocity = glam::Vec3::ZERO;
+                    glam::DVec3::new(*x as f64 + 0.5, *y as f64, *z as f64 + 0.5);
+                active.player.velocity = glam::DVec3::ZERO;
                 active.player.on_ground = false;
                 // The ground there may not be streamed in yet; the gate that
                 // already protects feed hang-ups protects this too.
@@ -10611,7 +10649,7 @@ impl App {
                 .name
                 .to_uppercase()
         });
-        let rows = active.mining.roster(at);
+        let rows = active.mining.roster(at.as_vec3());
         let worst_machine = rows
             .iter()
             .map(|row| row.condition)
@@ -10628,7 +10666,7 @@ impl App {
 
         let content = debug::DebugContent {
             fps,
-            position: (at.x, at.y, at.z),
+            position: (at.x as f32, at.y as f32, at.z as f32),
             chunk: {
                 let chunk = feet.chunk();
                 (chunk.x, chunk.z)
@@ -11318,10 +11356,10 @@ impl ApplicationHandler for App {
 
         // You wake up in your own house, facing the door.
         let player = PlayerBody {
-            position: glam::Vec3::new(
-                spawn_block.x as f32 + 0.5,
-                spawn_block.y as f32,
-                spawn_block.z as f32 + 0.5,
+            position: glam::DVec3::new(
+                spawn_block.x as f64 + 0.5,
+                spawn_block.y as f64,
+                spawn_block.z as f64 + 0.5,
             ),
             ..PlayerBody::default()
         };
@@ -11446,7 +11484,7 @@ impl ApplicationHandler for App {
             selected: 0,
             mining: {
                 let mut mining = Mining::default();
-                mining.ensure_flier(camera.position);
+                mining.ensure_flier(camera.position.as_vec3());
                 mining.tank = tank;
                 // Like the tank: replay re-derives it from tick zero, and a
                 // reload that started fresh would hand back a worn-out

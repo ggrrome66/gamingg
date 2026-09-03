@@ -4,9 +4,13 @@
 // Repeat address mode tiles them across greedy-merged quads whose UVs span the
 // whole quad. That is why there is no atlas arithmetic here.
 
+// The camera measures everything from `origin` — the chunk corner it stands
+// in, as exact integers. `position` and `view_projection` are already relative
+// to it; the vertex shader subtracts it from each chunk's own corner below.
 struct Camera {
     view_projection: mat4x4<f32>,
     position: vec4<f32>,
+    origin: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -204,7 +208,11 @@ fn vs_main(quad: QuadInput, @builtin(vertex_index) vertex_index: u32) -> VertexO
         }
     }
 
-    let world = local + chunk_origin.xyz;
+    // Both corners are multiples of sixteen below 2^28, so the subtraction is
+    // exact and `world` is the small number it should be — measured from the
+    // camera's chunk, never from the world's origin. This one line is the
+    // floating-origin rebase.
+    let world = local + (chunk_origin.xyz - camera.origin.xyz);
 
     var out: VertexOutput;
     out.clip_position = camera.view_projection * vec4<f32>(world, 1.0);

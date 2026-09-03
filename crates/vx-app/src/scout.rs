@@ -73,7 +73,13 @@ impl Marks {
             if (target - eye).length() > radius {
                 continue;
             }
-            if !vx_world::sight::sees(world, world.registry(), eye, target, radius + 2.0) {
+            if !vx_world::sight::sees(
+                world,
+                world.registry(),
+                eye.as_dvec3(),
+                target.as_dvec3(),
+                radius + 2.0,
+            ) {
                 continue;
             }
             match self

@@ -17,7 +17,7 @@ pub mod tiles;
 
 use std::collections::HashMap;
 
-use glam::Vec3;
+use glam::{DVec3, IVec3, Vec3};
 use vx_core::{ChunkPos, CHUNK_HEIGHT, CHUNK_SIZE};
 use vx_mesh::Mesh;
 
@@ -104,6 +104,10 @@ pub struct Renderer {
     /// a frame drawn before any camera is set shows everything rather than
     /// culling against a meaningless volume.
     frustum: Option<Frustum>,
+    /// The chunk corner the current camera measures from. Everything the
+    /// renderer tests or uploads in world space is rebased against this
+    /// first — see [`Camera::origin`].
+    origin: IVec3,
     /// Off only for tests, which compare a culled frame against an unculled one
     /// to prove culling changes nothing visible.
     culling_enabled: bool,
@@ -302,6 +306,7 @@ impl Renderer {
             objects: ObjectBatch::new(device),
             overlay: OverlayPass::new(device, target_format),
             frustum: None,
+            origin: IVec3::ZERO,
             culling_enabled: true,
             width,
             height,
@@ -313,16 +318,33 @@ impl Renderer {
         self.culling_enabled = enabled;
     }
 
-    /// The world-space bounding box of a chunk column.
+    /// The bounding box of a chunk column, measured from the camera's origin.
     ///
     /// Spans the full world height. A tighter bound from each chunk's actual
     /// filled range would cull more, but needs the mesher to report it and is
-    /// not where the win is.
-    fn chunk_bounds(pos: ChunkPos) -> (Vec3, Vec3) {
-        let origin = pos.origin();
-        let min = Vec3::new(origin.x as f32, 0.0, origin.z as f32);
+    /// not where the win is. The subtraction is done in integers, so the
+    /// frustum test sees the same small numbers the vertex shader does.
+    fn chunk_bounds(&self, pos: ChunkPos) -> (Vec3, Vec3) {
+        let corner = pos.origin();
+        let min = Vec3::new(
+            (corner.x - self.origin.x) as f32,
+            0.0,
+            (corner.z - self.origin.z) as f32,
+        );
         let max = min + Vec3::new(CHUNK_SIZE as f32, CHUNK_HEIGHT as f32, CHUNK_SIZE as f32);
         (min, max)
+    }
+
+    /// The chunk corner this renderer currently measures from.
+    pub fn render_origin(&self) -> IVec3 {
+        self.origin
+    }
+
+    /// A world position as this renderer's uniforms want it: measured from
+    /// the camera's chunk, in `f32`. The one seam for anything world-space
+    /// that has to reach the GPU by hand — the lamp, for one.
+    pub fn relative(&self, world: DVec3) -> Vec3 {
+        (world - self.origin.as_dvec3()).as_vec3()
     }
 
     /// Chunks that would be drawn this frame.
@@ -332,7 +354,7 @@ impl Renderer {
                 .chunks
                 .keys()
                 .filter(|pos| {
-                    let (min, max) = Self::chunk_bounds(**pos);
+                    let (min, max) = self.chunk_bounds(**pos);
                     frustum.intersects_aabb(min, max)
                 })
                 .count(),
@@ -361,6 +383,7 @@ impl Renderer {
     pub fn update_camera(&mut self, queue: &wgpu::Queue, camera: &Camera) {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera.uniform()));
         self.frustum = Some(Frustum::from_view_projection(camera.view_projection()));
+        self.origin = camera.origin();
     }
 
     /// Push the sun, the sky and the light level.
@@ -431,7 +454,8 @@ impl Renderer {
         objects: &[Object],
     ) {
         let cull = self.culling_enabled.then_some(self.frustum).flatten();
-        self.objects.upload(device, queue, objects, cull);
+        self.objects
+            .upload(device, queue, objects, cull, self.origin.as_vec3());
     }
 
     /// Object instances that survived culling and will be drawn.
@@ -515,7 +539,7 @@ impl Renderer {
         let mut drawn = 0;
         for (pos, mesh) in &self.chunks {
             if let Some(frustum) = cull {
-                let (min, max) = Self::chunk_bounds(*pos);
+                let (min, max) = self.chunk_bounds(*pos);
                 if !frustum.intersects_aabb(min, max) {
                     continue;
                 }

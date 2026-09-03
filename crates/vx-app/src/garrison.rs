@@ -225,8 +225,8 @@ impl Garrison {
                     && vx_world::sight::sees(
                         world,
                         registry,
-                        holder.eye(),
-                        eye_of_player,
+                        holder.eye().as_dvec3(),
+                        eye_of_player.as_dvec3(),
                         crate::awareness::SIGHT_RANGE * 1.5,
                     )
             })
@@ -288,8 +288,8 @@ impl Garrison {
                         && vx_world::sight::sees(
                             world,
                             registry,
-                            *eye,
-                            at,
+                            eye.as_dvec3(),
+                            at.as_dvec3(),
                             crate::awareness::SIGHT_RANGE,
                         )
                 })

@@ -313,9 +313,6 @@ build in it, and it survives quitting — skills included.
   block edits go through the same path a player's do — but quitting mid-dig
   loses the drone, the job board, the surveys and the base declaration. The
   journal is the obvious way to fix this and does not do it yet.
-- Chunk geometry is chunk-local now, but nothing yet *rebases* the origin as the
-  player travels, so the camera still walks into `f32` trouble eventually. The
-  seam is open; the rebase is not written.
 - Each chunk carries its own small origin uniform and bind group. Fine at a few
   hundred chunks; a single buffer with dynamic offsets is the tidier answer if
   view distances grow.
@@ -874,6 +871,40 @@ town's **counter shuts to you** while anything stands: not a worse price, a
 closed door. So there is a whole middle now between "nothing happened" and
 "there are four lads with guns coming over the hill", and you can talk, pay or
 run your way out of it.
+
+### The country goes on
+
+There used to be a place, about fifty minutes' walk in any one direction, where
+the game quietly stopped working. Not with a crash: you would start sticking
+to walls. The numbers the game used to say where you were had got too big to
+be exact — a ruler with marks every foot, asked to measure a kitchen — and a
+body that should have been a millimetre off a block face rounded into it. A
+good way further out, the picture itself would have started to shake.
+
+Nobody had walked that far because there was nothing out there. There is now:
+towns, and drones to ferry you, and a frontier is only a frontier if it goes
+on.
+
+So it goes on. **The picture is drawn from where you are standing** rather
+than from the middle of the world: every number the graphics card sees is "how
+far from your chunk," never "how far from spawn," and the subtraction that
+turns one into the other is done on exact integers before it ever touches a
+float. And **you yourself** — your feet, your eyes, the part of you that bumps
+into walls — are measured with the big ruler now, the one with the fine marks.
+Everyone else in a town stays on the ordinary one, because they never leave
+town.
+
+Three thousand kilometres out the woods look like the woods, the tool in your
+hand sits where it should, and you walk down a corridor exactly the way you
+walk down one at home. There is a test that draws the same hill at spawn and
+again sixteen hundred kilometres away and requires the two pictures to be
+identical to the byte, and another that walks the same corridor at spawn and
+at fifty thousand kilometres and requires the same footsteps to a
+micrometre. Nothing about the world moved to make this true: the blocks are
+where they were, the saves are what they were.
+
+`--at 3000000,3000000` works as a capture flag, if you want to see for
+yourself.
 
 ### The year turns
 
@@ -1766,6 +1797,10 @@ cargo run --release -p vx-app -- --screenshot mats.ppm --at 0,10 --forest treeli
 cargo run --release -p vx-app -- --screenshot summer.ppm --at 0,10 --forest cove --season summer --time 0.5
 cargo run --release -p vx-app -- --screenshot autumn.ppm --at 0,10 --forest cove --season autumn --time 0.5
 cargo run --release -p vx-app -- --screenshot winter.ppm --at 0,10 --forest cove --season winter --time 0.5
+
+# three thousand kilometres from spawn, with the hand lamp on at dusk
+cargo run --release -p vx-app -- --screenshot far.ppm --at 3000000,3000000 --time 0.5
+cargo run --release -p vx-app -- --screenshot far-lamp.ppm --at 3000000,3000000 --time 0.85 --optic lamp
 
 # the pocket arcade, mid-fight, on the raised handheld
 cargo run --release -p vx-app -- --screenshot arcade.ppm --at 0,10 --arcade

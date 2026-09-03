@@ -625,8 +625,8 @@ impl Villagers {
                     (Some(world), Some(registry)) => vx_world::sight::sees(
                         world,
                         registry,
-                        eye,
-                        eye_of_player,
+                        eye.as_dvec3(),
+                        eye_of_player.as_dvec3(),
                         awareness::SIGHT_RANGE,
                     ),
                     _ => true,
@@ -654,7 +654,13 @@ impl Villagers {
                 if !awareness::in_cone(eye, Some(Self::facing_of(villager)), at, distance) {
                     return false;
                 }
-                vx_world::sight::sees(world, registry, eye, at, awareness::SIGHT_RANGE)
+                vx_world::sight::sees(
+                    world,
+                    registry,
+                    eye.as_dvec3(),
+                    at.as_dvec3(),
+                    awareness::SIGHT_RANGE,
+                )
             })
             .count()
     }
@@ -692,8 +698,8 @@ impl Villagers {
                 (Some(world), Some(registry)) => vx_world::sight::sees(
                     world,
                     registry,
-                    eye,
-                    eye_of_player,
+                    eye.as_dvec3(),
+                    eye_of_player.as_dvec3(),
                     awareness::SIGHT_RANGE,
                 ),
                 _ => true,

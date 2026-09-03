@@ -116,7 +116,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 38 | `14acc37` | Weather, fire and what comes back: the sky is a pure function of the seed and the tick, so a storm crosses the country the same way twice — it rains, the hollows fill, lightning takes the tall and the lonely, and about one strike in fifty lights a fire that runs uphill and downwind through anything wooden, your house included, until it meets an ancient grove or wet ground; then the burnt cell remembers, and comes back through meadow, thicket and mixed stand to the forest it was |
 | 39 | `ef06f2b` | Towns that work: every town has a mayor and a sheriff who are people off its own roster, its residents put goods on its books and credits in their pockets on the hours the schedule already gave them, trading with somebody buys enough trust to be handed a key to their door — and a bounty is no longer a posse, because the sheriff has to get a warrant from a mayor with an opinion of you, with a fine and a closed counter on the way there |
 | 40 | `4cdda7c` | The ballot box: a town's seats stop being permanent — it votes on its own market day, once a term, and the residents cast on the business you have put across their counters, so you can put your name in at the beacon console and be elected sheriff or mayor; a badge now belongs to the town that gave it rather than to the whole frontier, and a mayor cannot sign his own warrant, so paper on a town you run goes up the road to the next mayor along |
-| 41 | _this_ | Seasons: the twenty-eight day year the roster already counted for birthdays now runs the sky and the woods — a week each of spring, summer, autumn and winter, one season to an election term. The leaves turn gold and go bare and come back, the sward goes to straw, the spruce barely notice and the sky goes with them; **summer is a fire season** where the ground stays tinder days after a shower and lightning actually bites, winter is sodden and nothing will light; and the woods **stop growing over the winter**, so a stand you burn in October is still black in February and only starts coming back in the spring |
+| 41 | `4856472` | Seasons: the twenty-eight day year the roster already counted for birthdays now runs the sky and the woods — a week each of spring, summer, autumn and winter, one season to an election term. The leaves turn gold and go bare and come back, the sward goes to straw, the spruce barely notice and the sky goes with them; **summer is a fire season** where the ground stays tinder days after a shower and lightning actually bites, winter is sodden and nothing will light; and the woods **stop growing over the winter**, so a stand you burn in October is still black in February and only starts coming back in the spring |
+| 42 | _this_ | The floating origin: the renderer draws relative to the chunk the camera stands in — the camera's corner and every chunk's corner are exact integers, subtracted in the vertex shader before anything reaches a float multiply — and the player's body, its physics, the camera and the aim ray move to `f64`, so the millimetre skin the collision sweep runs on means what it says everywhere. Proved the only way it can be: the same scene renders byte-identical sixteen hundred kilometres out, and the same journal walks the same walk at spawn and at three thousand |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2465,6 +2466,74 @@ change or skip the season, which would make every test above a lie.
 
 ---
 
+## Shipped — Stage 42: the floating origin
+
+**The oldest item on the outstanding list, and the wall was not where the
+roadmap said.** Stage 9a made chunk geometry chunk-local, and the note beside
+it has said ever since that "the camera still meets the wall eventually." It
+does — but exploration found two nearer ones first. The vertex shader added
+each chunk's corner back in absolute space and the view matrix subtracted an
+absolute camera straight after, two large numbers rounded before their
+difference was taken; and the player's collision sweep ran in `f32` with a
+millimetre skin, which at sixteen kilometres — fifty minutes' walk, one
+drone ferry — is smaller than a float step, so a body snapped flush to a
+block face rounded *into* it and stuck. The picture would have jittered a
+long way past where the player could no longer walk.
+
+**Nothing in the world moves.** Block coordinates stay `i32`; no save file,
+wire format or generator changed. The renderer now draws relative to the
+chunk corner the camera stands in: `Camera::origin` is exact integers, the
+camera uniform carries it, and the vertex shader computes
+`local + (chunk_origin - camera.origin)` — both corners are multiples of
+sixteen below 2^28, so the subtraction is exact and nothing large ever
+reaches a float multiply. No mesh is re-uploaded when the camera crosses a
+chunk line; the chunk uniforms stay absolute and the subtraction happens per
+vertex, on the GPU, for free. Objects arrive as they always did and the
+renderer rebases them at upload; the lamp goes through one public seam,
+`Renderer::relative`; and the tool in your hand and your own body are built
+in the renderer's frame and marked `already_relative`, because they are the
+two things that sit right in front of the eye where a quarter-block
+quantisation would show most.
+
+**The one thing that travels is `f64`.** `PlayerBody`, `Aabb`, the sweep,
+`movement.rs`, the camera and the third-person placement. Villagers,
+deputies, shots and marks stay `f32` — they never leave their town and never
+run on the skin physics — and every place the player meets them takes the
+*difference* in `f64` and narrows that, never the position. The aim ray
+splits its `f64` origin into an exact starting cell and a fraction inside it
+before the first DDA step, so a shot from three thousand kilometres out is as
+precise as one at spawn; `sight::sees` widened with it.
+
+**Proved the only way it can be.** The render test uploads the same chunk
+meshes at the origin and a hundred thousand chunks out with the camera, an
+object and the lamp moved by exactly the same offset, and demands the two
+frames be **byte-identical** — no rounding to be close about. The physics
+test walks one body down a corridor at spawn and another down the same
+corridor at fifty thousand kilometres with the same inputs, and demands they
+agree tick for tick to a micrometre and never overlap a block; in the old
+sweep the far body stuck within a dozen ticks. The journal replays its
+recorded walk from spawn and from three thousand kilometres out over the same
+floor and lands the same displacement. And `--at 3000000,3000000` is a
+capture flag now, not a crash.
+
+**Journal VERSION 27.** Nothing on the wire changed, but a log recorded under
+26 replays its movement through a different integrator and may land a block
+off where it did. The one float that crosses the wire — the muzzle of a shot
+— stays `f32`, and its rule stays: blocks are exact, floats are not.
+
+**Known limits, documented rather than fixed.** `f32` objects are exact to a
+sixteenth of a block out to a thousand kilometres and a quarter of one at
+three thousand; in a still, invisible. Entities in `f64` is stage 45 if it is
+ever wanted. The `i32` block lattice is the world's boundary and every test
+above runs well inside the 2^28 where chunk corners are exact.
+
+**Deliberately not in 42:** entities in `f64`; a world fence; persisting the
+player's position (stage 10c's spawn rule stands — every session opens at the
+homestead); the single dynamic-offset origin buffer the roadmap mentions
+beside this item.
+
+---
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -2785,11 +2854,6 @@ model exists, because both of them attack you.
 
 ## Also outstanding
 
-**Rebasing the floating origin.** Chunk geometry is chunk-local now, so the
-precision wall is out of the mesh data — but nothing shifts the origin as the
-player travels, so the camera still meets it eventually. The seam is open and
-the rebase is a small change on top of it.
-
 **Letting the journal shrink saves.** Region files are still written every save,
 so the journal is currently an oracle rather than a disk win. The keyframe
 machinery is in place; turning it on is worth doing after the oracle has run
@@ -2808,18 +2872,19 @@ felling in 36, the fluid in 37, and the weather, the fire and the succession
 clock in 38. And the civic layer, open since stage 11, closed in 40: B1 in 11,
 B2 in 39, B3 in 40.
 
-What follows is the board's own work rather than anybody's note. The first of
-it, seasons, shipped in 41.
+What follows is the board's own work rather than anybody's note. Seasons
+shipped in 41; the floating origin — the oldest item on the outstanding list —
+in 42.
 
 | Stage | What | Why here |
 |---|---|---|
-| 42 | The floating-origin rebase | The oldest thing on the outstanding list, and the one that stops mattering only until somebody walks far enough |
 | 43 | Founding a town, and taking one | The two routes into office stage 40 left on the board. Both want the ballot box to exist first, and now it does |
 | 44 | Snow that settles, and ice | The only half of a winter stage 41 deliberately did not do, because it is the half that *edits blocks* — and that makes it a stage of its own, with the replay oracle to satisfy rather than the inverted one |
+| 45 | Entities in `f64` | Villagers, deputies and shots still carry `f32` positions, exact to a sixteenth of a block out to a thousand kilometres and a quarter of one at three thousand. Stage 42 drew the line at the things that travel; this moves it |
 
 ## The feature map
 
-The whole game at a glance, as of stage 41.
+The whole game at a glance, as of stage 42.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -2962,13 +3027,17 @@ stored nowhere — hardwoods that go gold then bare then green while the spruce
 barely move, a sward that goes to straw, a sky and a light that go with them,
 wet thresholds that make high summer a fire season and midwinter safe, and a
 growing clock that stops dead over the winter and still banks a full year in a
-year); a Steam Deck dist build every round.
+year); the floating origin (the renderer draws relative to the camera's own
+chunk with the subtraction done on exact integers in the vertex shader, the
+player's body, physics, camera and aim ray in `f64`, and the oracle that the
+same scene renders byte-identical sixteen hundred kilometres out); a Steam
+Deck dist build every round.
 
 **Planned, in arc order:** seasons over the weather and succession clocks that
 already run; then the floating-origin rebase; then the two routes into office
 stage 40 left on the board — founding a town, and taking one.
 
-**Outstanding engineering:** floating-origin rebase; journal-shrunk saves;
+**Outstanding engineering:** journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the
 weapon table; the kestrel's
 cell state surviving a reload; pad text entry for the terminal; anything that hacks *you* (the hardened link

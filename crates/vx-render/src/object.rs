@@ -39,6 +39,12 @@ pub struct Object {
     /// terrain; the default is daylight, which every overlay and fixture
     /// object wants.
     pub light: f32,
+    /// Already measured from the camera's chunk, so the renderer must not
+    /// rebase it again. For the things that ride the camera — the tool in
+    /// your hand, your own body — which would otherwise be quantised to a
+    /// quarter of a block three thousand kilometres out, right in front of
+    /// the eye where it shows most. See [`Object::already_relative`].
+    pub relative: bool,
 }
 
 impl Object {
@@ -66,6 +72,7 @@ impl Object {
             bounds_min: min,
             bounds_max: max,
             light: 1.0,
+            relative: false,
         }
     }
 
@@ -78,7 +85,16 @@ impl Object {
             bounds_min: min,
             bounds_max: max,
             light: 1.0,
+            relative: false,
         }
+    }
+
+    /// Mark this object as built in the renderer's own frame — positioned
+    /// from [`crate::Renderer::relative`] rather than in absolute world
+    /// space — so the upload leaves it exactly where it is.
+    pub fn already_relative(mut self) -> Self {
+        self.relative = true;
+        self
     }
 
     /// A cube of edge `size` centred horizontally on `centre` and sitting with
@@ -87,6 +103,29 @@ impl Object {
         let half = size * 0.5;
         let min = Vec3::new(centre.x - half, centre.y, centre.z - half);
         Object::box_between(min, min + Vec3::splat(size), tile)
+    }
+
+    /// The same object measured from `origin` instead of the world's zero.
+    ///
+    /// The renderer applies this to every object before culling and upload,
+    /// so callers keep describing objects in absolute coordinates. The
+    /// translation column and the bounds move; the linear part does not.
+    /// Exact for anything within a chunk or so of the camera, by the usual
+    /// argument about subtracting two floats of the same magnitude.
+    pub fn rebased(&self, origin: Vec3) -> Object {
+        if self.relative {
+            return *self;
+        }
+        let mut model = self.model;
+        model.w_axis.x -= origin.x;
+        model.w_axis.y -= origin.y;
+        model.w_axis.z -= origin.z;
+        Object {
+            model,
+            bounds_min: self.bounds_min - origin,
+            bounds_max: self.bounds_max - origin,
+            ..*self
+        }
     }
 
     fn instance(&self) -> ObjectInstance {
@@ -341,14 +380,16 @@ impl ObjectBatch {
         queue: &wgpu::Queue,
         objects: &[Object],
         frustum: Option<Frustum>,
+        origin: Vec3,
     ) {
         let instances: Vec<ObjectInstance> = objects
             .iter()
+            .map(|object| object.rebased(origin))
             .filter(|object| match frustum {
                 Some(frustum) => frustum.intersects_aabb(object.bounds_min, object.bounds_max),
                 None => true,
             })
-            .map(Object::instance)
+            .map(|object| object.instance())
             .collect();
 
         if instances.len() > self.capacity {

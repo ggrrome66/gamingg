@@ -218,7 +218,7 @@ pub fn cover_score(world: &World, at: Vec3, threat: Vec3) -> u32 {
         .into_iter()
         .filter(|centimetres| {
             let eye = at + Vec3::Y * (*centimetres as f32 / 100.0);
-            vx_world::sight::obstruction(world, registry, eye, threat).is_some()
+            vx_world::sight::obstruction(world, registry, eye.as_dvec3(), threat.as_dvec3()).is_some()
         })
         .count() as u32
 }
@@ -479,8 +479,8 @@ impl Posse {
                     && vx_world::sight::sees(
                         world,
                         registry,
-                        deputy.eye(),
-                        eye_of_player,
+                        deputy.eye().as_dvec3(),
+                        eye_of_player.as_dvec3(),
                         crate::awareness::SIGHT_RANGE * 1.5,
                     )
             })
@@ -513,8 +513,8 @@ impl Posse {
                         && vx_world::sight::sees(
                             world,
                             registry,
-                            *eye,
-                            at,
+                            eye.as_dvec3(),
+                            at.as_dvec3(),
                             crate::awareness::SIGHT_RANGE,
                         )
                 })

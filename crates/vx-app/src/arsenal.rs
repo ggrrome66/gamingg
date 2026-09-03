@@ -152,7 +152,10 @@ pub fn launch(
 
 /// Where the muzzle sits for a body about to fire.
 pub fn muzzle_of(player: &PlayerBody) -> Vec3 {
-    player.eye_position()
+    // Narrowed on purpose: the muzzle is the one float that crosses the
+    // journal's wire, and a shot lives for a few hundred blocks. It is exact
+    // to a sixteenth of a block out to a thousand kilometres.
+    player.eye_position().as_vec3()
 }
 
 /// Step every shot one journal tick, breaking what they break.
@@ -168,7 +171,7 @@ pub fn advance_shots(shots: &mut Vec<Shot>, world: &mut World, tuning: &Tuning) 
         let travel = shot.velocity * TICK_SECONDS;
         let length = travel.length();
         let hit = if length > 1.0e-6 {
-            vx_world::raycast_solid(&*world, world.registry(), from, travel / length, length)
+            vx_world::raycast_solid(&*world, world.registry(), from.as_dvec3(), travel / length, length)
         } else {
             None
         };
@@ -575,7 +578,7 @@ mod tests {
         let mut movement = Movement::default();
         let mut body = PlayerBody::default();
         // Aim straight down -Z (yaw_q = 0, pitch_q = 0).
-        launch(&mut shots, &mut movement, body.eye_position(), 0, 0);
+        launch(&mut shots, &mut movement, body.eye_position().as_vec3(), 0, 0);
         assert_eq!(shots.len(), 1);
         assert!(shots[0].velocity.z < 0.0, "yaw 0 must fire down -Z");
 

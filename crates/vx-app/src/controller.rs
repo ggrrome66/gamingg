@@ -89,7 +89,7 @@ impl FlyController {
         // Horizontal movement follows where you are looking, but stays level:
         // flying should not sink because you glanced down.
         let motion = camera.right() * axes.x + Vec3::Y * axes.y + camera.forward_level() * axes.z;
-        camera.position += motion * speed * dt;
+        camera.position += (motion * speed * dt).as_dvec3();
     }
 }
 
@@ -147,7 +147,7 @@ mod tests {
     fn setup() -> (Camera, InputState, FlyController) {
         (
             Camera {
-                position: Vec3::ZERO,
+                position: glam::DVec3::ZERO,
                 yaw: 0.0,
                 pitch: 0.0,
                 ..Camera::default()
@@ -161,7 +161,7 @@ mod tests {
     fn with_no_input_the_camera_does_not_move() {
         let (mut camera, mut input, controller) = setup();
         controller.apply(&mut camera, &mut input, 0.016);
-        assert_eq!(camera.position, Vec3::ZERO);
+        assert_eq!(camera.position, glam::DVec3::ZERO);
         assert_eq!(camera.yaw, 0.0);
     }
 
@@ -174,7 +174,7 @@ mod tests {
 
         // Default orientation looks down -Z.
         assert!(camera.position.z < 0.0, "moved {:?}", camera.position);
-        assert!((camera.position.length() - controller.speed).abs() < 1e-3);
+        assert!((camera.position.length() as f32 - controller.speed).abs() < 1e-3);
     }
 
     #[test]
@@ -185,7 +185,7 @@ mod tests {
         controller.apply(&mut camera, &mut input, 0.5);
         let half = camera.position.length();
 
-        camera.position = Vec3::ZERO;
+        camera.position = glam::DVec3::ZERO;
         input.press(KeyCode::KeyW);
         controller.apply(&mut camera, &mut input, 1.0);
         let full = camera.position.length();
@@ -198,12 +198,12 @@ mod tests {
         let (mut camera, mut input, controller) = setup();
         input.press(KeyCode::KeyW);
         controller.apply(&mut camera, &mut input, 1.0);
-        let walk = camera.position.length();
+        let walk = camera.position.length() as f32;
 
-        camera.position = Vec3::ZERO;
+        camera.position = glam::DVec3::ZERO;
         input.press(KeyCode::ControlLeft);
         controller.apply(&mut camera, &mut input, 1.0);
-        let sprint = camera.position.length();
+        let sprint = camera.position.length() as f32;
 
         assert!((sprint / walk - controller.sprint_multiplier).abs() < 1e-3);
     }

@@ -9,8 +9,19 @@
 //! Each iteration advances whichever axis has its next grid boundary closest,
 //! which is also what tells us which face the ray entered through — the
 //! information needed to know where a placed block should go.
+//!
+//! # The ray starts from an exact cell
+//!
+//! The origin arrives in `f64` and is split, once, into the block it starts in
+//! (exact integers) and the fraction inside that block (a small `f32`). The
+//! whole march then runs in coordinates relative to that starting block and
+//! adds the block back only when reporting a hit. So a ray from an eye three
+//! thousand kilometres out is as precise as one at spawn: nothing large is
+//! ever multiplied, and the four-millimetre slop an absolute `f32` origin
+//! carries at fifty kilometres — the same class of bug as the body sticking
+//! to walls — never enters the arithmetic.
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use vx_core::{BlockId, BlockPos, BlockRegistry, Face};
 
 use crate::chunk::BlockView;
@@ -46,7 +57,7 @@ impl RayHit {
 pub fn raycast(
     view: &impl BlockView,
     is_target: impl Fn(BlockId) -> bool,
-    origin: Vec3,
+    origin: DVec3,
     direction: Vec3,
     max_distance: f32,
 ) -> Option<RayHit> {
@@ -56,14 +67,20 @@ pub fn raycast(
     }
     let direction = direction.normalize();
 
-    // The voxel the ray starts in.
-    let mut voxel = [
+    // The block the ray starts in, as exact integers, and where inside it the
+    // ray begins, as a fraction. From here on everything is measured from
+    // `base`; `voxel` counts steps away from it.
+    let base = [
         origin.x.floor() as i32,
         origin.y.floor() as i32,
         origin.z.floor() as i32,
     ];
-
-    let origin = [origin.x, origin.y, origin.z];
+    let mut voxel = [0i32; 3];
+    let origin = [
+        (origin.x - base[0] as f64) as f32,
+        (origin.y - base[1] as f64) as f32,
+        (origin.z - base[2] as f64) as f32,
+    ];
     let direction = [direction.x, direction.y, direction.z];
 
     let mut step = [0i32; 3];
@@ -96,7 +113,9 @@ pub fn raycast(
     let mut distance = 0.0;
 
     loop {
-        let position = BlockPos::new(voxel[0], voxel[1], voxel[2]);
+        // The world-space block, for the view and the report; the relative
+        // one, for the arithmetic.
+        let position = BlockPos::new(base[0] + voxel[0], base[1] + voxel[1], base[2] + voxel[2]);
         let id = view.block_at(position.x, position.y, position.z);
         if is_target(id) {
             // A wounded block is not a box any more. Descend into its cells
@@ -105,8 +124,9 @@ pub fn raycast(
             // the only place in the engine that reads damage geometry.
             match view.mask_at(position.x, position.y, position.z) {
                 Some(mask) => {
+                    let relative = BlockPos::new(voxel[0], voxel[1], voxel[2]);
                     if let Some(cell_distance) =
-                        pierce(mask, position, &origin, &direction, distance)
+                        pierce(mask, relative, &origin, &direction, distance)
                     {
                         return Some(RayHit {
                             block: position,
@@ -161,6 +181,9 @@ pub fn raycast(
 /// stepping in quarter-cell increments cannot skip a cell. Returns the
 /// distance at which the ray met material, or `None` when it found only
 /// holes and should carry on to the next block.
+///
+/// `block` and `origin` are both relative to the ray's starting block, so
+/// the sampling below never leaves small numbers.
 fn pierce(
     mask: crate::micro::Mask,
     block: BlockPos,
@@ -220,7 +243,7 @@ fn face_of(axis: usize, step: i32) -> Face {
 pub fn raycast_solid(
     view: &impl BlockView,
     registry: &BlockRegistry,
-    origin: Vec3,
+    origin: DVec3,
     direction: Vec3,
     max_distance: f32,
 ) -> Option<RayHit> {
@@ -271,7 +294,7 @@ mod wound_tests {
         raycast_solid(
             view,
             &registry(),
-            Vec3::new(-2.0, at(y), at(z)),
+            DVec3::new(-2.0, at(y) as f64, at(z) as f64),
             Vec3::new(1.0, 0.0, 0.0),
             8.0,
         )
@@ -379,7 +402,7 @@ mod tests {
 
     fn cast(chunk: &Chunk, origin: Vec3, direction: Vec3, max: f32) -> Option<RayHit> {
         let registry = registry();
-        raycast_solid(&SoloChunkView(chunk), &registry, origin, direction, max)
+        raycast_solid(&SoloChunkView(chunk), &registry, origin.as_dvec3(), direction, max)
     }
 
     #[test]
@@ -522,7 +545,7 @@ mod tests {
         let hit = raycast_solid(
             &SoloChunkView(&chunk),
             &registry,
-            Vec3::new(8.5, 46.0, 8.5),
+            DVec3::new(8.5, 46.0, 8.5),
             Vec3::NEG_Y,
             20.0,
         )
@@ -545,7 +568,7 @@ mod tests {
         let hit = raycast(
             &SoloChunkView(&chunk),
             |id| !id.is_air(),
-            Vec3::new(8.5, 46.0, 8.5),
+            DVec3::new(8.5, 46.0, 8.5),
             Vec3::NEG_Y,
             20.0,
         )
@@ -579,5 +602,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A ray from three thousand kilometres out hits the same face at the
+    /// same fraction as the same ray at spawn. The origin is split into an
+    /// exact cell and a fraction before anything is multiplied, so there is
+    /// no distance at which the aim goes soft.
+    #[test]
+    fn a_ray_far_from_the_origin_is_as_exact_as_one_at_spawn() {
+        use vx_core::BlockPos;
+        /// A floor at y = 77, everywhere.
+        struct Floor;
+        impl BlockView for Floor {
+            fn block_at(&self, _x: i32, y: i32, _z: i32) -> BlockId {
+                if y == 77 {
+                    BlockId(1)
+                } else {
+                    BlockId::AIR
+                }
+            }
+        }
+        let registry = registry();
+        let direction = Vec3::new(0.3, -0.8, 0.5);
+        let here = raycast_solid(&Floor, &registry, DVec3::new(0.4, 80.5, 0.6), direction, 20.0)
+            .expect("the ray at spawn missed the floor");
+        let far = 3_000_000;
+        let there = raycast_solid(
+            &Floor,
+            &registry,
+            DVec3::new(0.4 + far as f64, 80.5, 0.6 + far as f64),
+            direction,
+            20.0,
+        )
+        .expect("the ray far out missed the floor");
+        assert_eq!(there.block, BlockPos::new(here.block.x + far, here.block.y, here.block.z + far));
+        assert_eq!(there.face, here.face);
+        assert_eq!(there.distance, here.distance, "the distance drifted with the origin");
     }
 }

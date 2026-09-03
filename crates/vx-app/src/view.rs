@@ -13,7 +13,7 @@
 //! distance the camera would collapse onto the player's own head and render
 //! the inside of their skull.
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use vx_render::Camera;
 use vx_world::World;
 
@@ -66,7 +66,7 @@ impl ViewMode {
 ///
 /// `back` is the unit direction from the pivot toward the camera. Never
 /// returns less than [`MIN_ORBIT_DISTANCE`].
-pub fn clear_orbit_distance(world: &World, pivot: Vec3, back: Vec3, wanted: f32) -> f32 {
+pub fn clear_orbit_distance(world: &World, pivot: DVec3, back: Vec3, wanted: f32) -> f32 {
     let blocked = vx_world::raycast_solid(world, world.registry(), pivot, back, wanted)
         .map(|hit| hit.distance - CAMERA_SKIN)
         .unwrap_or(wanted);
@@ -76,15 +76,15 @@ pub fn clear_orbit_distance(world: &World, pivot: Vec3, back: Vec3, wanted: f32)
 /// The camera's position for this frame, given where its owner's eyes are.
 ///
 /// `camera` supplies orientation only; the returned position replaces its own.
-pub fn camera_placement(world: &World, camera: &Camera, pivot: Vec3, mode: ViewMode) -> Vec3 {
+pub fn camera_placement(world: &World, camera: &Camera, pivot: DVec3, mode: ViewMode) -> DVec3 {
     match mode {
         // A feed's position is set by whatever it is a feed of.
         ViewMode::FirstPerson | ViewMode::Fpv => pivot,
         ViewMode::ThirdPerson => {
-            let anchor = pivot + Vec3::Y * THIRD_PERSON_LIFT;
+            let anchor = pivot + DVec3::Y * THIRD_PERSON_LIFT as f64;
             let back = -camera.forward();
             let distance = clear_orbit_distance(world, anchor, back, THIRD_PERSON_DISTANCE);
-            anchor + back * distance
+            anchor + (back * distance).as_dvec3()
         }
     }
 }
@@ -106,9 +106,9 @@ mod tests {
     }
 
     /// A pivot well clear of the village buildings, in open air.
-    fn open_pivot(world: &World) -> Vec3 {
+    fn open_pivot(world: &World) -> DVec3 {
         let ground = world.surface_y(0, 0).expect("origin loaded");
-        Vec3::new(0.5, ground as f32 + 6.0, 0.5)
+        DVec3::new(0.5, ground as f64 + 6.0, 0.5)
     }
 
     #[test]
@@ -132,12 +132,12 @@ mod tests {
         let pivot = open_pivot(&world);
 
         let placed = camera_placement(&world, &camera, pivot, ViewMode::ThirdPerson);
-        let anchor = pivot + Vec3::Y * THIRD_PERSON_LIFT;
+        let anchor = pivot + DVec3::Y * THIRD_PERSON_LIFT as f64;
         let back = -camera.forward();
 
         // Directly along -forward from the lifted anchor, at full distance in
         // open air.
-        let offset = placed - anchor;
+        let offset = (placed - anchor).as_vec3();
         assert!(
             (offset.length() - THIRD_PERSON_DISTANCE).abs() < 1e-3,
             "sat {} away, wanted {THIRD_PERSON_DISTANCE}",
@@ -147,14 +147,14 @@ mod tests {
             offset.normalize().dot(back) > 0.999,
             "camera is not behind the pivot"
         );
-        assert!(placed.y > pivot.y - THIRD_PERSON_DISTANCE, "sank below the pivot");
+        assert!(placed.y > pivot.y - THIRD_PERSON_DISTANCE as f64, "sank below the pivot");
     }
 
     #[test]
     fn the_orbit_camera_pulls_in_when_a_wall_is_behind_you() {
         let mut world = world();
         let ground = world.surface_y(0, 0).unwrap();
-        let pivot = Vec3::new(0.5, ground as f32 + 2.0, 0.5);
+        let pivot = DVec3::new(0.5, ground as f64 + 2.0, 0.5);
         let stone = world.registry().id_of("engine:stone").unwrap();
 
         let camera = camera_looking(0.0, 0.0); // looking -Z, so the camera sits +Z
@@ -192,13 +192,13 @@ mod tests {
         // player's own head.
         let world = world();
         let ground = world.surface_y(0, 0).unwrap();
-        let buried = Vec3::new(0.5, ground as f32 - 4.0, 0.5);
+        let buried = DVec3::new(0.5, ground as f64 - 4.0, 0.5);
         let camera = camera_looking(1.1, 0.0);
 
         let placed = camera_placement(&world, &camera, buried, ViewMode::ThirdPerson);
-        let anchor = buried + Vec3::Y * THIRD_PERSON_LIFT;
+        let anchor = buried + DVec3::Y * THIRD_PERSON_LIFT as f64;
         assert!(
-            (placed - anchor).length() >= MIN_ORBIT_DISTANCE - 1e-4,
+            (placed - anchor).length() >= MIN_ORBIT_DISTANCE as f64 - 1e-4,
             "camera collapsed to {} from the pivot",
             (placed - anchor).length()
         );
@@ -211,7 +211,7 @@ mod tests {
         // looking at the inside of the ground.
         let world = world();
         let ground = world.surface_y(0, 0).unwrap();
-        let pivot = Vec3::new(0.5, ground as f32 + 1.6, 0.5);
+        let pivot = DVec3::new(0.5, ground as f64 + 1.6, 0.5);
 
         for step in 0..64 {
             let yaw = step as f32 * std::f32::consts::TAU / 64.0;

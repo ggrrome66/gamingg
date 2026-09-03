@@ -854,7 +854,7 @@ mod tests {
     /// zero-yaw convention, with the basis the game hands the handheld.
     fn looking_north() -> (vx_render::Camera, Vec3, Vec3) {
         let camera = vx_render::Camera {
-            position: Vec3::new(0.0, 80.0, 0.0),
+            position: glam::DVec3::new(0.0, 80.0, 0.0),
             yaw: 0.0,
             pitch: 0.0,
             aspect: 16.0 / 9.0,
@@ -911,9 +911,9 @@ mod tests {
     #[test]
     fn the_screen_lands_in_front_of_the_camera_and_faces_it() {
         let (camera, forward, right) = looking_north();
-        let corners = screen_corners(camera.position, forward, right, 1.0);
+        let corners = screen_corners(camera.local_position(), forward, right, 1.0);
         for corner in corners {
-            let along = (corner - camera.position).dot(forward);
+            let along = (corner - camera.local_position()).dot(forward);
             assert!(along > 0.05, "a corner of the glass is behind the eye");
             assert!(along < 1.5, "the glass is a metre and a half away");
         }
@@ -927,7 +927,7 @@ mod tests {
     fn the_projected_rect_is_on_screen_and_keeps_the_readouts_shape() {
         let (camera, forward, right) = looking_north();
         let size = (1280.0, 720.0);
-        let corners = screen_corners(camera.position, forward, right, 1.0);
+        let corners = screen_corners(camera.local_position(), forward, right, 1.0);
         let rect = screen_rect(camera.view_projection(), corners, size)
             .expect("the raised screen projected to nothing");
 
@@ -967,7 +967,7 @@ mod tests {
         let mut seen = 0;
         for step in 0..=10 {
             let raise = step as f32 / 10.0;
-            let corners = screen_corners(camera.position, forward, right, raise);
+            let corners = screen_corners(camera.local_position(), forward, right, raise);
             let Some(rect) =
                 screen_rect(camera.view_projection(), corners, (1280.0, 720.0))
             else {
@@ -985,7 +985,7 @@ mod tests {
         // derived from a point behind the eye is a rectangle in the wrong
         // place. Nothing is the right answer.
         let (mut camera, _, _) = looking_north();
-        let corners = screen_corners(camera.position, camera.forward(), camera.right(), 1.0);
+        let corners = screen_corners(camera.local_position(), camera.forward(), camera.right(), 1.0);
         camera.yaw = std::f32::consts::PI;
         assert!(screen_rect(camera.view_projection(), corners, (1280.0, 720.0)).is_none());
     }

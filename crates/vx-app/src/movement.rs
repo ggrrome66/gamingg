@@ -30,7 +30,7 @@
 //! Stance, stamina, ledges and carried mass are fiction, so they live here —
 //! the same line that keeps `vx-agent` free of quests and economy.
 
-use glam::{Vec2, Vec3};
+use glam::{DVec3, Vec2, Vec3};
 use vx_world::{
     collides, step_aabb, Aabb, MoveParams, PlayerBody, World, GRAVITY, JUMP_SPEED,
     TERMINAL_VELOCITY,
@@ -263,7 +263,7 @@ pub enum Stance {
     Swimming,
     Sliding { ticks: u16 },
     Airborne { coyote: u8 },
-    Mantling { from: Vec3, to: Vec3, t: u8, span: u8 },
+    Mantling { from: DVec3, to: DVec3, t: u8, span: u8 },
 }
 
 impl Stance {
@@ -362,9 +362,9 @@ pub enum Ledge {
     /// Low enough that the sweep walks it without being asked.
     Step,
     /// Waist high. Taken automatically on contact.
-    Vault { top: f32, across: Vec3 },
+    Vault { top: f64, across: DVec3 },
     /// Chest high. Costs stamina and has to be wanted.
-    Mantle { top: f32, across: Vec3 },
+    Mantle { top: f64, across: DVec3 },
 }
 
 /// Classify what the body is pressed against, using two casts through the
@@ -381,24 +381,24 @@ pub fn classify_ledge(world: &World, body: &PlayerBody, direction: Vec3) -> Ledg
     }
     let level = level.normalize();
 
-    let reach = body.width * 0.5 + 0.35;
-    let chest = body.position + Vec3::Y * 0.9;
+    let reach = (body.width * 0.5 + 0.35) as f32;
+    let chest = body.position + DVec3::Y * 0.9;
     let wall = vx_world::raycast_solid(world, world.registry(), chest, level, reach);
     let Some(wall) = wall else {
         return Ledge::None;
     };
 
     // Stand over the block that was struck and look straight down for its top.
-    let over = Vec3::new(
-        wall.block.x as f32 + 0.5,
-        body.position.y + MANTLE_MAX + 0.5,
-        wall.block.z as f32 + 0.5,
+    let over = DVec3::new(
+        wall.block.x as f64 + 0.5,
+        body.position.y + MANTLE_MAX as f64 + 0.5,
+        wall.block.z as f64 + 0.5,
     );
     let down = vx_world::raycast_solid(world, world.registry(), over, -Vec3::Y, MANTLE_MAX + 1.5);
     let Some(top_hit) = down else {
         return Ledge::None;
     };
-    let top = top_hit.block.y as f32 + 1.0;
+    let top = top_hit.block.y as f64 + 1.0;
     let rise = top - body.position.y;
 
     if rise <= 0.0 {
@@ -407,23 +407,23 @@ pub fn classify_ledge(world: &World, body: &PlayerBody, direction: Vec3) -> Ledg
     if rise < vx_world::STEP_HEIGHT {
         return Ledge::Step;
     }
-    if rise > MANTLE_MAX {
+    if rise > MANTLE_MAX as f64 {
         return Ledge::None;
     }
 
     // Where you would end up: one step past the wall face, standing on its top.
-    let across = Vec3::new(
-        wall.block.x as f32 + 0.5,
+    let across = DVec3::new(
+        wall.block.x as f64 + 0.5,
         top,
-        wall.block.z as f32 + 0.5,
-    ) + level * 0.15;
+        wall.block.z as f64 + 0.5,
+    ) + level.as_dvec3() * 0.15;
 
-    let landing = Aabb::standing_on(across, body.width, STAND_HEIGHT);
+    let landing = Aabb::standing_on(across, body.width, STAND_HEIGHT as f64);
     if collides(world, &landing) {
         return Ledge::None;
     }
 
-    if rise <= VAULT_MAX {
+    if rise <= VAULT_MAX as f64 {
         Ledge::Vault { top, across }
     } else {
         Ledge::Mantle { top, across }
@@ -441,7 +441,7 @@ pub fn submerged(world: &World, body: &PlayerBody) -> bool {
     let Some(water) = world.registry().id_of("engine:water") else {
         return false;
     };
-    let waist = body.position + Vec3::Y * (body.height * 0.5);
+    let waist = body.position + DVec3::Y * (body.height * 0.5);
     world.block(vx_core::BlockPos::new(
         waist.x.floor() as i32,
         waist.y.floor() as i32,
@@ -560,7 +560,7 @@ impl Movement {
         self.jump(body, grounded);
         self.launch_slide(body, wish);
         if let Some(shove) = self.recoil.take() {
-            body.velocity += shove;
+            body.velocity += shove.as_dvec3();
         }
         self.drain(mass, dt);
 
@@ -569,17 +569,17 @@ impl Movement {
         // way out and a slide-jump lands at walking pace.
         let params = self.params(body.on_ground);
         let speed = self.top_speed(mass);
-        body.height = self.stance.body_height();
-        body.eye_height = self.stance.eye_cm() as f32 / 100.0;
-        body.step_with(world, wish * speed, dt, params);
+        body.height = self.stance.body_height() as f64;
+        body.eye_height = self.stance.eye_cm() as f64 / 100.0;
+        body.step_with(world, (wish * speed).as_dvec3(), dt as f64, params);
 
         if body.on_ground {
             self.settle_stance(world, body, command);
         } else if self.stance.is_grounded() && !matches!(self.stance, Stance::Sliding { .. }) {
             self.stance = Stance::Airborne { coyote: COYOTE };
         }
-        body.height = self.stance.body_height();
-        body.eye_height = self.stance.eye_cm() as f32 / 100.0;
+        body.height = self.stance.body_height() as f64;
+        body.eye_height = self.stance.eye_cm() as f64 / 100.0;
     }
 
     /// Adopt the stance the keys ask for, but never one the ceiling forbids.
@@ -607,16 +607,16 @@ impl Movement {
         };
         let _ = dt;
         let next = t + 1;
-        let progress = next as f32 / span as f32;
+        let progress = next as f64 / span as f64;
         // Up first, then across: the shape of pulling yourself over an edge.
         let lift = progress.min(0.6) / 0.6;
         let reach = ((progress - 0.4).max(0.0)) / 0.6;
-        body.position = Vec3::new(
+        body.position = DVec3::new(
             from.x + (to.x - from.x) * reach,
             from.y + (to.y - from.y) * lift,
             from.z + (to.z - from.z) * reach,
         );
-        body.velocity = Vec3::ZERO;
+        body.velocity = DVec3::ZERO;
 
         if next >= span {
             body.position = to;
@@ -642,7 +642,7 @@ impl Movement {
         command: MoveCommand,
         grounded: bool,
     ) {
-        let speed = Vec3::new(body.velocity.x, 0.0, body.velocity.z).length();
+        let speed = DVec3::new(body.velocity.x, 0.0, body.velocity.z).length() as f32;
 
         // Sprint into crouch at pace is a slide, and only from a standing start
         // of real speed — jogging into it would make the verb free.
@@ -687,7 +687,7 @@ impl Movement {
 
     fn grounded_stance(&self, command: MoveCommand, body: &PlayerBody) -> Stance {
         if let Stance::Sliding { ticks } = self.stance {
-            let speed = Vec3::new(body.velocity.x, 0.0, body.velocity.z).length();
+            let speed = DVec3::new(body.velocity.x, 0.0, body.velocity.z).length() as f32;
             if speed >= self.tuning.slide_exit {
                 return Stance::Sliding { ticks };
             }
@@ -706,7 +706,7 @@ impl Movement {
     fn headroom(&self, world: &World, body: &PlayerBody, height: f32) -> bool {
         !collides(
             world,
-            &Aabb::standing_on(body.position, body.width, height),
+            &Aabb::standing_on(body.position, body.width, height as f64),
         )
     }
 
@@ -723,7 +723,8 @@ impl Movement {
         }
         // Only when actually stopped by something — otherwise every wall you
         // walk past would grab you.
-        let pressing = Vec3::new(body.velocity.x, 0.0, body.velocity.z).length() < self.tuning.walk * 0.5;
+        let pressing = DVec3::new(body.velocity.x, 0.0, body.velocity.z).length()
+            < self.tuning.walk as f64 * 0.5;
         if !pressing {
             return;
         }
@@ -745,14 +746,14 @@ impl Movement {
         }
     }
 
-    fn begin_climb(&mut self, body: &mut PlayerBody, to: Vec3, span: u8) {
+    fn begin_climb(&mut self, body: &mut PlayerBody, to: DVec3, span: u8) {
         self.stance = Stance::Mantling {
             from: body.position,
             to,
             t: 0,
             span,
         };
-        body.velocity = Vec3::ZERO;
+        body.velocity = DVec3::ZERO;
         self.buffered_jump = 0;
     }
 
@@ -765,15 +766,15 @@ impl Movement {
         let Some(target) = self.entry_impulse.take() else {
             return;
         };
-        let along = Vec3::new(body.velocity.x, 0.0, body.velocity.z);
+        let along = DVec3::new(body.velocity.x, 0.0, body.velocity.z);
         let direction = if along.length_squared() > 1.0e-6 {
             along.normalize()
         } else if wish != Vec3::ZERO {
-            wish.normalize()
+            wish.normalize().as_dvec3()
         } else {
             return;
         };
-        let kicked = direction * target;
+        let kicked = direction * target as f64;
         body.velocity.x = kicked.x;
         body.velocity.z = kicked.z;
     }
@@ -787,16 +788,16 @@ impl Movement {
         if drop <= 0.0 {
             return;
         }
-        let along = Vec3::new(body.velocity.x, 0.0, body.velocity.z);
+        let along = DVec3::new(body.velocity.x, 0.0, body.velocity.z);
         let direction = if along.length_squared() > 1.0e-6 {
             along.normalize()
         } else if wish != Vec3::ZERO {
-            wish.normalize()
+            wish.normalize().as_dvec3()
         } else {
             return;
         };
-        let gained = along.length() + drop * self.tuning.slide_landing_transfer;
-        let capped = direction * gained.min(self.tuning.slide_cap);
+        let gained = along.length() + drop * self.tuning.slide_landing_transfer as f64;
+        let capped = direction * gained.min(self.tuning.slide_cap as f64);
         body.velocity.x = capped.x;
         body.velocity.z = capped.z;
     }
@@ -812,7 +813,7 @@ impl Movement {
         // Slide-jumping keeps the horizontal velocity it built. That is the
         // whole reason the verb is worth having; take it away and a slide is a
         // strictly worse crouch.
-        let carried = Vec3::new(body.velocity.x, 0.0, body.velocity.z);
+        let carried = DVec3::new(body.velocity.x, 0.0, body.velocity.z);
         body.velocity.y = JUMP_SPEED;
         body.velocity.x = carried.x;
         body.velocity.z = carried.z;
@@ -855,20 +856,24 @@ impl Movement {
         };
         match self.stance {
             Stance::Sliding { .. } => MoveParams {
-                accel: self.tuning.accel_slide,
-                friction: if grounded { self.tuning.friction_slide } else { self.tuning.friction_air },
+                accel: self.tuning.accel_slide as f64,
+                friction: if grounded {
+                    self.tuning.friction_slide as f64
+                } else {
+                    self.tuning.friction_air as f64
+                },
                 step_height,
                 gravity: true,
             },
             _ if !grounded => MoveParams {
-                accel: self.tuning.accel_air,
-                friction: self.tuning.friction_air,
+                accel: self.tuning.accel_air as f64,
+                friction: self.tuning.friction_air as f64,
                 step_height,
                 gravity: true,
             },
             _ => MoveParams {
-                accel: self.tuning.accel_ground,
-                friction: self.tuning.friction,
+                accel: self.tuning.accel_ground as f64,
+                friction: self.tuning.friction as f64,
                 step_height,
                 gravity: true,
             },
@@ -893,8 +898,8 @@ pub fn advance_journal_tick(
 }
 
 /// Keep the unused-import checker honest about what this module leans on.
-const _: fn(&World, Aabb, Vec3, f32, f32) -> vx_world::StepResult = step_aabb;
-const _: f32 = GRAVITY;
+const _: fn(&World, Aabb, DVec3, f64, f64) -> vx_world::StepResult = step_aabb;
+const _: f64 = GRAVITY;
 
 /// Turns elapsed wall-clock time into whole movement ticks.
 ///
@@ -952,9 +957,9 @@ mod tests {
         mass_from_byte(load_byte(carried, capacity))
     }
 
-    fn standing(x: f32, z: f32) -> PlayerBody {
+    fn standing(x: f64, z: f64) -> PlayerBody {
         PlayerBody {
-            position: Vec3::new(x, 41.0, z),
+            position: DVec3::new(x, 41.0, z),
             ..PlayerBody::default()
         }
     }
@@ -1270,11 +1275,11 @@ mod tests {
 
         let ahead = MoveCommand::looking(FWD, facing_plus_x(), 0.0).wish_dir();
         for height in 1..=3 {
-            let x = (8 + height * 4) as f32 - 0.4;
+            let x = (8 + height * 4) as f64 - 0.4;
             let body = standing(x, 4.5);
             match classify_ledge(&world, &body, ahead) {
                 Ledge::Vault { across, .. } | Ledge::Mantle { across, .. } => {
-                    let column = Aabb::standing_on(across, body.width, STAND_HEIGHT);
+                    let column = Aabb::standing_on(across, body.width, STAND_HEIGHT as f64);
                     assert!(
                         !collides(&world, &column),
                         "climb of {height} blocks lands inside rock at {across:?}"
@@ -1349,7 +1354,7 @@ mod tests {
         let sprinted = covered(FWD | SPRINT);
         // Stated against the constants rather than a magic number, so retuning
         // one of them cannot quietly invalidate the test.
-        let expected = SPRINT_SPEED / WALK;
+        let expected = (SPRINT_SPEED / WALK) as f64;
         assert!(
             (sprinted / walked - expected).abs() < 0.1,
             "walk {walked}, sprint {sprinted}, ratio {} wanted {expected}",
@@ -1368,12 +1373,12 @@ mod tests {
         run(&mut movement, &mut body, &world, sprint, 64);
         let slide = MoveCommand::looking(FWD | SPRINT | CROUCH, facing_plus_x(), 0.0);
         run(&mut movement, &mut body, &world, slide, 4);
-        let carried = Vec3::new(body.velocity.x, 0.0, body.velocity.z).length();
+        let carried = DVec3::new(body.velocity.x, 0.0, body.velocity.z).length();
 
         let hop = MoveCommand::looking(FWD | SPRINT | CROUCH | JUMP, facing_plus_x(), 0.0);
         movement.advance(&mut body, &world, hop, 1.0, MOVE_TICK);
 
-        let after = Vec3::new(body.velocity.x, 0.0, body.velocity.z).length();
+        let after = DVec3::new(body.velocity.x, 0.0, body.velocity.z).length();
         assert!(body.velocity.y > 0.0, "the slide jump did not leave the ground");
         assert!(
             after >= carried - 0.5,

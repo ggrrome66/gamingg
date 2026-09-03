@@ -262,7 +262,13 @@ impl Roost {
         if (target_eye - eye).length() > WATCH_RADIUS {
             return false;
         }
-        vx_world::sight::sees(world, world.registry(), eye, target_eye, WATCH_RADIUS + 2.0)
+        vx_world::sight::sees(
+            world,
+            world.registry(),
+            eye.as_dvec3(),
+            target_eye.as_dvec3(),
+            WATCH_RADIUS + 2.0,
+        )
     }
 
     /// Does what it sees go on your sheet? Not while it is silenced.

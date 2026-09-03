@@ -569,8 +569,8 @@ mod tests {
             Stance::Sliding { ticks: 0 },
             Stance::Airborne { coyote: 0 },
             Stance::Mantling {
-                from: glam::Vec3::ZERO,
-                to: glam::Vec3::ZERO,
+                from: glam::DVec3::ZERO,
+                to: glam::DVec3::ZERO,
                 t: 0,
                 span: 1,
             },

@@ -121,7 +121,7 @@ impl GenWorker {
 }
 
 /// Which chunk a world position falls in.
-pub fn chunk_at(position: glam::Vec3) -> ChunkPos {
+pub fn chunk_at(position: glam::DVec3) -> ChunkPos {
     BlockPos::new(
         position.x.floor() as i32,
         0,
@@ -362,11 +362,11 @@ mod tests {
 
     #[test]
     fn chunk_at_uses_floor_so_negative_positions_land_correctly() {
-        assert_eq!(chunk_at(glam::Vec3::new(0.0, 0.0, 0.0)), ChunkPos::new(0, 0));
-        assert_eq!(chunk_at(glam::Vec3::new(15.9, 0.0, 15.9)), ChunkPos::new(0, 0));
-        assert_eq!(chunk_at(glam::Vec3::new(16.0, 0.0, 0.0)), ChunkPos::new(1, 0));
-        assert_eq!(chunk_at(glam::Vec3::new(-0.5, 0.0, -0.5)), ChunkPos::new(-1, -1));
-        assert_eq!(chunk_at(glam::Vec3::new(-16.5, 0.0, 0.0)), ChunkPos::new(-2, 0));
+        assert_eq!(chunk_at(glam::DVec3::new(0.0, 0.0, 0.0)), ChunkPos::new(0, 0));
+        assert_eq!(chunk_at(glam::DVec3::new(15.9, 0.0, 15.9)), ChunkPos::new(0, 0));
+        assert_eq!(chunk_at(glam::DVec3::new(16.0, 0.0, 0.0)), ChunkPos::new(1, 0));
+        assert_eq!(chunk_at(glam::DVec3::new(-0.5, 0.0, -0.5)), ChunkPos::new(-1, -1));
+        assert_eq!(chunk_at(glam::DVec3::new(-16.5, 0.0, 0.0)), ChunkPos::new(-2, 0));
     }
 
     #[test]
