@@ -872,6 +872,49 @@ closed door. So there is a whole middle now between "nothing happened" and
 "there are four lads with guns coming over the hill", and you can talk, pay or
 run your way out of it.
 
+### Winter is ground now
+
+Stage 41 gave the country a year and drew one line through it: a season can
+change the *colour* of things and never the *ground*. The leaves turn, the sky
+goes grey, the fire season comes and goes, and no block moves — and the test
+that says so named the one thing that would turn it red: snow that settles.
+
+That is this stage. When it is cold enough and it is coming down, it is
+**snow**, and it settles. The grass goes white, the sand goes white, the bog
+goes white. Not a pile on top: the ground is the same height it was, your
+doors still open and the paths are where they were. The surface block is
+swapped for its snowed twin, and a snowed block is a block *name*, which is
+what the region files, the world hash and the minimap all already read. Snow
+lands on open ground only — a tuft on the grass counts as open sky; a roof, a
+log, a wall or a canopy over the column does not.
+
+And the lake **freezes**. Full, still water at or below sea level goes solid,
+and ice is a solid translucent block and nothing else, so everything that
+follows from a solid block follows: you walk across it, so do the drones, so
+do the deputies coming for you. A pump on ice lifts nothing. An electrolyser
+beside it says `NO WATER IN REACH`. Fire finds no fuel in snow or ice, so a
+stand that burns in winter leaves ash on snow. The lake bed under the ice
+keeps its light, because the mesher's roofs are opaque and ice is not.
+
+Then the thaw. Snow goes back to exactly the bare block it lay on, ice goes
+back to a full block of water, and the pump starts up. The cold itself is a *weather*, not a calendar entry: the
+temperature is mostly the place's, a cove warmer than a summit in any month,
+with the year leaning on it, so the high country freezes in midwinter, the
+lowlands never do in summer, and the shoulders of the year cross the line on a
+cold front and come back. `WEATHER` at the terminal says `AIR FREEZING` and
+`SKY SNOW` when they apply.
+
+It only happens near *you* — the same rule the rain follows — so when the game
+replays your day from the book, it snows on the same columns and thaws the same
+columns and the ground comes out identical. That is the test, and it is the
+ordinary one this time rather than the inverted one: a winter journal replays
+to the same snow and the same ice, and differs from the untouched country.
+Stage 41's own test did not go red: *reading* the year still moves nothing.
+The snow is not a reading; it is an automaton on the journal's side of the
+line. And on the way past: the rain had been falling on a diagonal through
+the player since stage 38, because its second hash draw read the same top
+bits as its first. Both draws are finalised now.
+
 ### A town of your own, one way or the other
 
 Getting voted in was the only way to run a town. Now there are two more.
@@ -1837,6 +1880,8 @@ cargo run --release -p vx-app -- --screenshot far-lamp.ppm --at 3000000,3000000 
 # a town founded at --at (or the first open plot east of it), framed from its wall,
 # and the console of a town whose chairs you seized
 cargo run --release -p vx-app -- --screenshot founded.ppm --at 600,40 --founded --time 0.5
+cargo run --release -p vx-app -- --screenshot frost.ppm --at 0,10 --frost --time 0.5
+cargo run --release -p vx-app -- --screenshot thaw.ppm --at 0,10 --thaw --time 0.5
 cargo run --release -p vx-app -- --screenshot taken.ppm --at 0,10 --taken
 
 # the pocket arcade, mid-fight, on the raised handheld

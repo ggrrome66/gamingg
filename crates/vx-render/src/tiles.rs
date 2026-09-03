@@ -121,7 +121,15 @@ pub mod slot {
     /// And what it leaves behind.
     pub const ASH: u32 = 62;
 
-    pub const COUNT: u32 = 63;
+    /// The ground gone white: the top of any snowed block.
+    pub const SNOW_TOP: u32 = 63;
+    /// The side of a snowed block: the bare ground with a white band draped
+    /// over the top rows, the way grass drapes over dirt.
+    pub const SNOWY_SIDE: u32 = 64;
+    /// Still water frozen over: pale, see-through, a hairline crack or two.
+    pub const ICE: u32 = 65;
+
+    pub const COUNT: u32 = 66;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -536,6 +544,41 @@ pub fn generate_tile(tile: u32, turn: f32) -> Vec<u8> {
                     } else {
                         shade([0.20, 0.18, 0.18], noise * 0.10)
                     }
+                }
+                slot::SNOW_TOP => {
+                    // Near-white with a cool grain, and the odd texel of blue
+                    // shadow where the surface is not quite flat — which is
+                    // what stops a snowfield reading as a sheet of paper.
+                    if jitter(tile ^ 0x63, x / 2, y / 2) > 0.38 {
+                        shade([0.82, 0.86, 0.92], noise * 0.04)
+                    } else {
+                        shade([0.93, 0.95, 0.97], noise * 0.03)
+                    }
+                }
+                slot::SNOWY_SIDE => {
+                    // The grass side's dirt with snow draped over the top
+                    // rows, using the same wobble the grass band uses so the
+                    // two blocks sit beside each other without a ruler line.
+                    let wobble = (jitter(slot::GRASS_SIDE, x, 0) * 2.0).round() as i32;
+                    let band = (3 + wobble).clamp(1, 6) as u32;
+                    if y < band {
+                        shade([0.92, 0.94, 0.97], noise * 0.03)
+                    } else {
+                        shade([0.45, 0.32, 0.21], noise * 0.12)
+                    }
+                }
+                slot::ICE => {
+                    // Pale blue-white and see-through, with a hairline crack
+                    // or two: solid enough to walk on, thin enough to read
+                    // the lake bed through.
+                    let crack = jitter(tile ^ 0x65, x / 3, y) > 0.44 && (x + y) % 5 == 0;
+                    let mut texel = if crack {
+                        shade([0.62, 0.74, 0.86], noise * 0.03)
+                    } else {
+                        shade([0.80, 0.90, 0.97], noise * 0.03)
+                    };
+                    texel[3] = 200;
+                    texel
                 }
                 slot::TUFT => {
                     // A few grass blades on a transparent field; drawn as a
@@ -1211,13 +1254,18 @@ mod tests {
     }
 
     #[test]
-    fn only_water_and_tufts_are_transparent() {
+    fn only_water_ice_and_tufts_are_transparent() {
         for tile in 0..slot::COUNT {
             let pixels = generate_tile(tile, 0.0);
             let alphas: Vec<u8> = pixels.chunks_exact(4).map(|texel| texel[3]).collect();
             match tile {
                 slot::WATER => {
                     assert!(alphas.iter().all(|&a| a < 255), "water should be see-through")
+                }
+                slot::ICE => {
+                    // See-through like water, and more solid than it: the
+                    // lake bed shows, the floor reads as a floor.
+                    assert!(alphas.iter().all(|&a| a < 255 && a > 128), "ice is the wrong kind of clear")
                 }
                 slot::TUFT => {
                     // Blades on empty air: some texels fully clear, some

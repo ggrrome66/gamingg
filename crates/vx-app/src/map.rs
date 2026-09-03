@@ -245,6 +245,10 @@ fn column_colour(
         } else {
             match name {
                 "engine:water" => [0.24, 0.36, 0.65],
+                "engine:ice" => [0.70, 0.82, 0.92],
+                "engine:snowy_grass" | "engine:snowy_sphagnum" | "engine:snowy_sand" => {
+                    [0.90, 0.93, 0.96]
+                }
                 "engine:grass" => [0.28, 0.52, 0.24],
                 "engine:sand" => [0.78, 0.72, 0.51],
                 "engine:dirt" => [0.44, 0.32, 0.22],
@@ -519,6 +523,45 @@ mod tests {
         assert_eq!(state.explored_count(), 0, "corrupt file should reset, not crash");
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// The sibling of the water probe below: snow reads white and ice reads
+    /// a paler blue than the lake it was.
+    #[test]
+    fn snow_reads_white_and_ice_reads_pale_blue() {
+        let mut world = World::new(2024);
+        world.load_around(ChunkPos::new(12, 12), 2);
+        let mut state = MapState::new();
+        state.explore_around(ChunkPos::new(12, 12), 2);
+        let size = MAP_SIZE as i32;
+        let zoom = state.zoom;
+        let column = |px: i32, py: i32| (200 + (px - size / 2) * zoom, 200 + (py - size / 2) * zoom);
+        let ice = world.registry().id_of("engine:ice").unwrap();
+        let snow = world.registry().id_of("engine:snowy_grass").unwrap();
+        let water = world.registry().id_of("engine:water").unwrap();
+        let mut crown = |px: i32, py: i32, block: vx_core::BlockId| {
+            let (x, z) = column(px, py);
+            let top = world.surface_y(x, z).unwrap() - 1;
+            world.set_block(vx_core::BlockPos::new(x, top, z), block);
+        };
+        // Three columns a few pixels apart, all inside the explored ring.
+        crown(96, 96, ice);
+        crown(90, 96, snow);
+        crown(96, 90, water);
+
+        let pixels = render_map(&world, &state, (200, 200), &[]);
+        let read = |px: i32, py: i32| {
+            let at = ((py * size + px) * 4) as usize;
+            (pixels[at], pixels[at + 1], pixels[at + 2])
+        };
+        let (r, g, b) = read(96, 96);
+        assert!(b > r && b >= g, "ice pixel is not blue: {r},{g},{b}");
+        let (wr, wg, wb) = read(96, 90);
+        assert!(wb > wr && wb > wg, "water pixel is not blue: {wr},{wg},{wb}");
+        assert!(r > wr && g > wg, "ice is not paler than water: {r},{g},{b} vs {wr},{wg},{wb}");
+        let (r, g, b) = read(90, 96);
+        let (lo, hi) = (r.min(g).min(b), r.max(g).max(b));
+        assert!(lo > 120 && hi - lo < 40, "snow pixel is not white: {r},{g},{b}");
     }
 
     #[test]

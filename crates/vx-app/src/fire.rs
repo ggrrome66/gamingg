@@ -499,6 +499,20 @@ mod tests {
         gone
     }
 
+    /// A burn in winter leaves ash on snow, and a fire stops at the lake
+    /// whether or not the lake is frozen.
+    #[test]
+    fn snow_and_ice_are_not_fuel() {
+        for name in [
+            "engine:ice",
+            "engine:snowy_grass",
+            "engine:snowy_sphagnum",
+            "engine:snowy_sand",
+        ] {
+            assert_eq!(fuel(name), None, "{name} burns");
+        }
+    }
+
     #[test]
     fn the_fuel_table_says_what_the_note_says() {
         // Black spruce is kindling with cones on; a hardwood is not.

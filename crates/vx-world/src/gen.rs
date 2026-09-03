@@ -147,6 +147,16 @@ pub struct TerrainBlocks {
     pub permit_box_i: BlockId,
     pub permit_box_ii: BlockId,
     pub permit_box_iii: BlockId,
+    /// The ground gone white. The same cube as the bare block under it, so
+    /// nothing moves when it snows: a snowed surface is a *name*, and the
+    /// thaw swaps it back by name. Worldgen never places these; the frost
+    /// automaton does, near the player, on both sides of the oracle.
+    pub snowy_grass: BlockId,
+    pub snowy_sphagnum: BlockId,
+    pub snowy_sand: BlockId,
+    /// Still water frozen over. Solid — you, the drones and the deputies
+    /// walk on it — and translucent, so the lake bed keeps its light.
+    pub ice: BlockId,
 }
 
 impl TerrainBlocks {
@@ -220,6 +230,23 @@ impl TerrainBlocks {
             // much, and it is on its way to being nothing.
             ember: register(BlockDef::uniform("engine:ember", 61).with_hardness(Some(0.2))),
             ash: register(BlockDef::uniform("engine:ash", 62).with_hardness(Some(0.4))),
+            // Snow: the bare block's own hardness, because it is the bare
+            // block with a white top.
+            snowy_grass: register(
+                BlockDef::columnar("engine:snowy_grass", 63, 64, 1).with_hardness(Some(1.0)),
+            ),
+            snowy_sphagnum: register(
+                BlockDef::columnar("engine:snowy_sphagnum", 63, 64, 1).with_hardness(Some(0.4)),
+            ),
+            snowy_sand: register(
+                BlockDef::columnar("engine:snowy_sand", 63, 64, 4).with_hardness(Some(1.0)),
+            ),
+            // Ice: solid and see-through. Soft, because it is.
+            ice: register(
+                BlockDef::uniform("engine:ice", 65)
+                    .translucent()
+                    .with_hardness(Some(0.6)),
+            ),
             tall_grass: register(
                 BlockDef::uniform("engine:tall_grass", 21)
                     .cross()
@@ -357,6 +384,10 @@ impl TerrainBlocks {
             gas_cell: registry.id_of("engine:gas_cell")?,
             wellhead: registry.id_of("engine:wellhead")?,
             ward_cot: registry.id_of("engine:ward_cot")?,
+            snowy_grass: registry.id_of("engine:snowy_grass")?,
+            snowy_sphagnum: registry.id_of("engine:snowy_sphagnum")?,
+            snowy_sand: registry.id_of("engine:snowy_sand")?,
+            ice: registry.id_of("engine:ice")?,
         })
     }
 }
@@ -987,6 +1018,15 @@ mod tests {
         assert!(!registry.is_solid(looked_up.water));
         assert!(registry.is_opaque(looked_up.stone));
         assert!(registry.is_solid(looked_up.stone));
+
+        // Ice is see-through and *not* passable: a frozen lake is a floor
+        // that keeps its light. Snow is the bare block with a white top.
+        assert!(!registry.is_opaque(looked_up.ice));
+        assert!(registry.is_solid(looked_up.ice));
+        assert_eq!(looked_up.ice, generator.blocks().ice);
+        assert!(registry.is_solid(looked_up.snowy_grass));
+        assert!(registry.is_opaque(looked_up.snowy_sand));
+        assert_eq!(registry.get(looked_up.snowy_sphagnum).unwrap().name, "engine:snowy_sphagnum");
     }
 
     #[test]

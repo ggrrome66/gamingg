@@ -28,6 +28,7 @@ mod dose;
 mod economy;
 mod felling;
 mod fire;
+mod frost;
 mod garage;
 mod garrison;
 #[cfg(feature = "gold")]
@@ -276,6 +277,10 @@ struct Options {
     taken: bool,
     /// Found a town at `--at` and frame it from outside its wall.
     founded: bool,
+    /// The first snow of the winter over a lake shore near `--at`.
+    frost: bool,
+    /// The same shore, part-way through the thaw that follows.
+    thaw: bool,
 }
 
 /// Which method a `--dig` run should use.
@@ -338,6 +343,8 @@ fn parse_args() -> Result<Options, String> {
         elected: false,
         taken: false,
         founded: false,
+        frost: false,
+        thaw: false,
         at: (0, 0),
         dig: None,
         ticks: 20_000,
@@ -444,6 +451,8 @@ fn parse_args() -> Result<Options, String> {
                 options.taken = true;
             }
             "--founded" => options.founded = true,
+            "--frost" => options.frost = true,
+            "--thaw" => options.thaw = true,
             "--elected" => {
                 options.board = true;
                 options.elected = true;
@@ -823,7 +832,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // rather than the first day, because a season's first morning still
     // looks like the one before it — that is the whole point of the year
     // being continuous, and it makes for a poor photograph.
-    let season_at: Option<u64> = match options.season.as_deref() {
+    let mut season_at: Option<u64> = match options.season.as_deref() {
         Some(word) => match vx_world::season::Season::parse(word) {
             Some(season) => {
                 let tick = season.index() as u64 * vx_world::season::SEASON_TICKS
@@ -2220,6 +2229,138 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             sky.rain,
             sky.wind_speed(),
             rain::drops(&sky)
+        );
+    }
+
+    if options.frost || options.thaw {
+        // Winter on real country. Nothing is painted: the fixture finds a
+        // shore near `--at` with a lake within the frost's reach, walks the
+        // clock to the first snowing sky of the winter over it, and runs
+        // `frost::settle` — the automaton both sides of the journal run —
+        // through a day's worth of freezing passes, until the slope is
+        // white and the lake is solid. `--thaw` runs it on into the warm
+        // spell after and stops three quarters of the way through, so the
+        // picture is the bare slope with the last of the snow on it and
+        // open water again.
+        let seed = world.seed();
+        let generator = world.generator().clone();
+        let sea = vx_world::gen::SEA_LEVEL;
+        let lake_at = |x: i32, z: i32| generator.natural_height_at(x, z) < sea;
+        let lake_within = |x: i32, z: i32| {
+            let mut count = 0;
+            let mut sum = (0i64, 0i64);
+            for sz in (-frost::REACH..=frost::REACH).step_by(4) {
+                for sx in (-frost::REACH..=frost::REACH).step_by(4) {
+                    if lake_at(x + sx, z + sz) {
+                        count += 1;
+                        sum.0 += i64::from(x + sx);
+                        sum.1 += i64::from(z + sz);
+                    }
+                }
+            }
+            (count, sum)
+        };
+        // The shore: dry ground with the most lake within reach of it —
+        // where, how many lake columns, and their summed position.
+        type Shore = ((i32, i32), i32, (i64, i64));
+        let mut shore: Option<Shore> = None;
+        for dz in (-160..=160).step_by(8) {
+            for dx in (-160..=160).step_by(8) {
+                let (x, z) = (options.at.0 + dx, options.at.1 + dz);
+                if generator.natural_height_at(x, z) < sea + 2 {
+                    continue;
+                }
+                let (count, sum) = lake_within(x, z);
+                if count > 0 && shore.is_none_or(|(_, best, _)| count > best) {
+                    shore = Some(((x, z), count, sum));
+                }
+            }
+        }
+        let ((x, z), lake, sum) =
+            shore.ok_or("no lake shore within a hundred and sixty blocks of --at")?;
+        let lake_centre = (
+            (sum.0 / i64::from(lake)) as i32,
+            (sum.1 / i64::from(lake)) as i32,
+        );
+        world.load_around(vx_core::BlockPos::new(x, 0, z).chunk(), 5);
+        let top = world.surface_y(x, z).ok_or("the shore did not load")?;
+        let standing = vx_core::BlockPos::new(x, top, z);
+
+        let winter = 3 * vx_world::season::SEASON_TICKS;
+        let first = (0..(vx_world::season::SEASON_TICKS / frost::EVERY))
+            .map(|n| winter + n * frost::EVERY)
+            .find(|&tick| vx_world::weather::at(seed, tick, x, z).snowing())
+            .ok_or("it never snows over that shore all winter")?;
+        let (mut snowed, mut froze) = (0, 0);
+        let mut tick = first;
+        let mut cold_passes = 0;
+        let mut pictured = first;
+        while cold_passes < vx_world::season::DAY_TICKS / frost::EVERY
+            && tick < winter + 2 * vx_world::season::SEASON_TICKS
+        {
+            let sky = vx_world::weather::at(seed, tick, x, z);
+            if sky.freezing() {
+                let pass = frost::settle(&mut world, seed, tick, standing);
+                snowed += pass.snowed;
+                froze += pass.froze;
+                cold_passes += 1;
+                if sky.snowing() {
+                    pictured = tick;
+                }
+            }
+            tick += frost::EVERY;
+        }
+
+        let (mut thawed, mut melted) = (0, 0);
+        if options.thaw {
+            let mut water = Vec::new();
+            while thawed + melted < (snowed + froze) * 3 / 4
+                && tick < winter + 3 * vx_world::season::SEASON_TICKS
+            {
+                let pass = frost::settle(&mut world, seed, tick, standing);
+                thawed += pass.thawed;
+                melted += pass.melted;
+                for at in pass.melted_at {
+                    journal::wake_water(&mut water, &mut world, at);
+                }
+                tick += frost::EVERY;
+            }
+            for _ in 0..64 * 3 {
+                if water.is_empty() {
+                    break;
+                }
+                journal::settle_water(&mut water, &mut world);
+            }
+            pictured = tick;
+        }
+        remesh_all(&context, &mut renderer, &mut world);
+
+        // From above the shore, looking down across the lake: the slope in
+        // the foreground and the ice — or the water — filling the frame.
+        let eye = glam::DVec3::new(x as f64 + 0.5, f64::from(top) + 12.0, z as f64 + 0.5);
+        camera.position = eye;
+        look_at(
+            &mut camera,
+            glam::DVec3::new(
+                lake_centre.0 as f64 + 0.5,
+                f64::from(sea) - 1.0,
+                lake_centre.1 as f64 + 0.5,
+            ),
+        );
+        renderer.update_camera(&context.queue, &camera);
+        let sky = vx_world::weather::at(seed, pictured, x, z);
+        weather_over = Some(sky);
+        season_at = Some(pictured);
+
+        println!(
+            "{} capture: shore at {x},{z} (top {top}), lake centre {},{} — day {} of the year, \
+             sky {} at {:.2}, {snowed} columns snowed, {froze} frozen, {thawed} thawed, {melted} melted",
+            if options.thaw { "thaw" } else { "frost" },
+            lake_centre.0,
+            lake_centre.1,
+            vx_world::season::day_of_year(pictured) + 1,
+            sky.sky_word(),
+            sky.temperature,
         );
     }
 
@@ -6031,13 +6172,25 @@ impl App {
         for step in 0..ticks {
             let tick = active.journal.tick().saturating_sub(u64::from(ticks - 1 - step));
             let before = active.fires.len();
-            journal::burn_and_grow(
+            let frost = journal::burn_and_grow(
                 &mut active.fires,
                 &mut active.stands,
                 &mut active.world,
                 tick,
                 standing,
             );
+            // The frost's live half: water that thawed is woken so the
+            // automaton looks at it again, and the news is said once on the
+            // same beat the fire line uses.
+            for melted in &frost.melted_at {
+                journal::wake_water(&mut active.water, &mut active.world, *melted);
+            }
+            if tick.is_multiple_of(64 * 3) {
+                if let Some(line) = frost.line() {
+                    active.terminal.say(terminal::Kind::Note, line);
+                    active.greeting = Some((line.to_string(), Instant::now()));
+                }
+            }
             // A strike that lights something is the loudest thing in the
             // country, and everything that listens hears it.
             if active.fires.len() > before {
@@ -6069,9 +6222,13 @@ impl App {
                 seed ^ active.journal.tick().wrapping_mul(0x9e37_79b9_7f4a_7c15),
             );
             let pick = vx_world::seed::unit(hash);
+            // Two finalised draws: `unit` reads a hash's top bits, and a
+            // hash merely xored with a small constant kept every shower on
+            // the diagonal through the player.
             let (dx, dz) = (
                 ((pick * 2.0 - 1.0) * spread as f32) as i32,
-                ((vx_world::seed::unit(hash ^ 0x51) * 2.0 - 1.0) * spread as f32) as i32,
+                ((vx_world::seed::unit(vx_world::seed::finalise(hash ^ 0x51)) * 2.0 - 1.0)
+                    * spread as f32) as i32,
             );
             let (x, z) = (at.x + dx, at.z + dz);
             if let (Some(ground), Some(water)) = (
@@ -6597,7 +6754,11 @@ impl App {
                             ""
                         }
                     ),
-                    format!("SKY       {}", sky.state.label()),
+                    format!("SKY       {}", sky.sky_word()),
+                    format!(
+                        "AIR       {}",
+                        if sky.freezing() { "FREEZING" } else { "ABOVE FREEZING" }
+                    ),
                     format!(
                         "WIND      {} AT {:.0} M/S",
                         bearing,

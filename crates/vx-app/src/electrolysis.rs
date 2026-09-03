@@ -400,6 +400,23 @@ mod tests {
         }
     }
 
+    /// Ice is not water to the machine: a frozen lake beside an
+    /// electrolyser is `NO WATER IN REACH` until the thaw.
+    #[test]
+    fn a_frozen_shore_is_a_dry_one() {
+        let mut world = vx_world::World::new(1);
+        world.load_around(vx_core::ChunkPos::new(0, 0), 1);
+        let water = world.registry().id_of("engine:water").unwrap();
+        let ice = world.registry().id_of("engine:ice").unwrap();
+        let top = world.surface_y(0, 0).unwrap();
+        let machine = BlockPos::new(0, top + 3, 0);
+        let lake = BlockPos::new(1, top + 3, 0);
+        world.set_block(lake, water);
+        assert!(water_near(&world, machine));
+        world.set_block(lake, ice);
+        assert!(!water_near(&world, machine), "the electrolyser found water under the ice");
+    }
+
     #[test]
     fn electrodes_are_charged_up_front() {
         let mut pile = stocked(6);

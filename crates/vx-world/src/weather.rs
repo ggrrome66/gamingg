@@ -113,10 +113,39 @@ pub struct Conditions {
     pub state: State,
 }
 
+/// Below this the ground freezes and what falls is snow.
+///
+/// One threshold, in one place. The temperature is mostly the place's — a
+/// cove is warmer than a summit in any month — with the year leaning on it,
+/// so the high country in midwinter is well under this, the lowlands in
+/// summer are nowhere near it, and the shoulders of the year cross it on a
+/// cold front and come back. That is what makes a frost a *weather* rather
+/// than a calendar entry.
+pub const FREEZING: f32 = 0.30;
+
 impl Conditions {
     /// The wind's strength on its own.
     pub fn wind_speed(&self) -> f32 {
         (self.wind.0 * self.wind.0 + self.wind.1 * self.wind.1).sqrt()
+    }
+
+    /// Is the ground freezing? Still water ices over and snow stays.
+    pub fn freezing(&self) -> bool {
+        self.temperature < FREEZING
+    }
+
+    /// Is what is falling falling as snow? Rain, cold.
+    pub fn snowing(&self) -> bool {
+        self.freezing() && self.state.wet()
+    }
+
+    /// The sky word for a status line, with the cold in it.
+    pub fn sky_word(&self) -> &'static str {
+        if self.snowing() {
+            "SNOW"
+        } else {
+            self.state.label()
+        }
     }
 }
 
@@ -149,9 +178,12 @@ pub fn at(seed: u64, tick: u64, x: i32, z: i32) -> Conditions {
     let humidity = (signed_2d(seed ^ SALT_DAMP, u * 1.7, v * 1.7) * 0.5 + 0.5 + damp * SEASON_DAMP)
         .clamp(0.0, 1.0);
     // The place still decides most of it — a cove is warmer than a summit in
-    // any month — and the year leans on the answer.
-    let temperature = (signed_2d(seed ^ SALT_WARM, u * 0.6 - 3.0, v * 0.6 + 5.0) * 0.5
-        + 0.5
+    // any month — and the year leans on the answer. The place's own share
+    // stops short of the ends so the year's lean is what crosses the
+    // freezing line: no summit freezes at the height of the fire season, and
+    // no cove stays open through midwinter.
+    let temperature = (signed_2d(seed ^ SALT_WARM, u * 0.6 - 3.0, v * 0.6 + 5.0) * 0.4
+        + 0.55
         + warmth * SEASON_WARMTH)
         .clamp(0.0, 1.0);
 
@@ -486,5 +518,54 @@ mod tests {
                 "a whole season of one kind of sky: {states:?}"
             );
         }
+    }
+
+    /// The cold is a weather, not a calendar entry: nowhere sampled freezes
+    /// in the fire season, somewhere freezes in midwinter, and the country
+    /// as a whole is not frozen solid for a season — the lowlands thaw.
+    #[test]
+    fn the_cold_is_a_winter_thing_and_not_the_whole_of_winter() {
+        use crate::season::{DAY_TICKS, SEASON_DAYS, SEASON_TICKS};
+        let places = [(0, 0), (900, -400), (-2_100, 1_700), (5_000, 5_000), (-3_300, -2_200)];
+        let mut summer_froze = 0;
+        let mut winter_froze = 0;
+        let mut winter_thawed = 0;
+        let mut snowed = 0;
+        for day in 0..SEASON_DAYS {
+            for hour in 0..8u64 {
+                let summer = SEASON_TICKS + day * DAY_TICKS + hour * DAY_TICKS / 8;
+                let winter = 3 * SEASON_TICKS + day * DAY_TICKS + hour * DAY_TICKS / 8;
+                for (x, z) in places {
+                    if at(7, summer, x, z).freezing() {
+                        summer_froze += 1;
+                    }
+                    let cold = at(7, winter, x, z);
+                    if cold.freezing() {
+                        winter_froze += 1;
+                    } else {
+                        winter_thawed += 1;
+                    }
+                    if cold.snowing() {
+                        snowed += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(summer_froze, 0, "it froze {summer_froze} times in the fire season");
+        assert!(winter_froze > 0, "nowhere froze all winter");
+        assert!(winter_thawed > 0, "the whole country was frozen solid all winter");
+        assert!(snowed > 0, "it never once snowed");
+        // And the word follows the weather.
+        let flake = Conditions {
+            temperature: 0.1,
+            humidity: 0.8,
+            wind: (1.0, 0.0),
+            rain: 0.5,
+            state: State::Rain,
+        };
+        assert_eq!(flake.sky_word(), "SNOW");
+        assert_eq!(Conditions { temperature: 0.6, ..flake }.sky_word(), "RAIN");
+        assert!(!Conditions { state: State::Clear, rain: 0.0, ..flake }.snowing());
+        assert!(Conditions { state: State::Clear, rain: 0.0, ..flake }.freezing());
     }
 }

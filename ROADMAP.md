@@ -118,7 +118,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 40 | `4cdda7c` | The ballot box: a town's seats stop being permanent — it votes on its own market day, once a term, and the residents cast on the business you have put across their counters, so you can put your name in at the beacon console and be elected sheriff or mayor; a badge now belongs to the town that gave it rather than to the whole frontier, and a mayor cannot sign his own warrant, so paper on a town you run goes up the road to the next mayor along |
 | 41 | `4856472` | Seasons: the twenty-eight day year the roster already counted for birthdays now runs the sky and the woods — a week each of spring, summer, autumn and winter, one season to an election term. The leaves turn gold and go bare and come back, the sward goes to straw, the spruce barely notice and the sky goes with them; **summer is a fire season** where the ground stays tinder days after a shower and lightning actually bites, winter is sodden and nothing will light; and the woods **stop growing over the winter**, so a stand you burn in October is still black in February and only starts coming back in the spring |
 | 42 | `7beb30b` | The floating origin: the renderer draws relative to the chunk the camera stands in — the camera's corner and every chunk's corner are exact integers, subtracted in the vertex shader before anything reaches a float multiply — and the player's body, its physics, the camera and the aim ray move to `f64`, so the millimetre skin the collision sweep runs on means what it says everywhere. Proved the only way it can be: the same scene renders byte-identical sixteen hundred kilometres out, and the same journal walks the same walk at spawn and at three thousand |
-| 43 | _this_ | Founding a town, and taking one — the civic note's other two routes into office. Print a charter, stand on flat dry ground a lattice cell clear of anybody, and `FOUND IRON REACH`: the whole town is raised out of the ground by the same generator that draws every other one — plateau, tower, shed, clinic, bank, dwellings, lockboxes, the mini star, three settlers with the market already open — with you in both chairs and a founder's due that keeps you there through the quiet first terms. Or get a warrant, break the posse it sends, and `TAKE` at the console: both chairs are yours, the Compact hates it, every neighbouring mayor signs paper on you and the residents trust you nothing, so the town votes on you at its next poll and a town you took is a town you have to keep |
+| 43 | `2c2df23` | Founding a town, and taking one — the civic note's other two routes into office. Print a charter, stand on flat dry ground a lattice cell clear of anybody, and `FOUND IRON REACH`: the whole town is raised out of the ground by the same generator that draws every other one — plateau, tower, shed, clinic, bank, dwellings, lockboxes, the mini star, three settlers with the market already open — with you in both chairs and a founder's due that keeps you there through the quiet first terms. Or get a warrant, break the posse it sends, and `TAKE` at the console: both chairs are yours, the Compact hates it, every neighbouring mayor signs paper on you and the residents trust you nothing, so the town votes on you at its next poll and a town you took is a town you have to keep |
+| 44 | _this_ | Snow that settles, and ice — the half of a winter stage 41 deliberately left out, because it is the half that edits blocks. Four cold blocks: snowed grass, sand and sphagnum, each the bare block's twin at the same height, and ice, a solid translucent block. The cold is named in one place (`FREEZING`, a threshold on a temperature the place mostly decides and the year leans on), and a frost automaton shaped like the rain's source term — sixteen hashed columns within twenty-four blocks of the player every sixty-four ticks — snows open ground when it is snowing, freezes full still water at or below sea level when it is freezing, and gives both back exactly when it is not. It runs inside `Command::Advance` on both sides of the journal, so a winter replays to the same snow and the same ice. Everything else is an existing system reading a new block: you and the drones and the deputies walk across the lake, a pump on it lifts nothing, an electrolyser beside it finds no water, and fire finds no fuel |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2615,6 +2616,91 @@ who answer to you; abandoning or renaming a town.
 
 ---
 
+## Shipped — Stage 44: snow that settles, and ice
+
+**The other half of a winter.** Stage 41 shipped the year as readings and
+drew the line at the ground: `a_year_of_seasons_never_touches_the_ground`
+hashed a fortnight of seasons against an unread one and named *snow that
+settles* as the thing that would turn it red. Snow and ice are the half of a
+winter that *is* ground, and ground belongs to the journal — so they wanted a
+round of their own, with the ordinary oracle to satisfy rather than the
+inverted one.
+
+**Four cold blocks, same shape.** `engine:snowy_grass`, `engine:snowy_sand`
+and `engine:snowy_sphagnum` are each the bare block's twin: a white top, the
+bare block's side with a white band draped over it, the same hardness, the
+same height. A snow *layer* on top of the ground would have raised the floor
+a block every snowfall, because `collides` treats every solid block as a full
+cube on purpose; and snow depth in a mask would have been invisible to the
+hash, which reads names only. A snowed block is a name, and names are what
+the region files, the hash and the minimap already read. `engine:ice` is
+`uniform(ICE).translucent()` and solid: the mesher's roofs are opaque, so an
+opaque ice block would have darkened the lake bed under it.
+
+**The cold, named once.** `weather::FREEZING = 0.30` on a temperature the
+place mostly decides and the year leans on by `±0.22`. The place's own share
+runs `0.15..0.95` rather than `0..1` so the *year* is what crosses the line:
+no summit freezes at the height of the fire season and no cove stays open
+through midwinter. `Conditions::freezing()` is the ground's question and
+`snowing()` — freezing and wet — is the sky's; `sky_word()` says `SNOW` for a
+status line. The test walks a summer and a winter week over five places and
+wants zero frosts in the one, some in the other, and a country that is not
+frozen solid.
+
+**The frost automaton.** `frost::settle(world, seed, tick, standing)` is the
+rain's source term moved to the oracle's side and given a wider hand: every
+`EVERY = 64` ticks it reads the sky over the player once and touches
+`SAMPLES = 16` columns hashed off `(seed, tick, n)` within `REACH = 24`. The
+top of a column is its highest non-air block, and a tuft on it is looked
+through. Snowing and the top is bare grass, sand or sphagnum: swap for the
+twin. Freezing — wet or dry — and the top is full still water at or below
+sea level: ice. Not freezing: a snowed block goes back to the bare one it
+came from, and ice goes back to a full block of water. `Report` carries the
+counts and where the ice melted; replay drops it, the live side wakes the
+water there and says `SNOW IS SETTLING` / `THE LAKE HAS FROZEN` / `THE THAW`
+on the fire line's beat. `journal::burn_and_grow` gained the one call, so
+the replay's `Advance` loop and `Game::advance_weather` got it from the same
+place. No new save file, no new wire tag: the ground is the state.
+
+**Everything else was already true.** Ice is solid, so `collides`,
+`supported` and `flow::is_standable` say a body and a drone stand on it
+where they sank in water; `fluid::level_at` is zero for anything that is not
+water, so a pump on ice lifts nothing and `electrolysis::water_near` refuses;
+`fire::fuel` returns `None` for any name it does not know, so a burn in
+winter leaves ash on snow. Each of those is a test now, and none of them is
+a line of new code outside the test.
+
+**The oracle, both ways.** `fire_tests::a_winter_replays_to_the_same_snow_and_ice`
+finds the first snowing pass over the origin from the start of winter,
+journals an `Advance` to two hours past it, and wants the live and replayed
+hashes equal, different from the untouched country, and at least one snowed
+or frozen block within reach to say why. Stage 41's test is not deleted but
+*succeeded*: renamed `reading_the_year_never_touches_the_ground`, it still
+says that calling every function in `season` and `weather` for every day of
+the year moves nothing.
+
+**Two bugs on the way past.** The rain's second hash draw was `unit(hash ^
+0x51)`, and `unit` reads a hash's top 24 bits, so every shower since stage 38
+fell on the diagonal through the player. The frost's first draft had the
+same bug, caught by its own reach test — forty-nine columns whitened, and
+forty-nine is seven squared. Both draws are finalised now. And the same test
+found `load_around` loads a disc, not a square: the corners of a radius-two
+load are not there.
+
+**`--frost` and `--thaw`.** The fixture finds a shore near `--at` with the
+most lake within the frost's reach, walks the clock to the first snowing sky
+of the winter over it, and runs the automaton through a day's worth of
+freezing passes. Over the shore at `64,130`: 1,461 columns snowed, 924
+frozen, under a snowing sky at `0.30`. `--thaw` runs on until three quarters
+of what the frost took is given back — two days later, `CLEAR` at `0.39`,
+1,087 thawed and 701 melted — and the picture is the last of the snow on the
+sand with the ice breaking up into open water.
+
+**Deliberately not in 44:** snow depth or drifts; snow on roofs, logs and
+leaves; snow drawn falling; icicles; ice you can fall through; skating; snow
+that changes what a market wants; a shovel, or any way to clear a path other
+than breaking the block; frost outside the player's reach.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -2956,16 +3042,16 @@ B2 in 39, B3 in 40.
 
 What follows is the board's own work rather than anybody's note. Seasons
 shipped in 41; the floating origin in 42; the civic note's last two routes into
-office — founding a town, and taking one — in 43.
+office — founding a town, and taking one — in 43; the ground half of a winter
+— snow that settles, and ice — in 44.
 
 | Stage | What | Why here |
 |---|---|---|
-| 44 | Snow that settles, and ice | The only half of a winter stage 41 deliberately did not do, because it is the half that *edits blocks* — and that makes it a stage of its own, with the replay oracle to satisfy rather than the inverted one |
 | 45 | Entities in `f64` | Villagers, deputies and shots still carry `f32` positions, exact to a sixteenth of a block out to a thousand kilometres and a quarter of one at three thousand. Stage 42 drew the line at the things that travel; this moves it |
 
 ## The feature map
 
-The whole game at a glance, as of stage 43.
+The whole game at a glance, as of stage 44.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -3117,12 +3203,18 @@ same generator that draws every other one, journaled as ground; three settlers
 and a market on day one; both chairs by default with a founder's due to keep
 them; and the hostile route — break a town's posse and seize its chairs at the
 console, priced by the factions, the bounty sheet, the neighbours' warrants and
-the residents' torn-up trust, so the town votes on you next term); a Steam
-Deck dist build every round.
+the residents' torn-up trust, so the town votes on you next term); snow that
+settles and ice (four cold blocks the same shape as the bare ones; the cold
+named once as a threshold the place mostly decides and the year leans on; a
+frost automaton on the journal's side of the line that snows open ground,
+freezes still low water and gives both back, so a winter replays to the same
+snow; a lake you and the deputies walk across, a pump that lifts nothing and
+an electrolyser that finds no water until the thaw); a Steam Deck dist build
+every round.
 
-**Planned, in arc order:** seasons over the weather and succession clocks that
-already run; then the floating-origin rebase; then the two routes into office
-stage 40 left on the board — founding a town, and taking one.
+**Planned, in arc order:** entities in `f64`, moving the line stage 42 drew
+at the things that travel out to the villagers, deputies and shots that still
+carry `f32` positions.
 
 **Outstanding engineering:** journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the

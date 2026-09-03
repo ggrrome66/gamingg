@@ -1011,7 +1011,7 @@ pub fn burn_and_grow(
     world: &mut World,
     tick: u64,
     standing: glam::Vec3,
-) {
+) -> crate::frost::Report {
     let seed = world.seed();
     let at = BlockPos::new(
         standing.x.floor() as i32,
@@ -1019,6 +1019,10 @@ pub fn burn_and_grow(
         standing.z.floor() as i32,
     );
     let sky = vx_world::weather::at(seed, tick, at.x, at.z);
+
+    // The cold first: snow that settles and water that freezes, on the
+    // rain's cadence, around the player like the rain.
+    let frost = crate::frost::settle(world, seed, tick, at);
 
     // Lightning, and the one strike in fifty that lights anything.
     if let Some(hit) = crate::fire::strike(seed, tick, at, world, &sky) {
@@ -1042,6 +1046,7 @@ pub fn burn_and_grow(
         let sites = world.towns_near((at.x, at.z), 160);
         stands.advance(world, tick, &sites);
     }
+    frost
 }
 
 /// Lift a step's worth of water out of every running pump.
@@ -2385,6 +2390,60 @@ mod fire_tests {
         assert_eq!(first, second, "the firefight itself is not deterministic");
     }
 
+    /// **The frost is on the ordinary side of the oracle.** A journal that
+    /// stands at the origin through the first snow of a winter replays to
+    /// the same snowed ground and the same frozen water, from the tick and
+    /// the player's replayed column alone — and that ground differs from the
+    /// untouched country, so the equality is not vacuous. This is the test
+    /// stage 41's `reading_the_year_never_touches_the_ground` said would
+    /// exist the day snow settled.
+    #[test]
+    fn a_winter_replays_to_the_same_snow_and_ice() {
+        use vx_world::season::SEASON_TICKS;
+        let span = (
+            vx_core::BlockPos::new(-40, 40, -40),
+            vx_core::BlockPos::new(40, 200, 40),
+        );
+        let seed = world().seed();
+        // The first snowing pass over the origin from the start of winter,
+        // and two hours on from the first flakes.
+        let snow = (0..(SEASON_TICKS / crate::frost::EVERY))
+            .map(|n| 3 * SEASON_TICKS + n * crate::frost::EVERY)
+            .find(|&tick| vx_world::weather::at(seed, tick, 0, 0).snowing())
+            .expect("it never snows over the origin all winter");
+        let until = u32::try_from(snow + 64 * 60 * 2).unwrap();
+        let mut journal = CommandLog::default();
+        journal.record(Command::Advance { ticks: until });
+
+        let untouched = region_hash(&world(), span.0, span.1);
+
+        let mut live = world();
+        let mut rebuilt = Rebuilt::default();
+        apply(&Command::Advance { ticks: until }, &mut live, &EventBus::new(), &mut rebuilt);
+        let hash_live = region_hash(&live, span.0, span.1);
+
+        let mut fresh = world();
+        replay(&journal, &mut fresh, &EventBus::new());
+        let hash_replayed = region_hash(&fresh, span.0, span.1);
+
+        assert_eq!(hash_live, hash_replayed, "the snow diverged");
+        assert_ne!(hash_live, untouched, "a winter passed and nothing settled");
+        let cold = (span.0.x..=span.1.x)
+            .flat_map(|x| (span.0.z..=span.1.z).map(move |z| (x, z)))
+            .filter(|&(x, z)| {
+                let Some(surface) = fresh.surface_y(x, z) else {
+                    return false;
+                };
+                let top = fresh.block(vx_core::BlockPos::new(x, surface - 1, z));
+                fresh
+                    .registry()
+                    .get(top)
+                    .is_some_and(|def| def.name.starts_with("engine:snowy_") || def.name == "engine:ice")
+            })
+            .count();
+        assert!(cold > 0, "the hash moved but nothing near the origin is snow or ice");
+    }
+
     /// A pump switched on replays to the same water it lifted.
     #[test]
     fn a_pump_replays_to_the_same_lift() {
@@ -3308,14 +3367,17 @@ mod season_tests {
     /// over the top of it must hash the same country as one where nobody
     /// asked what month it was.
     ///
-    /// If anything seasonal ever reaches for a block — snow that settles, a
-    /// leaf that actually falls off the branch — this is the test that goes
-    /// red, and it should: that would be a change to the world, and the world
-    /// belongs to the journal.
+    /// Stage 44 put snow on the ground, and this test did not go red: the
+    /// snow is not a reading. It is an automaton on the journal's side of the
+    /// line, run from `Command::Advance` on both sides, and its own oracle is
+    /// [`fire_tests::a_winter_replays_to_the_same_snow_and_ice`]. What this
+    /// test still says is that *reading* the year — every function in
+    /// `season` and `weather`, called for every day of it — moves nothing.
     ///
     /// [`civic_tests::the_civic_layer_never_touches_the_ground`]: super::civic_tests
+    /// [`fire_tests::a_winter_replays_to_the_same_snow_and_ice`]: super::fire_tests
     #[test]
-    fn a_year_of_seasons_never_touches_the_ground() {
+    fn reading_the_year_never_touches_the_ground() {
         let patch = || {
             let mut world = World::new(2024);
             world.load_around(ChunkPos::new(0, 0), 4);

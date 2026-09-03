@@ -609,6 +609,25 @@ mod tests {
     use super::*;
     use vx_core::{BlockId, ChunkPos};
 
+    /// Ice is a full solid cube to the sweep, and water is nothing at all:
+    /// the same body that sinks through the one stands on the other.
+    #[test]
+    fn a_body_stands_on_ice_where_it_sank_in_water() {
+        let mut world = World::new(1);
+        world.load_around(ChunkPos::new(0, 0), 1);
+        let water = world.registry().id_of("engine:water").unwrap();
+        let ice = world.registry().id_of("engine:ice").unwrap();
+        let top = world.surface_y(0, 0).unwrap();
+        let lake = BlockPos::new(0, top + 4, 0);
+        world.set_block(lake, water);
+        let body = Aabb::standing_on(DVec3::new(0.5, f64::from(top + 5), 0.5), 0.6, 1.8);
+        assert!(!collides(&world, &body));
+        assert!(!supported(&world, &body), "the body stood on open water");
+        world.set_block(lake, ice);
+        assert!(!collides(&world, &body));
+        assert!(supported(&world, &body), "the body fell through the ice");
+    }
+
     /// A world with a solid floor at y=40 across the origin chunk, and nothing
     /// above it — predictable ground to test against.
     fn flat_world() -> World {

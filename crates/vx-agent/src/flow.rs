@@ -246,6 +246,20 @@ mod tests {
         assert!(!is_standable(&world, BlockPos::new(0, ground + 3, 0)));
     }
 
+    /// A frozen lake is ground to a drone, and an open one is not: the
+    /// flow field reads `is_solid`, and ice is the only solid water.
+    #[test]
+    fn a_frozen_lake_is_ground_and_an_open_one_is_not() {
+        let (mut world, ground) = flat_world(1, 60);
+        let water = world.registry().id_of("engine:water").unwrap();
+        let ice = world.registry().id_of("engine:ice").unwrap();
+        let bed = BlockPos::new(0, ground - 1, 0);
+        world.set_block(bed, water);
+        assert!(!is_standable(&world, BlockPos::new(0, ground, 0)));
+        world.set_block(bed, ice);
+        assert!(is_standable(&world, BlockPos::new(0, ground, 0)));
+    }
+
     #[test]
     fn unloaded_ground_is_not_standable() {
         // Unloaded chunks read as air. Treating that as walkable would send
